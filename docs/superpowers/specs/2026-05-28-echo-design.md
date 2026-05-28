@@ -16,11 +16,26 @@ Echo 是一个跨云盘资源池服务,把多家网盘(115/189pc/139 起步)的�
 |---|---|---|---|
 | RoseHub | 闭源 Docker | 115 单云 | STRM 指向真实云盘文件 |
 | NextEmby | 闭源 Python | 115 单云(p115client) | 用户账号秒传转存 |
-| **Echo** | **开源 Go (MIT)** | **多云: 115 + 189pc + 139** | **`.echo` 占位 + 按需秒传恢复** |
+| **Echo** | **开源 Go (AGPLv3)** | **多云: 115 + 189pc + 139** | **`.echo` 占位 + 按需秒传恢复** |
 
-Echo 不试图替代 OpenList,而是站在 OpenList 之上、之外、之旁:
-- OpenList 是文件系统挂载工具。
-- Echo 是资源池服务,关注"哪些 hash 存在哪些云上、按需把它们物化"。
+Echo 给现有生态加上"第三个选择": 完全开源, 多云原生, 单二进制。
+
+### 生态位与依赖关系
+
+```
+Echo (本项目, AGPL) ── 资源池业务层
+  │ Go module 依赖
+  v
+openlist-guangyapan-src (AGPL, xmm2022) ── 多云 CAS 扩展 + GuangYaPan driver
+  ↑ 派生
+OpenList-CAS (AGPL, GitYuA) ── 189pc CAS 模式起源
+  ↑ 派生
+OpenList (AGPL, OpenListTeam) ── 通用网盘挂载框架
+```
+
+Echo 不重写 driver。Echo 作为 Go module 直接 import `openlist-guangyapan-src` 的 `drivers/*` 和 `internal/casmeta`,复用已有的 115/139/189pc CAS 实现以及 GuangYaPan driver。
+
+Echo 自身实现的是上层业务: ingest pipeline、跨云资源池、job 调度、restore API、manifest API、web 后台。
 
 ### v0.1 范围
 
@@ -58,15 +73,13 @@ Echo 不试图替代 OpenList,而是站在 OpenList 之上、之外、之旁:
 |   HTTP API + Web UI                           |
 |   Job runner (goroutine pool)                 |
 |   SQLite at /data/echo.db                     |
-|   .echo output: 本地 fs / WebDAV / 等         |
+|   .echo output: 本地 fs                       |
 |                                                |
 |   +-------------------------------------+     |
-|   | driverpool (own thin driver impls)  |     |
-|   |   _115:  SheltonZhu/115driver (MIT) |     |
-|   |          + 已知 hash 秒传增强       |     |
-|   |   _189pc: gowsp/cloud189 (Apache)   |     |
-|   |          + 已知 hash 秒传补丁       |     |
-|   |   _139:  clean-room 自研 (MIT)      |     |
+|   | driverpool (复用 openlist-guangyapan |     |
+|   |   通过 Go module import)             |     |
+|   |   _115 / _139 / _189pc / guangyapan |     |
+|   |   包含已有 CAS 实现                  |     |
 |   +-------------------------------------+     |
 +-----------------------------------------------+
 ```
@@ -99,18 +112,14 @@ echo/
 │   │   ├── accounts.go
 │   │   └── libraries.go
 │   ├── driverpool/
-│   │   ├── driver.go                   统一 Driver interface
+│   │   ├── driver.go                   统一 facade interface
 │   │   ├── pool.go                     account_id → Driver 缓存
-│   │   ├── factory.go                  provider → Driver 构造
+│   │   ├── factory.go                  provider → Driver 构造 (走 openlist-guangyapan)
 │   │   ├── credentials.go              凭据加密存取
-│   │   ├── _115/                       115 实现 (复用 SheltonZhu)
-│   │   ├── _139/                       139 自研
-│   │   └── _189pc/                     189pc 实现 (复用 gowsp)
-│   ├── echofile/
-│   │   ├── payload.go                  .echo 编解码 (从 casmeta 移植, MIT)
-│   │   ├── writer.go                   写 .echo
-│   │   ├── reader.go                   读 .echo
-│   │   └── output.go                   输出到 local fs / WebDAV / S3
+│   │   └── adapter.go                  openlist driver 在 Echo 进程内的生命周期适配
+│   ├── echofile/                       .echo 文件 IO
+│   │   └── output.go                   写到 local fs
+│   │   (Encode/Decode 直接复用 openlist-guangyapan-src/pkg/casmeta)
 │   ├── ingest/
 │   │   ├── source.go                   Source interface
 │   │   ├── share_115.go
@@ -178,11 +187,6 @@ type SourceItem struct {
     Native  any                  // 原生 ref (pickcode / shareCode / etc.)
 }
 
-// 已知 hash 秒传补丁层(只在底座 SDK 不原生支持时启用)
-type RapidPatcher interface {
-    RapidUploadWithKnownHashes(ctx context.Context, dst Folder, h FileHashes, name string, size int64) (*RemoteFile, error)
-}
-
 // 输出 .echo 文件
 type Output interface {
     Mkdir(ctx context.Context, path string) error
@@ -192,28 +196,44 @@ type Output interface {
 // v0.1 提供 LocalOutput 实现; WebDAV / S3 实现挂 v0.2+
 ```
 
-### 各 provider 实现策略
+### Driver 实现策略 (Go module 复用)
 
-| Provider | 底座 SDK | License | 需要自己写的部分 |
-|---|---|---|---|
-| 115 | `github.com/SheltonZhu/115driver` | MIT | RapidUpload 增强(已知 sha1+preid 直接秒传); ParseShareLink |
-| 189pc | `github.com/gowsp/cloud189` | Apache 2.0 | RapidUpload manual 路径(gowsp 已失效,自写 initMultiUpload + commitMultiUploadFile,基于 189pc 公开 API 协议); ParseShareLink |
-| 139 | **clean-room 自研** | MIT (新写) | 全部: 登录(扫码/账号密码) + 签名 HTTP 包装 + List + Share 解析 + RapidUpload + Link + Delete + Mkdir |
+`go.mod`:
 
-#### 139 clean-room 边界
+```
+require (
+    github.com/xmm2022/openlist-guangyapan-src v0.x.y
+)
+```
 
-可参考:
-- 中国移动云盘官方 API 文档 / SDK 文档(若公开)
-- 抓包结果(协议层面知识不受 license 保护)
-- gowsp/SheltonZhu 等其他云盘 SDK 的整体设计模式
+工作流:
 
-**不可参考**:
-- `openlist-guangyapan-src` 仓库中 `drivers/139/` 的具体代码实现(那是 AGPL)
-- 任何 AGPL fork 中 139 driver 的具体代码
+1. openlist-guangyapan-src 仓库继续维护 driver + CAS 代码 (AGPL)
+2. 重大节点打 git tag (v0.1.0 / v0.1.1 / ...)
+3. Echo 用 `go get github.com/xmm2022/openlist-guangyapan-src@v0.1.x` 升版
+4. 本地协同开发可在 Echo 的 `go.mod` 加 `replace github.com/xmm2022/openlist-guangyapan-src => ../openlist-guangyapan-src`
 
-策略:**人格隔离**——写 139 driver 的开发会话不阅读 openlist-guangyapan 139 代码。
+`driverpool/factory.go` 按 provider 构造 driver:
 
-预估工作量: 500-800 行 Go 代码,1-2 周。
+- 115 → `drivers/115` 或 `drivers/115_open` (按账号凭据类型选)
+- 139 → `drivers/139` (`personal_new` 模式,含 SHA256 CAS)
+- 189pc → `drivers/189pc` (家庭传输 + CAS 套件,源自 OpenList-CAS,你 fork 已扩展)
+- guangyapan → `drivers/guangyapan` (光鸭网盘)
+
+`driverpool/adapter.go` 处理 openlist driver 在 Echo 进程内的生命周期:
+
+- 提供轻量 `model.Storage` 实例承载凭据 + 配置
+- 旁路 OpenList 自身的 storage manager (`internal/op`)
+- 接管 token 刷新 (Echo 用 lazy refresh; OpenList 用定时器)
+- 预估代码 200-300 行,一次性写完
+
+### internal/casmeta 的可见性
+
+`internal/casmeta` 在 Go module 规则下默认不能被外部 import。需要在 openlist-guangyapan-src 做一次小重构:
+
+把 `internal/casmeta/casmeta.go` 提到 `pkg/casmeta/casmeta.go`。一次性操作。
+
+Echo 通过 `github.com/xmm2022/openlist-guangyapan-src/pkg/casmeta` 直接复用 Payload 结构、Encode/Decode、HasherWriter,无需移植。
 
 ## 3. 数据模型
 
@@ -299,25 +319,11 @@ CREATE INDEX idx_jobs_status ON jobs(status, created_at);
 
 ### `.echo` 文件格式
 
-JSON,base64 编码,扩展名 `.echo`:
+`.echo` 直接复用 openlist-guangyapan-src 既有的 `casmeta` 实现 (`pkg/casmeta`,需要做一次 internal → pkg 移动)。新文件扩展名为 `.echo`,但内容格式与 OpenList-CAS / openlist-guangyapan-src 输出的 `.cas` 完全相同 (base64 JSON,字段: name / size / md5 / sliceMd5 / sha256 / create_time)。
 
-```json
-{
-  "v": 1,
-  "name": "Avatar.2009.UHD.mkv",
-  "size": 53687091200,
-  "hashes": {
-    "sha1": "ABC123...",
-    "preid": "DEF456...",
-    "md5": "...",
-    "sliceMd5": "...",
-    "sha256": "..."
-  },
-  "create_time": "1748419200"
-}
-```
+向后兼容: Echo 同时识别 `.echo` 和 `.cas` 扩展名。让你 fork 里既有的 `.cas` 库可以直接被 Echo 消费,不需要批量改后缀。新生成的占位用 `.echo` 扩展。
 
-格式基于现有 `casmeta.Payload` 概念(原 openlist-guangyapan-src 中由项目维护者本人作者,可重新许可为 MIT),引入 `v` 版本字段 + `hashes` 嵌套对象。向前兼容旧 `.cas` 通过转换工具 `echo migrate-cas`(非 v0.1 范围,需要时再做)。
+未来如需扩展格式(加 sha1 / preid 等字段),在 `pkg/casmeta` 主仓库统一推进,Echo 升 module 版本即生效。
 
 ### v0.1 不做的: file_id merge
 
@@ -534,10 +540,10 @@ log:
 | `store/*` | DDL migration、CRUD、UNIQUE 触发、级联删除、并发安全 |
 | `ingest/source_*` | fixture HTML / JSON 喂分享解析,验证 List 输出 |
 | `ingest/pipeline` | mock driver + mock store,验证 hash 命中/未命中/秒传失败 各分支 |
-| `echofile/{writer,reader}` | encode/decode round-trip,v1 格式向前兼容 |
+| `echofile/{writer,reader}` | encode/decode round-trip,与 OpenList CAS 输出互通验证 |
 | `restore/resolver` | mock driver,验证 copy fallback / 全死 |
-| `driverpool/_115` | fixture 响应验证 wrapper 调用对 SheltonZhu API |
-| `driverpool/_139` | clean-room 实现的协议测试(用本地 HTTP mock) |
+| `driverpool/adapter` | mock openlist driver 接口,验证生命周期适配 + token 刷新触发 |
+| `driverpool/factory` | provider name → 正确的 openlist driver 类型构造 |
 
 ### 集成测试(build tag `integration`,CI 可选)
 
@@ -632,32 +638,42 @@ location /echo/ {
 
 ## 10. License
 
-MIT。详见 `LICENSE`。
+AGPLv3。详见 `LICENSE`。
 
-### License 干净度保证
+依据 AGPL: 通过网络提供 Echo 服务即等同于"分发",必须向用户提供完整源码 (或派生版本源码)。商业服务、自部署均受此约束。
 
-| 来源 | License | 兼容 MIT |
+### 选择 AGPL 的理由
+
+1. **生态对齐**: OpenList、OpenList-CAS、openlist-guangyapan-src 全部 AGPL。Echo 作为 Go module 依赖 openlist-guangyapan-src,自动受 AGPL 传染——选择主动认领 AGPL 比起隐式继承更清晰。
+2. **保证"第三选择"永久免费**: copyleft 让任何 fork / SaaS 衍生品都必须开源,防止后续被任意闭源化。
+3. **明确边界**: 跟闭源的 NextEmby / RoseHub 形成 license 层面的对比。
+
+### License 链条 (向上游)
+
+| 项目 | License | 角色 |
 |---|---|---|
-| 自写代码 | MIT | ✓ |
-| `SheltonZhu/115driver` | MIT | ✓ |
-| `gowsp/cloud189` | Apache 2.0 | ✓ |
-| 139 clean-room 实现 | MIT(全新写) | ✓ |
-| `echofile.Payload`(概念源自 openlist-guangyapan-src 的 `casmeta`,由项目维护者本人原创) | MIT(本人作为版权人重新许可) | ✓ |
+| Echo (本项目) | AGPLv3 | 资源池业务层 |
+| openlist-guangyapan-src (xmm2022) | AGPLv3 | 多云 CAS + GuangYaPan driver |
+| OpenList-CAS (GitYuA) | AGPLv3 | 189pc CAS 模式起源 |
+| OpenList (OpenListTeam) | AGPLv3 | 通用网盘挂载框架 |
 
-**严禁**:
-- 引入任何 GPL / AGPL 代码
-- 从 `openlist-guangyapan-src`(AGPL)直接 import 任何包
-- 把 `openlist-guangyapan-src` 中 139 driver 具体实现复制到 Echo(协议知识可参考,具体代码不可复制)
+致谢见 `README.md`。AGPL 第 5 节要求保留版权声明,Echo 在以下位置承担:
 
-### 未来闭源选项
+- `LICENSE` 文件 (AGPLv3 全文)
+- `README.md` 致谢章节
+- `pkg/casmeta` 复用代码保留原作者署名 (你本人)
+- 任何上游 fork 关系在源码注释中标明
 
-进程边界保证 license 独立性。若 v1.0 后选择闭源:
+### 第三方 Go module 间接 license
 
-1. 自写代码版权归项目所有
-2. SheltonZhu MIT 和 gowsp Apache 都允许闭源分发
-3. 但必须保留 MIT/Apache 版权声明在分发物中
-4. 外部贡献者通过 CLA(GitHub `cla-assistant`)签署版权归属
-5. v0.1 公开发布版本永远保留 MIT,不影响 v1.0+ 闭源
+通过 openlist-guangyapan-src 间接引入的 SDK:
+
+- `SheltonZhu/115driver` — MIT (兼容 AGPL)
+- `OpenListTeam/115-sdk-go` — Apache 2.0 (兼容 AGPL)
+- `go-resty/resty/v2` — MIT
+- 其他通用 Go 工具库 — 多为 MIT/Apache
+
+所有间接依赖与 AGPL 兼容。
 
 ## 11. v0.1 → v0.2 → v0.3 路线
 
@@ -679,9 +695,9 @@ v0.3   ── NextFind-like 自动订阅 ────── TG / 海报站爬虫
 ## 12. 已确认的设计决策汇总
 
 - 项目名: **Echo**
-- 文件格式: **`.echo`**
+- 文件格式: **`.echo`** (同时识别旧 `.cas`,内容格式完全相同)
 - 语言: **Go 1.22+**
-- License: **MIT**(未来闭源选项保留)
+- License: **AGPLv3** (跟 OpenList / OpenList-CAS / openlist-guangyapan-src 生态对齐)
 - 部署: 单 Go 二进制,docker-compose 单服务
 - 数据库: SQLite(v0.1) → PostgreSQL(后期可选)
 - HTTP 框架: `chi`(轻量、标准库友好)
@@ -694,7 +710,9 @@ v0.3   ── NextFind-like 自动订阅 ────── TG / 海报站爬虫
 - 多账号秒传: v0.1 单账号/job; 多账号 = 多 job(UI 一键创建 N 个)
 - 跨 hash merge: v0.1 不主动 merge,记 conflict 警告
 - 跨云副本选择: prefer 偏好 + last_seen DESC
-- driver 实现: 115 用 SheltonZhu, 189pc 用 gowsp + 自写 manual rapid, 139 clean-room 自研
+- **driver 实现**: Go module import `github.com/xmm2022/openlist-guangyapan-src`,复用 115 / 139 / 189pc / guangyapan driver + casmeta
+- **`pkg/casmeta` 重构**: openlist-guangyapan-src 把 `internal/casmeta` 提到 `pkg/casmeta` (一次性小重构,让外部包可 import)
+- **致谢**: README 标明 OpenList → OpenList-CAS → openlist-guangyapan-src → Echo 的派生关系
 
 ## 13. v0.1 不解决的问题(留给后续版本)
 
