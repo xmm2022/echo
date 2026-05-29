@@ -1,0 +1,27 @@
+services:
+  sidecar:
+    image: ghcr.io/xmm2022/openlist-guangyapan:feat-cas-tools-fixed-by-release
+    ports:
+      - "5244:5244"
+    environment:
+      OPENLIST_ADMIN_TOKEN: ${ECHO_SIDECAR_TOKEN}
+    volumes:
+      - ./sidecar-data:/opt/openlist/data
+    restart: unless-stopped
+
+  echo:
+    image: echo:dev
+    depends_on:
+      - sidecar
+    ports:
+      - "8080:8080"
+    environment:
+      ECHO_ADMIN_TOKEN: ${ECHO_ADMIN_TOKEN}
+      ECHO_SIDECAR_TOKEN: ${ECHO_SIDECAR_TOKEN}
+    volumes:
+      - ./config.example.yaml:/etc/echo/config.yaml:ro
+      - ./data:/data
+      - ./output:/data/output
+      - ./ingest:/data/ingest
+      - ./secrets:/data/secrets:ro
+    restart: unless-stopped
