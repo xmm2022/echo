@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -27,6 +28,7 @@ import (
 //	ECHO_TEST_115_STORAGE_MOUNT=/115-main \
 //	ECHO_TEST_115_SHARE_URL='https://115.com/s/xxxx?password=yyyy' \
 //	ECHO_TEST_115_COOKIE_FILE=/secure/115-cookie.txt \
+//	ECHO_TEST_115_LIMIT=1 \
 //	go test -tags=integration_real -run TestReal115 -timeout 30m ./integration/...
 func TestReal115ProducerIngestStream(t *testing.T) {
 	sidecarURL := os.Getenv("ECHO_TEST_SIDECAR_URL")
@@ -72,6 +74,9 @@ func TestReal115ProducerIngestStream(t *testing.T) {
 	}
 	if rc := os.Getenv("ECHO_TEST_115_RECEIVE_CODE"); rc != "" {
 		args["receive_code"] = rc
+	}
+	if limit := parsePositiveIntEnv(t, "ECHO_TEST_115_LIMIT"); limit > 0 {
+		args["limit"] = limit
 	}
 
 	var out struct {
@@ -145,4 +150,17 @@ func parseDurationEnv(t *testing.T, key string, def time.Duration) time.Duration
 		t.Fatalf("%s: invalid duration %q: %v", key, raw, err)
 	}
 	return d
+}
+
+func parsePositiveIntEnv(t *testing.T, key string) int {
+	t.Helper()
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		t.Fatalf("%s: invalid positive integer %q", key, raw)
+	}
+	return n
 }
