@@ -176,6 +176,51 @@ func (q *Queries) ListJobIDsByStatus(ctx context.Context, arg ListJobIDsByStatus
 	return items, nil
 }
 
+const listJobs = `-- name: ListJobs :many
+SELECT id, kind, status, payload, progress, error, owner_id, created_at, started_at, finished_at FROM jobs
+ORDER BY created_at DESC, id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListJobsParams struct {
+	Limit  int64 `json:"limit"`
+	Offset int64 `json:"offset"`
+}
+
+func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, error) {
+	rows, err := q.db.QueryContext(ctx, listJobs, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Status,
+			&i.Payload,
+			&i.Progress,
+			&i.Error,
+			&i.OwnerID,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listJobsByStatus = `-- name: ListJobsByStatus :many
 SELECT id, kind, status, payload, progress, error, owner_id, created_at, started_at, finished_at FROM jobs
 WHERE status = ?

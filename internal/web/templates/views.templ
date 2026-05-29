@@ -1,0 +1,95 @@
+package templates
+
+import (
+	"strconv"
+
+	"github.com/xmm2022/echo/internal/store/queries"
+)
+
+// Index is the public dashboard shell (spec §12: templ + htmx). It carries no
+// data itself — an admin pastes the bearer token into the box, app.js stores it
+// and attaches it to the htmx panel requests (/ui/jobs, /ui/conflicts), which are
+// behind the auth middleware.
+templ Index() {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>Echo Admin</title>
+			<script src="/static/htmx.min.js"></script>
+			<script src="/static/app.js"></script>
+		</head>
+		<body>
+			<h1>Echo Admin</h1>
+			<p>v0.1 — 跨云盘资源池控制面。管理员仪表盘：查看 Job 与 Hash 冲突。</p>
+			<p>
+				<label for="admin-token">Admin token</label>
+				<input id="admin-token" type="password" autocomplete="off" placeholder="paste ADMIN_TOKEN"/>
+			</p>
+			<section>
+				<h2>Jobs</h2>
+				<div data-reload="true" hx-get="/ui/jobs" hx-trigger="load, reload" hx-target="this">Loading…</div>
+			</section>
+			<section>
+				<h2>Hash conflicts</h2>
+				<div data-reload="true" hx-get="/ui/conflicts" hx-trigger="load, reload" hx-target="this">Loading…</div>
+			</section>
+		</body>
+	</html>
+}
+
+// JobsTable renders the recent jobs fragment swapped into the dashboard.
+templ JobsTable(jobs []queries.Job) {
+	if len(jobs) == 0 {
+		<p>No jobs yet.</p>
+	} else {
+		<table>
+			<thead>
+				<tr><th>ID</th><th>Kind</th><th>Status</th><th>Created</th></tr>
+			</thead>
+			<tbody>
+				for _, j := range jobs {
+					<tr>
+						<td>{ strconv.FormatInt(j.ID, 10) }</td>
+						<td>{ j.Kind }</td>
+						<td>{ j.Status }</td>
+						<td>{ strconv.FormatInt(j.CreatedAt, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// ConflictsTable renders the open hash-conflict fragment. The Dismiss button POSTs
+// to the API; hx-swap="delete" removes the row on a 2xx without rendering the JSON
+// response body.
+templ ConflictsTable(conflicts []queries.HashConflict) {
+	if len(conflicts) == 0 {
+		<p>No open conflicts.</p>
+	} else {
+		<table>
+			<thead>
+				<tr><th>ID</th><th>Reason</th><th>Blob A</th><th>Blob B</th><th></th></tr>
+			</thead>
+			<tbody>
+				for _, c := range conflicts {
+					<tr>
+						<td>{ strconv.FormatInt(c.ID, 10) }</td>
+						<td>{ c.Reason }</td>
+						<td>{ strconv.FormatInt(c.BlobIDA, 10) }</td>
+						<td>{ strconv.FormatInt(c.BlobIDB, 10) }</td>
+						<td>
+							<button
+								hx-post={ "/api/conflicts/" + strconv.FormatInt(c.ID, 10) + "/dismiss" }
+								hx-target="closest tr"
+								hx-swap="delete"
+							>Dismiss</button>
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}

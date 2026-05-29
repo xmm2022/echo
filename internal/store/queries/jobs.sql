@@ -20,6 +20,11 @@ WHERE status = ?
 ORDER BY created_at, id
 LIMIT ?;
 
+-- name: ListJobs :many
+SELECT * FROM jobs
+ORDER BY created_at DESC, id DESC
+LIMIT ? OFFSET ?;
+
 -- name: ListJobIDsByStatus :many
 SELECT id FROM jobs
 WHERE status = ?

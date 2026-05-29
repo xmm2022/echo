@@ -6,6 +6,10 @@ INSERT INTO hash_conflicts (
 )
 RETURNING *;
 
+-- name: GetHashConflict :one
+SELECT * FROM hash_conflicts
+WHERE id = ?;
+
 -- name: ListOpenHashConflicts :many
 SELECT * FROM hash_conflicts
 WHERE status = 'open'

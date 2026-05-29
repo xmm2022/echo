@@ -32,6 +32,12 @@ OpenList (AGPL, OpenListTeam) — 通用网盘挂载框架
 
 Echo 不重写 driver，也不通过 Go module import sidecar；而是站在 sidecar (`openlist-guangyapan-src`) 的 OpenList HTTP API 之上做业务编排（ingest / restore / 资源池 / Job），sidecar 进程边界即接口契约。
 
+## HTTP API 与管理后台
+
+`echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。v0.1 用单一静态 admin token（`auth.admin_token`）做 Bearer 鉴权，所有 API 与管理后台数据接口都在鉴权之后；`/healthz`、`/readyz`、`/metrics` 与数据无关的仪表盘外壳 `/` 公开。
+
+最小管理后台（templ + htmx）在 `/`，只读地看 Job 与 hash 冲突。前端依赖 **vendored** 的 htmx（`internal/web/static/htmx.min.js`，不走 CDN，版本与来源见 [`internal/web/static/README.md`](internal/web/static/README.md)）。浏览器打开 `/` 后在页面里粘贴 admin token，脚本会把它作为 Bearer 头附加到后续 htmx 请求。
+
 ## 致谢
 
 - [OpenList](https://github.com/OpenListTeam/OpenList) — 提供多云盘抽象与驱动框架

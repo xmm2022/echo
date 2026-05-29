@@ -223,6 +223,73 @@ func isAllowedProducerTool(tool string) bool {
 	return false
 }
 
+// ValidateProducerRequest runs the producer pre-flight checks an HTTP handler can
+// make synchronously before enqueuing a job: the tool is allowed and configured,
+// every arg is allowlisted and known, arg types and the share-source combination
+// are valid, and secret args use the ref: form. It performs NO filesystem access —
+// workdir creation and secret-file resolution happen later in RunProducer, so a
+// ref: to a not-yet-present file still passes here.
+func ValidateProducerRequest(tool string, args map[string]any, cfg ProducerConfig) error {
+	if !isAllowedProducerTool(tool) {
+		return fmt.Errorf("%w: tool %q", ErrProducerUnauthorized, tool)
+	}
+	toolCfg, ok := cfg.Tools[tool]
+	if !ok {
+		return fmt.Errorf("%w: tool %q is not configured", ErrProducerUnauthorized, tool)
+	}
+	if toolCfg.Binary == "" {
+		return fmt.Errorf("%w: tool %q binary is empty", ErrProducerUnauthorized, tool)
+	}
+	allowlist := makeAllowlist(toolCfg.APIArgsAllowlist)
+	for key := range args {
+		if !allowlist[key] || !producerArgSpecsByKey[key].Known {
+			return fmt.Errorf("%w: arg %q", ErrProducerUnauthorized, key)
+		}
+	}
+	if err := validateProducerArgTypes(args); err != nil {
+		return err
+	}
+	if err := validateProducerArgCombination(args); err != nil {
+		return err
+	}
+	return validateProducerRefForms(args)
+}
+
+// validateProducerRefForms checks the ref: shape of every secret arg without
+// touching the filesystem.
+func validateProducerRefForms(args map[string]any) error {
+	for _, key := range []string{"cookie_file", "recycle_password_file"} {
+		if !hasNonEmptyArg(args, key) {
+			continue
+		}
+		ref, err := stringArg(args, key)
+		if err != nil {
+			return err
+		}
+		if _, err := producerRefRelPath(ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// producerRefRelPath validates the ref: form (prefix present, non-empty, relative)
+// and returns the relative path. It does not touch the filesystem.
+func producerRefRelPath(ref string) (string, error) {
+	const prefix = "ref:"
+	if !strings.HasPrefix(ref, prefix) {
+		return "", fmt.Errorf("%w: secret args must use ref:", ErrProducerUnauthorized)
+	}
+	rel := strings.TrimPrefix(ref, prefix)
+	if rel == "" {
+		return "", fmt.Errorf("%w: empty secret ref", ErrProducerUnauthorized)
+	}
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%w: secret ref must be relative", ErrProducerUnauthorized)
+	}
+	return rel, nil
+}
+
 type producerArgSpec struct {
 	Known bool
 	Flag  string
@@ -334,16 +401,9 @@ func resolveProducerRefs(args map[string]any, secretsRoot string) (map[string]an
 }
 
 func resolveProducerRef(secretsRoot, ref string) (string, error) {
-	const prefix = "ref:"
-	if !strings.HasPrefix(ref, prefix) {
-		return "", fmt.Errorf("%w: secret args must use ref:", ErrProducerUnauthorized)
-	}
-	rel := strings.TrimPrefix(ref, prefix)
-	if rel == "" {
-		return "", fmt.Errorf("%w: empty secret ref", ErrProducerUnauthorized)
-	}
-	if filepath.IsAbs(rel) {
-		return "", fmt.Errorf("%w: secret ref must be relative", ErrProducerUnauthorized)
+	rel, err := producerRefRelPath(ref)
+	if err != nil {
+		return "", err
 	}
 	final, err := pathsafe.ResolveExistingUnderRoot(secretsRoot, rel)
 	if err != nil {
@@ -506,6 +566,33 @@ func intArgValue(key string, value any) (string, error) {
 	default:
 		return "", fmt.Errorf("%w: arg %q must be a non-negative integer", ErrProducerUnauthorized, key)
 	}
+}
+
+// RedactArgs returns a copy of a producer args map with credential-bearing values
+// masked, for safe display in API responses and logs (spec §6/§8: secrets must
+// not appear). It mirrors RedactProducerArgv's policy: share_url query secrets and
+// receive_code are masked, and the cookie_file / recycle_password_file references
+// are replaced with a placeholder. It does not mutate the input.
+func RedactArgs(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = v
+	}
+	if s, ok := out["share_url"].(string); ok {
+		out["share_url"] = redactProducerURLArg(s)
+	}
+	if _, ok := out["receive_code"]; ok {
+		out["receive_code"] = "<redacted>"
+	}
+	for _, k := range []string{"cookie_file", "recycle_password_file"} {
+		if _, ok := out[k]; ok {
+			out[k] = "<redacted-secret-path>"
+		}
+	}
+	return out
 }
 
 func RedactProducerArgv(argv []string) []string {

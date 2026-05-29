@@ -60,6 +60,144 @@ func (q *Queries) GetLibraryEntryByID(ctx context.Context, arg GetLibraryEntryBy
 	return i, err
 }
 
+const listLibraryEntries = `-- name: ListLibraryEntries :many
+SELECT
+  le.id, le.library_id, le.rel_path, le.name, le.blob_id, le.echo_written, le.created_at, le.updated_at,
+  COUNT(fc.id) AS live_copies
+FROM library_entries le
+LEFT JOIN file_copies fc
+  ON fc.blob_id = le.blob_id AND fc.status = 'live'
+WHERE le.library_id = ?
+GROUP BY le.id
+ORDER BY le.rel_path
+LIMIT ?
+`
+
+type ListLibraryEntriesParams struct {
+	LibraryID int64 `json:"library_id"`
+	Limit     int64 `json:"limit"`
+}
+
+type ListLibraryEntriesRow struct {
+	ID          int64  `json:"id"`
+	LibraryID   int64  `json:"library_id"`
+	RelPath     string `json:"rel_path"`
+	Name        string `json:"name"`
+	BlobID      int64  `json:"blob_id"`
+	EchoWritten int64  `json:"echo_written"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+	LiveCopies  int64  `json:"live_copies"`
+}
+
+func (q *Queries) ListLibraryEntries(ctx context.Context, arg ListLibraryEntriesParams) ([]ListLibraryEntriesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLibraryEntries, arg.LibraryID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLibraryEntriesRow
+	for rows.Next() {
+		var i ListLibraryEntriesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.LibraryID,
+			&i.RelPath,
+			&i.Name,
+			&i.BlobID,
+			&i.EchoWritten,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LiveCopies,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLibraryEntriesByLibraryPrefix = `-- name: ListLibraryEntriesByLibraryPrefix :many
+SELECT
+  le.id, le.library_id, le.rel_path, le.name, le.blob_id, le.echo_written, le.created_at, le.updated_at,
+  COUNT(fc.id) AS live_copies
+FROM library_entries le
+LEFT JOIN file_copies fc
+  ON fc.blob_id = le.blob_id AND fc.status = 'live'
+WHERE le.library_id = ?1
+  AND le.rel_path >= ?2
+  AND le.rel_path < ?3
+GROUP BY le.id
+ORDER BY le.rel_path
+LIMIT ?4
+`
+
+type ListLibraryEntriesByLibraryPrefixParams struct {
+	LibraryID int64  `json:"library_id"`
+	PrefixLo  string `json:"prefix_lo"`
+	PrefixHi  string `json:"prefix_hi"`
+	Limit     int64  `json:"limit"`
+}
+
+type ListLibraryEntriesByLibraryPrefixRow struct {
+	ID          int64  `json:"id"`
+	LibraryID   int64  `json:"library_id"`
+	RelPath     string `json:"rel_path"`
+	Name        string `json:"name"`
+	BlobID      int64  `json:"blob_id"`
+	EchoWritten int64  `json:"echo_written"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+	LiveCopies  int64  `json:"live_copies"`
+}
+
+// Half-open range [prefix_lo, prefix_hi) is the wildcard-free way to do a rel_path
+// prefix scan (sqlc's SQLite grammar rejects LIKE ... ESCAPE, and file paths contain
+// literal _ and %). The handler computes prefix_hi = prefix with its last byte bumped.
+func (q *Queries) ListLibraryEntriesByLibraryPrefix(ctx context.Context, arg ListLibraryEntriesByLibraryPrefixParams) ([]ListLibraryEntriesByLibraryPrefixRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLibraryEntriesByLibraryPrefix,
+		arg.LibraryID,
+		arg.PrefixLo,
+		arg.PrefixHi,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLibraryEntriesByLibraryPrefixRow
+	for rows.Next() {
+		var i ListLibraryEntriesByLibraryPrefixRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.LibraryID,
+			&i.RelPath,
+			&i.Name,
+			&i.BlobID,
+			&i.EchoWritten,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LiveCopies,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLibraryEntriesNeedingEcho = `-- name: ListLibraryEntriesNeedingEcho :many
 SELECT id, library_id, rel_path, name, blob_id, echo_written, created_at, updated_at FROM library_entries
 WHERE echo_written = 0

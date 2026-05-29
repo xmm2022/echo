@@ -9,6 +9,30 @@ import (
 	"context"
 )
 
+const getHashConflict = `-- name: GetHashConflict :one
+SELECT id, blob_id_a, blob_id_b, reason, detail, observed_at, status FROM hash_conflicts
+WHERE id = ?
+`
+
+type GetHashConflictParams struct {
+	ID int64 `json:"id"`
+}
+
+func (q *Queries) GetHashConflict(ctx context.Context, arg GetHashConflictParams) (HashConflict, error) {
+	row := q.db.QueryRowContext(ctx, getHashConflict, arg.ID)
+	var i HashConflict
+	err := row.Scan(
+		&i.ID,
+		&i.BlobIDA,
+		&i.BlobIDB,
+		&i.Reason,
+		&i.Detail,
+		&i.ObservedAt,
+		&i.Status,
+	)
+	return i, err
+}
+
 const insertHashConflict = `-- name: InsertHashConflict :one
 INSERT INTO hash_conflicts (
   blob_id_a, blob_id_b, reason, detail, observed_at, status
