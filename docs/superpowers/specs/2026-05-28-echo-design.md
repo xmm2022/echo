@@ -8,7 +8,7 @@
 
 Echo 是一个跨云盘资源池**控制面**服务。云盘**执行面**通过 HTTP 委托给 OpenList sidecar (基于 `openlist-guangyapan-src`),Echo 自身只跑业务逻辑 + DB + Web/API,一份单二进制。
 
-一句话: **消费由 producer 工具 (`115share2cas` / `cas139` / 用户已有 .cas tree) 产出的 CAS 树,经 sidecar 在目标账号上恢复出 live copy,落库后输出 `.echo` 占位文件树,供 Emby / 媒体工具消费;访问时由 Echo 通过 sidecar 拿直链或代理流式回放。**
+一句话: **消费由 producer 工具 (`115share2cas` 自动 exec / `cas139` 用户手工跑后 manual import / 用户已有 .cas tree) 产出的 CAS 树,经 sidecar 在目标账号上恢复出 live copy,落库后输出 `.echo` 占位文件树,供 Emby / 媒体工具消费;访问时由 Echo 通过 sidecar 拿直链或代理流式回放。**
 
 ### 灵感来源与差异化
 
@@ -35,7 +35,7 @@ Echo 给现有生态加上"第三个选择": 完全开源, 多云原生, 控制�
 +------------------------------+         +-------------------------+
 |  Producer (一次性)            |         | openlist-guangyapan-src |
 |  - 115share2cas (Go CLI)     |         |  GitHub:                |
-|  - cas139 (Python)           |         |  xmm2022/openlist-...   |
+|  - cas139 (Python, 用户手工) |         |  xmm2022/openlist-...   |
 |  - 用户已有 .cas tree         |         |  branch: feat/cas-tools |
 +------------------------------+         +-------------------------+
 ```
@@ -44,7 +44,7 @@ Echo 给现有生态加上"第三个选择": 完全开源, 多云原生, 控制�
 
 **执行面 (OpenList sidecar)**: 多云 driver 实现 + CAS restore 模式。继续在 `github.com/xmm2022/openlist-guangyapan-src` 仓库迭代,Echo 通过 OpenList 的 REST API 调用它,**不 import 任何 Go 包**。
 
-**Producer**: 一次性 CAS 树产出工具,直接来自 `openlist-guangyapan-src` 的 `feat/cas-tools` 分支 (`cmd/115share2cas/`, `tools/cas139/`)。Echo 不重新实现,只消费产物。
+**Producer**: 一次性 CAS 树产出工具,直接来自 `openlist-guangyapan-src` 的 `feat/cas-tools` 分支 (`cmd/115share2cas/`, `tools/cas139/`)。Echo 不重新实现,只消费产物。v0.1 仅 `115share2cas` 在 Echo 内自动 exec;`cas139` 落 139 云端,用户手工跑后下载本地走 manual import。
 
 Echo 自身实现的是: ingest pipeline (消费 .cas tree) / 跨云资源池数据库 / job 调度 / restore API / manifest API / web 后台 / sidecar HTTP client。
 
@@ -53,7 +53,7 @@ Echo 自身实现的是: ingest pipeline (消费 .cas tree) / 跨云资源池数
 | Provider | Ingest 方式 | Restore 方式 | 备注 |
 |---|---|---|---|
 | 115 | `115share2cas` 产出 CAS tree (含 sha1 + preID) | sidecar rapid-only,provider=115 + sha1 + preID | 115 额外区间校验可能失败,失败即 item failed,不 fallback |
-| 139 | `cas139` 工具产出 CAS tree | sidecar 在 `personal_new` 模式 + 启用 CAS restore | files-JSON 需预先抓取 |
+| 139 | `cas139` 工具产出 CAS tree (用户自行跑,落 139 云端 → 下载到本地 → manual import;v0.1 **不**在 Echo 内 auto-exec) | sidecar 在 `personal_new` 模式 + 启用 CAS restore | files-JSON 需预先抓取 |
 | 189pc | 只消费已有 .cas tree / sidecar 自生成 CAS (**不**写"已挂载路径泛化") | sidecar 用 md5 + sliceMd5 | 来自上游 OpenList-CAS |
 | 光鸭网盘 | 不承诺 | 不承诺 | sidecar 已有 driver,Echo 不主动支持 |
 
@@ -79,7 +79,7 @@ Echo 与 sidecar 是**进程级解耦**,版本升级互不强约束 (有 API 兼
 
 包含:
 - Ingest pipeline: 消费 producer 产出的 CAS tree (manifest + .cas 文件),sidecar restore-only,生成 `.echo` 占位树
-- Producer job: Echo 可以 exec 调 `115share2cas` / `cas139`,等退出后消费 manifest + CAS tree (限制工作目录 + 参数白名单,防 shell 注入)
+- Producer job: Echo 可以 exec 调 `115share2cas`,等退出后消费 manifest + CAS tree (限制工作目录 + 参数白名单,防 shell 注入)。**v0.1 不在 producer-exec 路径支持 cas139** (它产物落 139 云端,无本地 manifest);139 走 manual import 入口。
 - Manual import: 用户已有 CAS tree,Echo 直接导入
 - 跨云资源数据库 (blobs / library_entries / file_copies / blob_hashes / hash_conflicts)
 - 多账号管理 (每个 provider 多账号,凭据放在 sidecar 上,Echo 只引用 account_id)
@@ -119,7 +119,7 @@ Echo 与 sidecar 是**进程级解耦**,版本升级互不强约束 (有 API 兼
 |                                            |        |   Account & token 生命周期          |
 |   +-----------------------------------+    |        |                                     |
 |   | sidecarclient (HTTP REST client)  |    |        |   存储挂载在 sidecar config         |
-|   |   ListStorages / RestoreFromCAS   |    |        |   (含 cas_restore=true 开关)        |
+|   |   ListStorages / PutCAS            |    |        |   (含 cas_restore=true 开关)        |
 |   |   Link / Stream                   |    |        |                                     |
 |   +-----------------------------------+    |        +-------------------------------------+
 +-------------------------------------------+
@@ -128,8 +128,8 @@ Echo 与 sidecar 是**进程级解耦**,版本升级互不强约束 (有 API 兼
                   v
         +-----------------------------+
         | Producer 工具                |
-        |   115share2cas (Go)         |
-        |   cas139 (Python)           |
+        |   115share2cas (Go, auto)   |
+        |   cas139 (Python, 手工)      |
         +-----------------------------+
 ```
 
@@ -147,8 +147,8 @@ Echo 调 sidecar 的 OpenList HTTP API,具体调用面 (v0.1):
 | 健康检查 | `GET /ping` | readyz 时探测 |
 | 账号 / Storage 列表 | `GET /api/admin/storage/list` | 供 Echo 把 account 列出来给用户绑定 |
 | 列分享内容 | provider 自带的 share API (driver 内部封装) | 仅用作 manual debug;ingest 主路径不依赖 |
-| CAS restore | sidecar 内部 ingest API (基于 cas tree 的 `restore_source_from_cas`) | v0.1 主路径 |
-| 取直链 | `GET /api/fs/link` | 供 Echo 拿 url + headers |
+| CAS restore | `PUT /api/fs/put` 单文件上传 `*.cas` (driver Put 内识别 .cas 后走 rapid-only restore) | v0.1 主路径,逐文件 PUT,无批量 endpoint |
+| 取直链 | `POST /api/fs/link` (AuthAdmin) | 供 Echo 拿 url + headers |
 | 流式代理 | `GET /d/<path>` (或对应签名链接) | Echo 反向代理给客户端 |
 
 Echo **不**调以下东西 (越界):
@@ -169,7 +169,7 @@ echo/
 │   │   ├── server.go
 │   │   ├── middleware/auth.go          v0.1 静态 ADMIN_TOKEN
 │   │   └── handlers/
-│   │       ├── ingest.go               POST /api/ingest (manual import + producer job)
+│   │       ├── ingest.go               POST /api/ingest/manual + POST /api/ingest/producer
 │   │       ├── jobs.go
 │   │       ├── manifest.go
 │   │       ├── restore.go              GET /api/restore/{file_id} (JSON)
@@ -190,8 +190,8 @@ echo/
 │   ├── sidecarclient/                  HTTP client to OpenList sidecar
 │   │   ├── client.go                   认证 + 重试 + 超时
 │   │   ├── storage.go                  account/storage 列表
-│   │   ├── restore.go                  CAS restore (rapid-only)
-│   │   ├── link.go                     /api/fs/link
+│   │   ├── putcas.go                   PUT /api/fs/put 单文件 .cas (rapid-only restore)
+│   │   ├── link.go                     POST /api/fs/link
 │   │   └── stream.go                   /d/<path> 反向代理
 │   ├── castree/                        CAS tree + manifest 消费
 │   │   ├── reader.go                   遍历目录,读 .cas
@@ -252,32 +252,44 @@ type Sidecar interface {
 
     ListStorages(ctx context.Context) ([]Storage, error)
 
-    // Ingest 路径: 在 storage 上消费一个 .cas tree, sidecar 内部 rapid-only restore
-    RestoreFromCAS(ctx context.Context, req RestoreRequest) (*RestoreResult, error)
+    // Ingest 路径: 把一个 .cas 文件 PUT 到目标 storage,
+    // sidecar 内 driver.Put 识别 .cas 扩展名后走 rapid-only restore,
+    // 返回该文件的恢复结果 (sidecar 上无批量入口,Echo 负责遍历 .cas tree 逐文件调用)
+    PutCAS(ctx context.Context, req PutCASRequest) (*ItemResult, error)
 
     // Restore 路径
     Link(ctx context.Context, storageMount, remotePath string) (*DirectLink, error)
-    Stream(ctx context.Context, storageMount, remotePath string) (io.ReadCloser, http.Header, error)
+    Stream(ctx context.Context, req StreamRequest) (*StreamResult, error)
 }
 
-type RestoreRequest struct {
-    StorageMount string             // sidecar 上 storage 挂载点
-    CASTreePath  string             // 本机或 sidecar 可达的 .cas tree 根
-    ManifestPath string             // manifest.jsonl 路径
-    TargetSubdir string             // 在 storage 上的目标子目录
-}
-
-type RestoreResult struct {
-    Items []ItemResult              // 每个文件的恢复结果
+type PutCASRequest struct {
+    StorageMount string    // sidecar 上 storage 挂载点 (e.g. "/115-main")
+    RemoteDir    string    // storage 内目标目录 (绝对路径,Echo 已 join target_subdir + rel_path 的 parent)
+    CASName      string    // 上传时的 .cas 文件名 (e.g. "Movie.S01E01.mkv.cas",driver Put 后落为 "Movie.S01E01.mkv")
+    CASBody      io.Reader // .cas payload 字节流
+    CASSize      int64     // Content-Length
 }
 
 type ItemResult struct {
-    RelPath    string
     Status     string                // restored / skipped_dup / failed
     Error      string                // 失败原因 (provider-specific code)
-    CloudPath  string                // 在 storage 上的最终路径
+    CloudPath  string                // 在 storage 上的最终路径 (.cas 去后缀后的真实文件名)
     SizeBytes  int64
-    Hashes     map[string]string     // sidecar 实际确认的 hash 集
+    Hashes     map[string]string     // sidecar 实际确认的 hash 集 (可空,driver Put 不保证全部回传)
+}
+
+// Stream: 媒体客户端透传式代理 (Range / If-Range / If-Modified-Since 必须传给上游;
+// sidecar 应回 200 / 206 / 304 与对应的 Content-Length / Content-Range / Accept-Ranges 等头)
+type StreamRequest struct {
+    StorageMount string
+    RemotePath   string
+    Headers      http.Header   // 客户端原始请求头中需要透传的子集 (Range / If-Range / If-Modified-Since / If-None-Match / User-Agent)
+}
+
+type StreamResult struct {
+    StatusCode int               // 200 / 206 / 304 / 416 等,handler 透写到 ResponseWriter
+    Header     http.Header       // Content-Length / Content-Range / Content-Type / Accept-Ranges / Last-Modified / ETag
+    Body       io.ReadCloser     // 304 时为 nil
 }
 
 // Producer: ingest 输入抽象 (本地 CAS tree)
@@ -306,7 +318,9 @@ Echo 不再把"文件"塞成单表,而是拆成三层:
 
 `blob_hashes` 是辅助索引,允许一个 blob 同时记录 sha1 / md5 / sha256 / preid / slice_md5。`hash_conflicts` 在跨 hash 发现矛盾时不阻塞 ingest,而是记录人工审阅。
 
-### DDL (SQLite,PG 兼容)
+### DDL (SQLite, v0.1)
+
+v0.1 **只支持 SQLite**;PostgreSQL 不在承诺范围内。下方 DDL 用 SQLite 语法 (`INTEGER PRIMARY KEY AUTOINCREMENT` 等)。如果将来要做 PG migration,需要单独设计 schema (`SERIAL` / `BIGSERIAL` 替主键、boolean 列独立、索引名按 PG 重命名),不沿用本节 SQL。
 
 ```sql
 -- 账号引用 (实际凭据存在 sidecar)
@@ -365,14 +379,13 @@ CREATE TABLE blob_hashes (
   hash_type        TEXT NOT NULL,                    -- md5/sha1/sha256/preid/slice_md5
   hash_value       TEXT NOT NULL,                    -- 原始 (大小写敏感)
   hash_value_norm  TEXT NOT NULL,                    -- 规范化 (lower-case + 去分隔符)
-  UNIQUE (hash_type, hash_value_norm, size)          -- size 由 trigger 或 app 层写入 blob 的 size
+  size             INTEGER NOT NULL,                 -- 由 app 层从 blob.size 复制写入
+  UNIQUE (hash_type, hash_value_norm, size)
 );
 CREATE INDEX idx_blob_hashes_blob ON blob_hashes(blob_id);
 
 -- 注: hash_value_norm + size 的复合 UNIQUE 是为了防止 hash 碰撞跨 size 的误匹配
 -- 即使 sha1 极端碰撞,size 不同就不算同一 blob
--- app 层在写入时把 blob.size 复制进 blob_hashes.size 字段 (DDL 增补见下)
-ALTER TABLE blob_hashes ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
 
 -- 多云副本: blob 在某个 sidecar/storage/账号/路径 上的 live copy
 CREATE TABLE file_copies (
@@ -442,6 +455,33 @@ CREATE INDEX idx_producer_runs_job ON producer_runs(job_id);
 -- (Echo 在内存或临时表里实现,DDL 不强制持久化)
 ```
 
+### `rel_path` 校验规则 (硬约束)
+
+manifest 中的 `rel_path` 与 producer 输出的 .cas tree 目录结构都是**不可信输入**。Echo 在以下三个点必须重新校验,不能假设上游已经清洗过:
+
+1. `POST /api/ingest/manual` handler 入口校验 `cas_tree_path` 与 `manifest_path` (落在 `producer.workdir_root` / 配置白名单根下)。
+2. 遍历 manifest 时,**每一个 item 的 `rel_path` 都过 `validateRelPath()`**;失败的 item 直接进 `failed_items`,不阻塞 job。
+3. 写本地 `.echo` 之前,**最终路径** (`library.echo_output_path + rel_path + ".echo"`) 还要做 symlink 解析后的 root 校验。
+
+`validateRelPath(rel string) error` 规则:
+- 空字符串 → 拒绝
+- 长度 > 4096 → 拒绝
+- 含 NUL / 任何 `< 0x20` 控制字符 → 拒绝
+- 含 `\` 反斜杠段 / Windows 盘符 (e.g. `C:`) → 拒绝
+- 任一路径分段为 `..` → 拒绝
+- 绝对路径 (`/` 前缀) → 拒绝
+- `filepath.Clean(rel)` 后再次跑上述全套规则 (clean 可能把 `a/b/../c` 变成 `a/c`,本身没问题;但若 clean 后出现 `..` 前缀必拒)
+
+写本地 `.echo` 的额外校验 (`safeJoinUnderLibrary(library.echo_output_path, rel) (final string, error)`):
+- `final := filepath.Join(library.echo_output_path, rel + ".echo")`
+- `parent := filepath.Dir(final)`
+- `evaluated, err := filepath.EvalSymlinks(parent)` (`os.MkdirAll(parent, 0755)` 先建好)
+- `rel2, err := filepath.Rel(library.echo_output_path_evaluated, evaluated)` 其中 `library.echo_output_path_evaluated = EvalSymlinks(library.echo_output_path)`
+- 若 `rel2` 以 `..` 开头或等于 `..` → 拒绝 (parent 通过 symlink 逃出 library root)
+- `final` 自身禁止是 symlink (`lstat` 检查,O_NOFOLLOW 不在所有 fs 都可移植,显式拒绝即可)
+
+远端路径 (`PutCASRequest.RemoteDir` / `file_copies.remote_path`) 不做 symlink 校验,但仍跑 `validateRelPath` 拒绝 `..` / 绝对路径 / 控制字符;sidecar 自身的 storage scope 是第二道防线。
+
 ### `.echo` 文件格式
 
 `.echo` 是 base64 编码的 JSON payload,字段表与 `openlist-guangyapan-src/feat/cas-tools` 分支输出的 `.cas` **完全一致**(兼容超集,不是 OpenList-CAS 旧的 4 字段集):
@@ -449,14 +489,14 @@ CREATE INDEX idx_producer_runs_job ON producer_runs(job_id);
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | name | string | 文件名 |
-| size | int | 文件字节数 |
+| size | int64 | 文件字节数 |
 | provider | string | 来源 provider (115/139/189pc) |
 | sha1 | string | 可选 |
-| pre_id | string | 115 专用,可选 |
+| preID | string | 115 专用,可选 (JSON tag `preID`) |
 | md5 | string | 可选 |
-| slice_md5 | string | 189pc 专用,可选 |
+| sliceMd5 | string | 189pc 专用,可选 (JSON tag `sliceMd5`) |
 | sha256 | string | 139 / 通用,可选 |
-| create_time | int | 原始 mtime,可选 |
+| create_time | string | 原始 mtime,可选 (JSON tag `create_time`,字符串而非 int,跟随上游 `casmeta.Payload`) |
 
 Echo 同时识别 `.echo` 和 `.cas` 扩展名 (向后兼容 fork 里已有的 .cas 库),新写出统一用 `.echo`。
 
@@ -470,7 +510,20 @@ Encode/Decode 在 `castree/payload.go` 自实现,**不依赖 sidecar Go 包**。
 - 占位文件存在但 file_copies 表无对应 live row (会导致 restore 时找不到副本)
 - 占位文件已写但 sidecar restore 仍在 pending (用户播放命中半成品)
 
-Ingest pipeline 中"sidecar 返回 ItemResult.Status=restored" 与"`library_entries.echo_written=1` + `output.Put`"是一个事务步:任一失败回滚 (file_copies 不写、.echo 不写、library_entry 留 echo_written=0 待重试)。
+注意: SQLite/PG 事务**不能**回滚文件系统写入,所以 ingest 用"两段提交 + 启动 reconcile"而非单事务:
+
+1. sidecar `PutCAS` 返回 `Status=restored` (或 `skipped_dup`) 后,**先**在一个 SQL 事务里:
+   - `UPSERT file_copies ON CONFLICT(sidecar_id, storage_mount, remote_path) DO UPDATE`,仅刷 `status='live' / last_seen / cloud_file_id / pickcode`,**不改 blob_id**;若 existing.blob_id 与本次 candidate_blob 不一致 → 该 item 终止 (写 hash_conflicts、不写 library_entries、不写 .echo,详见 §4 步骤 3.d);
+   - 一致时 `UPSERT library_entries(...echo_written=0)`;
+   - COMMIT。
+2. COMMIT 后,把 .echo payload 写到 `<library.echo_output_path>/<rel_path>.echo.tmp`,然后 fsync 并 rename 到最终路径。
+3. rename 成功后,执行第二条 SQL: `UPDATE library_entries SET echo_written=1 WHERE id=?`。
+
+崩溃恢复 (Echo 启动时执行 reconcile,在接收外部请求之前):
+- `library_entries.echo_written=0` 且本地 .echo 不存在 → 重写 .echo,然后 `echo_written=1`。
+- `library_entries.echo_written=0` 且本地 .echo 已存在 → 校验 hash 后直接 `echo_written=1`。
+- 本地 `.echo.tmp` 残留 → 删除 (rename 未完成,内容不可信)。
+- 本地 `.echo` 文件无对应 `library_entries` live row (孤儿) → 写 admin 告警日志,**不**自动删除 (避免误删用户手工放置的 .echo)。
 
 ### Blob 三层带来的影响
 
@@ -535,32 +588,73 @@ Authorization: Bearer <ADMIN_TOKEN>
      已经成功过的 item 跳过 (用 producer_runs 历史 + library_entries 现状判断)
 
   3. for each item (并发度 from config):
-     a. 查 blob_hashes (按 manifest 提供的所有 hash 类型轮询)
-        - 命中 → 复用 blob_id
-        - 都不命中 → 新建 blob(size, name)
-        - 命中多个不同 blob_id → 写一行 hash_conflicts, 取较老的 blob_id (理由: 早期记录更可信)
-     b. 写齐所有已知 hash 到 blob_hashes (含 hash_value_norm + size)
-     c. sidecar.RestoreFromCAS(RestoreRequest{
+     **前置**: `validateRelPath(rel_path)` 失败 → 直接进 failed_items, 不进入下面流程。
+
+     a. 候选 blob 解析:
+        - 按 manifest 提供的每个 hash 类型查 blob_hashes (用规范化 hash_value_norm + size 联合查)
+        - 收集所有命中行的 blob_id 集合 (按 created_at 升序去重)
+        - 命中数 0 → 新建 blob(size, name),`candidate_blob = new.id`
+        - 命中数 1 → `candidate_blob = 命中.blob_id`
+        - 命中数 >1 → `candidate_blob = 最老的 blob_id`,把全部命中 blob_id 集合写一行 hash_conflicts(blob_id_a=最老, blob_id_b=其它, reason="hash_multi_blob", detail=JSON)
+     b. 把 manifest 中已知 hash 写齐到 blob_hashes,**逐 hash 处理,不批量 INSERT**:
+        - 查 blob_hashes(hash_type, hash_value_norm, size)
+        - 未存在 → INSERT 进 candidate_blob (附带 size = blob.size)
+        - 已存在且 `blob_hashes.blob_id == candidate_blob` → 幂等,skip
+        - 已存在且 `blob_hashes.blob_id != candidate_blob` → **不写**,把这一条 hash + 竞争 blob_id 合并进当前 hash_conflicts.detail (或新写一行 reason="hash_owned_by_other_blob");候选 blob 不变,继续后面 sidecar 调用
+        - 保证不会触发 UNIQUE(hash_type, hash_value_norm, size) 违例
+     c. sidecar.PutCAS(PutCASRequest{
             StorageMount: account.storage_mount,
-            CASTreePath:  本 item 对应的 .cas 文件,
-            ManifestPath: 单 item manifest,
-            TargetSubdir: target_subdir + rel_path 的 parent dir,
+            RemoteDir:    join(target_subdir, dirname(rel_path)),
+            CASName:      basename(rel_path) + ".cas",
+            CASBody:      open(本 item 对应的 .cas 文件),
+            CASSize:      stat.Size(),
         })
-        sidecar 内部完成 rapid-only restore,返回 ItemResult
+        sidecar driver.Put 内识别 .cas → rapid-only restore,返回 ItemResult
         - Status=restored → 进 (d)
         - Status=skipped_dup → 等同 restored, 但不记 warning (目标已存在)
         - Status=failed → ✗ 不写 file_copies, ✗ 不写 .echo,
                           job.warnings += 1,
                           item 进 jobs.progress.failed_items[],
                           **不允许 fallback 真实上传** (硬约束)
-     d. 事务:
-        - INSERT file_copies(blob_id, provider, account_id, sidecar_id, storage_mount,
-                              remote_path=ItemResult.CloudPath, cloud_file_id, pickcode,
-                              status='live', last_seen=now)
-        - UPSERT library_entries(library_id, rel_path, name, blob_id, echo_written=0)
-        - echofile.Output.Put(library.echo_output_path + rel_path + ".echo", payload_bytes)
-        - UPDATE library_entries SET echo_written=1
-       任一步失败回滚整个事务 (live copy 已经在 sidecar 上, 不删, 下次会通过 dedup key 跳过或 sidecar Status=skipped_dup 自然兼容)
+     d. 两段提交 + reconcile (SQL 事务不能回滚 fs 写,故拆开):
+
+        段 1 (SQL 事务):
+          - **UPSERT** file_copies ON CONFLICT(sidecar_id, storage_mount, remote_path) DO UPDATE
+              SET status='live',
+                  last_seen   = excluded.last_seen,
+                  cloud_file_id = COALESCE(excluded.cloud_file_id, file_copies.cloud_file_id),
+                  pickcode      = COALESCE(excluded.pickcode,      file_copies.pickcode)
+            **不允许更新 `blob_id`**;若 existing.blob_id ≠ candidate_blob:
+              · 不写 library_entries
+              · 不写 .echo
+              · 不更新 echo_written
+              · 写一行 hash_conflicts(blob_id_a=existing.blob_id, blob_id_b=candidate_blob,
+                  reason="copy_blob_mismatch",
+                  detail=JSON{sidecar_id, storage_mount, remote_path, manifest_rel_path})
+              · item 进 failed_items, job warning,
+                admin 需要手工 (a) 换目标路径重试,或 (b) 在 admin UI 中解决冲突 (v0.2 提供工具,v0.1 走 SQL)
+              · skipped_dup 同样走这条规则 — 这意味着 "目标已存在但 Echo 知道它属于别的 blob",一定是
+                半成品/历史漂移,必须人工介入
+            候选 blob 一致时才继续:
+          - UPSERT library_entries(library_id, rel_path) DO UPDATE
+              SET name=excluded.name, blob_id=excluded.blob_id, echo_written=0
+            (注: library_entries.blob_id 允许在 candidate_blob 一致前提下更新,因为这就是同一 blob;
+             不会出现把 entry 指向"无 live copy 的 blob")
+          COMMIT
+
+        段 2 (文件系统):
+          - safeJoinUnderLibrary(library.echo_output_path, rel_path) → final (见 §3 校验规则)
+          - echofile.Output.PutAtomic(final, payload_bytes)
+            内部: 写 `<final>.tmp` → fsync → rename(.tmp → final)
+
+        段 3 (SQL 单语句):
+          - UPDATE library_entries SET echo_written=1 WHERE id=?
+
+        任一段失败:
+          - 段 1 UPSERT 因 copy_blob_mismatch 终止 → 已说明,item failed_items + hash_conflicts,
+            live copy 在 sidecar 上保留 (它属于既有 blob,不动);
+          - 段 2/3 失败 → DB live row 已存,echo_written=0 → 启动 reconcile 时重写 .echo (见 §3 写盘时机);
+          - 段 1 其它 SQL 错误 (UNIQUE 之外) → 当前 item failed, job warning。
 
   4. jobs.progress 实时更新 (1s 节流)
          |
@@ -580,36 +674,59 @@ Authorization: Bearer <ADMIN_TOKEN>
   "target_subdir": "movies/2026",
   "tool": "115share2cas",
   "args": {
-    "share-url":     "https://115.com/s/xxx",
-    "receive-code":  "abc",
-    "cookie-file":   "ref:cookies/115-main.txt",
+    "share_url":     "https://115.com/s/xxx?password=abc",
+    "cookie_file":   "ref:cookies/115-main.txt",
     "mode":          "transfer-batch",
-    "batch-size":    100
+    "batch_size":    "1.5TiB",
+    "recycle_password_file": "ref:secrets/115-recycle.txt"
   }
 }
 ```
+
+API args 一律 **snake_case**;Echo 内部映射到 115share2cas 的 CLI flag。完整白名单见 §6 配置。
+
+**v0.1 producer args → CLI flag 映射**:
+
+| API key | CLI flag | 是否必填 | 备注 |
+|---|---|---|---|
+| `share_url` | `--share-url` | 否 (二选一) | 与 `share_code`+`receive_code` 二选一;115share2cas 自动从 URL 解出 code/receive_code |
+| `share_code` | `--share-code` | 否 (二选一) | 与 `share_url` 二选一 |
+| `receive_code` | `--receive-code` | 视上面 | 若 `share_url` 已含 password,可省 |
+| `cookie_file` | `--cookie-file` | mode=transfer-batch 必填 | 值必须是 `ref:<path-under-secrets-root>` |
+| `mode` | `--mode` | 否 (默认 transfer-batch) | `transfer-batch` 或 `direct` |
+| `batch_size` | `--batch-size` | 否 | 例: `1.5TiB` |
+| `temp_parent_cid` | `--temp-parent-cid` | 否 | mode=transfer-batch 用 |
+| `recycle_password_file` | `--recycle-password-file` | mode=transfer-batch 且 keep_temp=false 时必填 | 值必须是 `ref:` |
+| `keep_temp` | `--keep-temp` | 否 | bool;true → CLI 加 `--keep-temp` |
+| `limit` | `--limit` | 否 | int;0 表示不限 |
+
+**API surface 不允许**传入: `--out` / `--manifest` (Echo 强制注入到 job workdir);`--page-size` / `--delay` / `--max-list-errors` / `--temp-root-name` / `--recycle-wait` / `--receive-chunk-size` / `--transfer-wait` / `--overwrite` / `--ua` (调优/兼容旋钮,首版不开放,减少测试矩阵与误用面)。
 
 flow:
 
 ```
 [handler]
-  - 校验 tool ∈ {"115share2cas", "cas139"} (白名单)
-  - 校验 args 中每个字段在 tool 的 allowed flag 表里
-  - 解析 ref: 引用 (cookie-file ref:xxx → 解析到本地受控目录, 防越权)
+  - 校验 tool ∈ {"115share2cas"} (白名单;v0.1 不在 producer-exec 路径支持 cas139,
+    见下方说明)
+  - 校验 args 中每个 key 都在上表里;snake_case 严格匹配
+  - 校验组合: share_url 或 (share_code + receive_code) 至少一组;
+            mode=transfer-batch 必须有 cookie_file;
+            mode=transfer-batch 且 keep_temp 不为 true 必须有 recycle_password_file
+  - 解析 ref: 引用 (cookie_file ref:xxx → 拼 producer.secrets_root + 路径校验, 不允许 .. / 绝对路径 / symlink 逃逸)
   - 插入 jobs(kind=ingest_producer, ...)
   - 返回 {"job_id": 43}
        |
        v
 [job runner]
   1. 建临时 workdir: /data/ingest/job-43/
-  2. 拼 argv:
-       115share2cas --share-url ... --share-code ... --receive-code ...
+  2. 拼 argv (按映射表把 snake_case key → kebab CLI flag, 注入 --out / --manifest):
+       115share2cas --share-url 'https://115.com/s/xxx?password=abc'
                     --cookie-file /data/secrets/cookies/115-main.txt
+                    --recycle-password-file /data/secrets/secrets/115-recycle.txt
+                    --mode transfer-batch
+                    --batch-size 1.5TiB
                     --out /data/ingest/job-43/cas/
                     --manifest /data/ingest/job-43/manifest.jsonl
-                    --mode transfer-batch --batch-size 100
-                    --temp-parent-cid <配 / 用 default>
-     (cas139 类似, 对应 single_share_to_cas_batch.py 或 multi_share_to_cas_batch.py)
   3. 写一行 producer_runs(job_id, tool, tool_version, cmdline, workdir,
                             output_dir=/data/ingest/job-43/cas/,
                             manifest_path=/data/ingest/job-43/manifest.jsonl,
@@ -622,6 +739,12 @@ flow:
   7. 否则 → 与 manual 同路径消费 manifest + CAS tree
        (从步骤 2 起复用 Manual import 流程)
 ```
+
+**为什么 cas139 不在 v0.1 producer-exec 路径**:
+
+上游 `tools/cas139/{single,multi}_share_to_cas_batch.py` 的实际行为是把 `.cas` 写到 **139 云端**的输出目录,本地无 `--out` / `--manifest` 输出选项 (真实参数是 `--share-id` / `--files-json` / `--out-dir-name` / `--progress` 等)。Echo 不能像 115share2cas 那样"等退出后消费本地 manifest + .cas tree"。
+
+v0.1 处理方式: 139 走 **manual import only** — 用户在 139 自行跑 cas139 → 把生成的 `.cas` tree 从 139 云端下载到本地 → 调 `/api/ingest/manual` 指向本地路径。把 cas139 的 Echo-side 自动化挪到 v0.1.x / v0.2,届时需要单独设计 "consume CAS tree from remote storage" 路径 (例如让 sidecar 把 139 storage 上的 .cas tree mount 出来,再让 Echo 通过 sidecar `/api/fs/list` 走 manifest)。
 
 **安全约束**:
 - tool 白名单, 不接受任意可执行文件
@@ -655,16 +778,30 @@ flow:
 
 ```
 [handler]
-  1. 同上 1-3, 拿到 DirectLink
-  2. 调 sidecar.Stream(storage_mount, remote_path):
-     - 内部 sidecar 拿到 url + headers, 再次发起请求拿原始 stream
-     - OR Echo 自己拿 url + headers 后直接打源站 (不经过 sidecar)
-     v0.1 选 sidecar 代理 (更稳, 单一 link 失效逻辑入口)
-  3. 流式 copy 到客户端, 转发原始 Content-Length / Content-Type / 必要 Range 头
-  4. 如果中途断流 → 客户端报错, Echo 记 warning, 不自动重试
+  1. 同 restore handler 步骤 1-2, 选出候选 copy 队列
+  2. 取队首 copy, 构造 StreamRequest:
+       StorageMount: copy.storage_mount
+       RemotePath:   copy.remote_path
+       Headers:      从客户端请求复制白名单子集 ──
+                       Range / If-Range / If-Modified-Since / If-None-Match / User-Agent
+                     (其它 header 不透传, 避免泄露 admin token / Cookie)
+     调 sidecar.Stream(StreamRequest) → *StreamResult
+     - sidecar 自己向源站请求并把上游 Response 透传 (含 206 / Content-Range)
+     - sidecar 报 not found / 410 → 标 copy.status=dead, 试下一个 copy
+     - sidecar 5xx / 网络错误 → 不改 status, 试下一个 copy, 记 warning
+  3. 把 StreamResult 写回客户端:
+       w.WriteHeader(result.StatusCode)         -- 200 / 206 / 304 / 416 透传
+       for k,v := range result.Header { ... }    -- Content-Length / Content-Range / Content-Type /
+                                                    Accept-Ranges / Last-Modified / ETag 透传
+       if result.Body != nil:
+         io.Copy(w, result.Body); result.Body.Close()
+  4. 中途断流 → 客户端报错, Echo 记 warning, 不自动重试 (客户端会自己用 Range 续传)
+  5. 全部 copy 失败 → 404 + X-Echo-Reason
+
+注: Echo 不在自己进程内做"打源站"那条 fallback (sidecar 是统一直链失效逻辑入口)
 ```
 
-也可走 `GET /api/restore/by-echo?path=...` 与 `GET /api/stream/by-echo?path=...`:handler 先用 `castree.Payload` 解码本地 .echo 文件 → 拿 hashes → 反查 blob_id → 走上述流程。
+v0.1 restore/stream 入口**只接受 `file_id`**,不提供"按本地 .echo 路径反查"接口 (本地 path 入参会变成任意 .echo/.cas 读取与资源枚举攻击面)。详见 §13。
 
 ### 关键决策
 
@@ -674,7 +811,7 @@ flow:
 | Sidecar restore 单文件失败 | 跳过该文件 + 记 warning, 不阻塞 job | 跨云资源会陆续到位, 单点失败不该回滚整个 ingest |
 | 同 blob 跨账号去重 | 多行 file_copies 共享同一 blob_id | 自然反映"一个 blob, 多云副本" |
 | 跨 hash conflict | v0.1 不自动 merge, 写 hash_conflicts | 复杂逻辑, 等真实数据触发再实现 |
-| `.echo` 写盘时机 | live copy 落库后才写, 一个事务 | 杜绝"占位存在但 restore 找不到"半成品 |
+| `.echo` 写盘时机 | live copy COMMIT 后写,两段提交 + 启动 reconcile | 杜绝"占位存在但 restore 找不到"半成品;fs 写无法随 SQL 事务回滚故拆开 |
 | `.echo` 写盘位置 | library 级配置, v0.1 仅 local fs | 简化首版; v0.2 加 WebDAV (Emby 远程扫描场景) |
 | 直链缓存 | memory TTL=60s, key=(blob_id, copy_id) | 性能优化; sidecar 自身的 link 复用窗口决定下限 |
 | Restore 双 endpoint | JSON + proxy 两个 | 给不同客户端类型用; Emby 必须代理 |
@@ -727,9 +864,9 @@ handler 层映射到 HTTP:
 Echo **不能**在 ingest 失败时改走"真实数据上传"。任何 sidecar 上的 driver.Put(FileStreamer) 调用都不在 Echo 的执行路径内。
 
 具体含义:
-- sidecar `RestoreFromCAS` 返回 `Status=failed`,Echo **不再调** sidecar 的其他 endpoint 试图上传该文件
+- sidecar `PutCAS` 返回 `Status=failed`,Echo **不再调** sidecar 的其他 endpoint 试图上传该文件
 - Echo 不接受 multipart 文件上传 API,API surface 上没有"上传文件"的入口
-- 即使用户在 Web UI 上请求重试,也只会重跑 CAS restore 路径 (重读 manifest, 重调 sidecar.RestoreFromCAS),不会"用真实数据替代"
+- 即使用户在 Web UI 上请求重试,也只会重跑 CAS restore 路径 (重读 manifest, 重 PUT 每个 .cas 到 sidecar),不会"用真实数据替代"
 
 理由:
 - Echo 是 CAS-only 控制面,真实上传违背项目定位 (NextEmby/Rose 才做真实秒传转存,且都是用户账号的真实数据流)
@@ -748,7 +885,7 @@ Echo **不能**在 ingest 失败时改走"真实数据上传"。任何 sidecar �
 | Sidecar token 过期 | **sidecar 自身负责 refresh**;Echo 收到 ErrCASRestoreFailed 时不主动管 token, 只更新 account.status=token_expired 并提示 admin 去 sidecar UI 处理 |
 | Sidecar 不可达 (网络断 / 进程死) | readyz fail, 所有 ingest/restore 请求 503, Echo 不缓存重试 |
 | Sidecar 版本太老 (不满足 API 契约) | readyz fail, 启动时日志告警 (具体所需版本号) |
-| `.echo` 输出失败 (disk full / WebDAV 401) | 事务回滚 file_copies 不写、library_entries.echo_written=0, job warning;此 item 下次重跑会通过 sidecar Status=skipped_dup 通过 |
+| `.echo` 输出失败 (disk full / WebDAV 401) | 段 2 (fs PutAtomic) 报错,DB live row 已落但 echo_written=0;job warning;启动 reconcile 时重试写 .echo (见 §3 写盘时机) |
 | 进程崩溃 | 启动时把 running job 标 failed + error="interrupted", 人工重跑 |
 | 跨 hash conflict | 写一行 hash_conflicts, 取较老 blob_id 继续, 不阻塞 |
 | Producer exit != 0 | job failed, 保留 stdout/stderr, **不**消费已部分产出的 manifest (避免半成品) |
@@ -797,24 +934,22 @@ producer:
   tools:
     "115share2cas":
       binary:        /usr/local/bin/115share2cas
-      allowed_flags:
-        - "--share-url"
-        - "--share-code"
-        - "--receive-code"
-        - "--cookie-file"
-        - "--out"
-        - "--manifest"
-        - "--mode"
-        - "--batch-size"
-        - "--temp-parent-cid"
-    "cas139":
-      binary:        /usr/local/bin/python3
-      script_root:   /opt/cas139      # tools/cas139/*.py 复制到这里
-      allowed_flags:
-        - "--files-json"
-        - "--db-path"
-        - "--out"
-        - "--manifest"
+      # API args key (snake_case) → CLI flag 映射见 §4。
+      # --out / --manifest 由 Echo 强制注入,不在白名单。
+      # 以下是 v0.1 暴露给 API 的子集 (其它 CLI flag 显式不开放):
+      api_args_allowlist:
+        - "share_url"
+        - "share_code"
+        - "receive_code"
+        - "cookie_file"
+        - "mode"
+        - "batch_size"
+        - "temp_parent_cid"
+        - "recycle_password_file"
+        - "keep_temp"
+        - "limit"
+    # v0.1 不在此自动化 cas139: 工具产物落 139 云端,无本地 manifest 输出。
+    # 139 走 manual import (用户自行跑 cas139 → 下载 .cas tree → /api/ingest/manual)。
 
 jobs:
   max_concurrent: 4
@@ -874,7 +1009,7 @@ Echo 在 exec 时把 `ref:cookies/115-main.txt` 解析为 `/data/secrets/cookies
 |---|---|
 | `store/*` | DDL migration、CRUD、UNIQUE 触发 (含 `hash_value_norm + size` 联合)、级联删除、并发安全 |
 | `castree/{reader,manifest,payload}` | manifest fixture 解析, payload base64 JSON encode/decode round-trip, 与 `feat/cas-tools` 输出互通校验 |
-| `sidecarclient/*` | `httptest` 起 fake sidecar, 验证 Ping/Version/ListStorages/RestoreFromCAS/Link/Stream 各分支 (200/404/410/5xx/timeout) |
+| `sidecarclient/*` | `httptest` 起 fake sidecar, 验证 Ping/Version/ListStorages/PutCAS/Link/Stream 各分支 (200/404/410/5xx/timeout) |
 | `ingest/pipeline` | mock sidecarclient + mock store, 验证 dedup key / 跨 hash conflict / restore failed item 不阻塞 / .echo 事务回滚 各分支 |
 | `ingest/producer` | mock exec wrapper, 验证 tool/flag 白名单、`ref:` 解析、workdir 隔离、exit_code 处理、stdout/stderr 持久化 |
 | `restore/{resolver,proxy,cache}` | mock sidecarclient, 验证 copy fallback、stream 代理 header 透传、cache TTL |
@@ -971,7 +1106,7 @@ services:
   # 可选: nginx/caddy 反代
 ```
 
-注: producer 工具 (`115share2cas` / `cas139`) 已经在 Echo 镜像里, 编译期从 sidecar 仓库的 `feat/cas-tools` 分支抓 build artifact 进 Echo 镜像;cas139 (Python) 复制到 `/opt/cas139`。Echo 镜像与 sidecar 镜像各自独立 release, producer 版本固定到 Echo 镜像的 release notes。
+注: producer 工具中 `115share2cas` 已编译进 Echo 镜像 (CI 期从 sidecar 仓库的 `feat/cas-tools` 分支抓 build artifact)。`cas139` (Python) v0.1 **不**打包进 Echo 镜像 — 它需要在 139 客户端环境跑,用户自行准备运行环境,产物下载到本地后走 manual import。Echo 镜像与 sidecar 镜像各自独立 release,producer 版本固定到 Echo 镜像的 release notes。
 
 ### 反代 (nginx 示例)
 
@@ -980,7 +1115,7 @@ location /echo/ {
   proxy_pass http://echo:8080/;
   proxy_set_header Host $host;
   proxy_set_header X-Real-IP $remote_addr;
-  client_max_body_size 0;               # 允许 ingest 时的大 payload
+  client_max_body_size 1m;              # Echo API 只接 JSON body, 没有文件上传入口
 
   # 流式 endpoint 不缓冲
   proxy_buffering off;
@@ -1107,7 +1242,7 @@ v0.3   ── NextFind-like 自动订阅 ────── TG / 海报站爬虫
 ### 文件格式与数据模型
 
 - 文件格式: **`.echo`** (同时识别旧 `.cas`, 字段表与 `feat/cas-tools` 分支 `pkg/casmeta` 对齐)
-- `.echo` 字段表: name / size / provider / sha1 / pre_id / md5 / slice_md5 / sha256 / create_time
+- `.echo` 字段表: name / size / provider / sha1 / preID / md5 / sliceMd5 / sha256 / create_time (与 `casmeta.Payload` JSON tag 一致;`create_time` 为 string)
 - payload Encode/Decode: Echo 在 `castree/payload.go` **自实现**, 字段表层面对齐, 不依赖 sidecar Go 包
 - 数据模型: **三层拆分** — `blobs` (物理指纹) / `library_entries` (库内路径) / `file_copies` (云端 live copy)
 - 辅助表: `blob_hashes` (多 hash 索引, UNIQUE(hash_type, hash_value_norm, size)) / `hash_conflicts` (跨 hash 冲突记录, 不自动 merge)
@@ -1116,9 +1251,9 @@ v0.3   ── NextFind-like 自动订阅 ────── TG / 海报站爬虫
 
 ### Ingest
 
-- 两种入口: **Manual import** (已有 CAS tree) + **Producer job** (Echo exec 调 `115share2cas` / `cas139`)
+- 两种入口: **Manual import** (已有 CAS tree) + **Producer job** (Echo exec 调 `115share2cas`;cas139 走 manual import,不在 v0.1 producer-exec 路径)
 - **Echo 不生成 CAS payload**, payload 必须由 producer 工具产出 (因为 hash 来自真实文件经 driver Put 流程的副产物)
-- Producer 白名单: tool ∈ {115share2cas, cas139}, 每个 tool 的 flag 也走白名单
+- Producer 白名单: tool ∈ {115share2cas}, 每个 tool 的 flag 也走白名单
 - Producer 凭据: 用 `ref:` 引用本地受控目录, 不让 API 传 cookie 内容
 - Producer 审计: 记录 cmdline / version / exit_code / stdout / stderr / output_dir / manifest_path 到 `producer_runs` 表
 - **被动目录监听**: 不做
@@ -1127,7 +1262,7 @@ v0.3   ── NextFind-like 自动订阅 ────── TG / 海报站爬虫
 - 跨 hash 冲突: 写 `hash_conflicts`, 取较老 blob_id 继续
 - Job 并发: 单 job 内 N worker (默认 4) + 多 job 排队 (默认 4 并发)
 - Dedup key 粒度: `(library_id, rel_path, target_account, storage_mount, target_remote_dir, desired_name)` (不只用 hash + account)
-- `.echo` 写盘时机: **live copy 落库后才写, 同一事务**, 杜绝半成品
+- `.echo` 写盘时机: **live copy COMMIT 后写, 两段提交 + 启动 reconcile**, fs 写无法随 SQL 事务回滚, 启动时检查 echo_written=0 的 entry 重写
 
 ### Restore
 
@@ -1177,4 +1312,5 @@ v0.3   ── NextFind-like 自动订阅 ────── TG / 海报站爬虫
 - 资源订阅 / 自动找回(v0.3)
 - 跨实例分布式(v1.0+)
 - file_id 自动 merge 工具(按需,触发后再做)
+- `by-echo` 路径反查接口 (按本地 .echo 路径调 restore/stream)(v0.2+):v0.1 仅 `file_id` 入口;后续若加回,必须改用 `?library_id=<int>&rel_path=<rel>` 形式,服务端按 library root 解析 + §3 rel_path 校验,**不允许**接受任意本地绝对路径
 - 阿里云盘 / 百度网盘 / 夸克 等新 provider(等社区秒传协议成熟)
