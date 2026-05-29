@@ -21,6 +21,11 @@ type Options struct {
 	LinkStatus    int
 	StreamStatus  int
 	Hang          bool
+	// PutCASDelay holds each PutCAS handler for this long before responding so
+	// concurrent calls overlap in time. It lets the multi-job concurrency
+	// integration test observe real parallelism at the sidecar. Zero (default)
+	// disables the delay and leaves the original behavior unchanged.
+	PutCASDelay time.Duration
 }
 
 type Server struct {
@@ -35,9 +40,12 @@ type Server struct {
 	linkStatus        int
 	streamStatus      int
 	hang              bool
+	putCASDelay       time.Duration
 	hangDone          chan struct{}
 	lastAuthorization string
 	putCASCount       int
+	inFlightPutCAS    int
+	maxInFlightPutCAS int
 	lastPutCAS        PutCASRequest
 	lastLink          LinkRequest
 	lastStream        StreamRequest
@@ -70,6 +78,7 @@ func New(t *testing.T, opts Options) *Server {
 		linkStatus:    defaultStatus(opts.LinkStatus, http.StatusOK),
 		streamStatus:  defaultStatus(opts.StreamStatus, 0),
 		hang:          opts.Hang,
+		putCASDelay:   opts.PutCASDelay,
 		hangDone:      make(chan struct{}),
 	}
 	mux := http.NewServeMux()
@@ -118,6 +127,15 @@ func (s *Server) PutCASCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.putCASCount
+}
+
+// MaxConcurrentPutCAS returns the high-water mark of simultaneously in-flight
+// PutCAS handlers observed by the fake sidecar. The multi-job concurrency test
+// asserts this stays within max_concurrent × worker_per_job.
+func (s *Server) MaxConcurrentPutCAS() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxInFlightPutCAS
 }
 
 func (s *Server) LastLinkRequest() LinkRequest {
@@ -205,7 +223,27 @@ func (s *Server) handlePutCAS(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.putCASCount++
 	s.lastPutCAS = PutCASRequest{FilePath: filePath, ContentLength: contentLength, Body: body}
+	s.inFlightPutCAS++
+	if s.inFlightPutCAS > s.maxInFlightPutCAS {
+		s.maxInFlightPutCAS = s.inFlightPutCAS
+	}
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inFlightPutCAS--
+		s.mu.Unlock()
+	}()
+
+	// Hold the in-flight slot briefly so concurrent PutCAS calls overlap in time,
+	// letting the concurrency test observe real parallelism. The select unblocks on
+	// request cancellation or Close so the handler never outlives the server.
+	if s.putCASDelay > 0 {
+		select {
+		case <-time.After(s.putCASDelay):
+		case <-r.Context().Done():
+		case <-s.hangDone:
+		}
+	}
 
 	if !strings.HasSuffix(filePath, ".cas") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "not a .cas file"})
