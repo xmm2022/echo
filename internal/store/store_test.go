@@ -141,6 +141,44 @@ INSERT INTO library_entries (
 	}
 }
 
+func TestGetLibraryEntryByID(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	blob := createBlob(t, ctx, st.Queries, 1024)
+	library := createLibrary(t, ctx, st.Queries)
+
+	entry, err := st.UpsertLibraryEntry(ctx, queries.UpsertLibraryEntryParams{
+		LibraryID:   library.ID,
+		RelPath:     "season/episode.mkv",
+		Name:        "episode.mkv",
+		BlobID:      blob.ID,
+		EchoWritten: 0,
+		CreatedAt:   1,
+		UpdatedAt:   1,
+	})
+	if err != nil {
+		t.Fatalf("upsert library entry: %v", err)
+	}
+
+	got, err := st.GetLibraryEntryByID(ctx, queries.GetLibraryEntryByIDParams{ID: entry.ID})
+	if err != nil {
+		t.Fatalf("get library entry by id: %v", err)
+	}
+	if got.ID != entry.ID {
+		t.Fatalf("entry id = %d, want %d", got.ID, entry.ID)
+	}
+	if got.BlobID != blob.ID {
+		t.Fatalf("entry blob_id = %d, want %d", got.BlobID, blob.ID)
+	}
+	if got.RelPath != "season/episode.mkv" {
+		t.Fatalf("entry rel_path = %q, want season/episode.mkv", got.RelPath)
+	}
+
+	if _, err := st.GetLibraryEntryByID(ctx, queries.GetLibraryEntryByIDParams{ID: entry.ID + 999}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("get missing entry error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestUpdateAccountChangesBindingFields(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

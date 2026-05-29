@@ -2,6 +2,10 @@
 SELECT * FROM library_entries
 WHERE library_id = ? AND rel_path = ?;
 
+-- name: GetLibraryEntryByID :one
+SELECT * FROM library_entries
+WHERE id = ?;
+
 -- name: UpsertLibraryEntry :one
 INSERT INTO library_entries (
   library_id, rel_path, name, blob_id, echo_written, created_at, updated_at

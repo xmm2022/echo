@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/xmm2022/echo/internal/config"
+	"github.com/xmm2022/echo/internal/http/handlers"
 )
 
 func New(cfg *config.Config, logger *slog.Logger) *http.Server {
@@ -20,12 +21,33 @@ func New(cfg *config.Config, logger *slog.Logger) *http.Server {
 	}
 }
 
+// Deps configures the HTTP handler. Restore and Stream are optional; when nil
+// their routes are not mounted. cmd/echo supplies them once the sidecar client
+// and store are wired (Phase 9).
+type Deps struct {
+	Logger  *slog.Logger
+	Restore *handlers.RestoreDeps
+	Stream  *handlers.StreamDeps
+}
+
 func Handler(logger *slog.Logger) http.Handler {
+	return HandlerWithDeps(Deps{Logger: logger})
+}
+
+// HandlerWithDeps builds the router, mounting the restore and stream routes only
+// when their dependencies are provided.
+func HandlerWithDeps(deps Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz)
 	r.Handle("/metrics", promhttp.Handler())
-	return requestLogger(logger, r)
+	if deps.Restore != nil {
+		r.Get("/api/restore/{file_id}", handlers.Restore(*deps.Restore))
+	}
+	if deps.Stream != nil {
+		r.Get("/api/stream/{file_id}", handlers.Stream(*deps.Stream))
+	}
+	return requestLogger(deps.Logger, r)
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

@@ -35,6 +35,31 @@ func (q *Queries) GetLibraryEntry(ctx context.Context, arg GetLibraryEntryParams
 	return i, err
 }
 
+const getLibraryEntryByID = `-- name: GetLibraryEntryByID :one
+SELECT id, library_id, rel_path, name, blob_id, echo_written, created_at, updated_at FROM library_entries
+WHERE id = ?
+`
+
+type GetLibraryEntryByIDParams struct {
+	ID int64 `json:"id"`
+}
+
+func (q *Queries) GetLibraryEntryByID(ctx context.Context, arg GetLibraryEntryByIDParams) (LibraryEntry, error) {
+	row := q.db.QueryRowContext(ctx, getLibraryEntryByID, arg.ID)
+	var i LibraryEntry
+	err := row.Scan(
+		&i.ID,
+		&i.LibraryID,
+		&i.RelPath,
+		&i.Name,
+		&i.BlobID,
+		&i.EchoWritten,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listLibraryEntriesNeedingEcho = `-- name: ListLibraryEntriesNeedingEcho :many
 SELECT id, library_id, rel_path, name, blob_id, echo_written, created_at, updated_at FROM library_entries
 WHERE echo_written = 0
