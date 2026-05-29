@@ -39,18 +39,34 @@ type Job struct {
 	CASTreePath   string
 	ManifestPath  string
 	OwnerID       string
+	Tool          string
+	Args          map[string]any
 }
 
 type Config struct {
 	WorkerPerJob     int
 	ProgressInterval time.Duration
+	Producer         ProducerConfig
+}
+
+type ProducerConfig struct {
+	WorkdirRoot    string
+	SecretsRoot    string
+	DefaultTimeout time.Duration
+	Tools          map[string]ProducerToolConfig
+}
+
+type ProducerToolConfig struct {
+	Binary           string
+	APIArgsAllowlist []string
 }
 
 type Deps struct {
-	Store   *store.Store
-	Sidecar Sidecar
-	Config  Config
-	Now     func() time.Time
+	Store      *store.Store
+	Sidecar    Sidecar
+	Config     Config
+	Now        func() time.Time
+	ExecRunner producerExecRunner
 }
 
 type FailedItem struct {
