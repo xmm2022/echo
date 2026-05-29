@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
@@ -34,6 +35,8 @@ type Config struct {
 	MaxConcurrent int
 	Logger        *slog.Logger
 	Now           func() time.Time
+	// Metrics is optional; when nil, job metrics are not recorded.
+	Metrics *metrics.Metrics
 }
 
 // Runner executes queued jobs with a bounded number of concurrent jobs. It is
@@ -45,6 +48,7 @@ type Runner struct {
 	maxConcurrent int
 	logger        *slog.Logger
 	now           func() time.Time
+	metrics       *metrics.Metrics
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -91,6 +95,7 @@ func New(cfg Config) (*Runner, error) {
 		maxConcurrent: maxConcurrent,
 		logger:        logger,
 		now:           now,
+		metrics:       cfg.Metrics,
 		sem:           make(chan struct{}, maxConcurrent),
 		notify:        make(chan struct{}, 1),
 		cancels:       make(map[int64]context.CancelFunc),
@@ -292,6 +297,7 @@ func (r *Runner) runJob(jobID int64) {
 		return
 	}
 	r.logger.Info("job finished", "job_id", jobID, "kind", job.Kind, "status", status)
+	r.metrics.IncJob(job.Kind, status)
 }
 
 func (r *Runner) execute(ctx context.Context, job queries.Job) error {

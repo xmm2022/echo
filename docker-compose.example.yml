@@ -1,3 +1,13 @@
+# Example two-service deployment: Echo control plane + OpenList CAS sidecar.
+# Quickstart:
+#   cp .env.example .env   # then edit ECHO_ADMIN_TOKEN / ECHO_SIDECAR_TOKEN
+#   make docker            # builds the local echo:dev image (docker/Dockerfile)
+#   docker compose -f docker-compose.example.yml up
+#
+# Echo and the sidecar are released independently. The sidecar image tag below
+# and the 115share2cas producer baked into the echo image (Dockerfile
+# SIDECAR_TOOLS_REF) and sidecar.default.min_version must all reference the same
+# release (R2) so the deployment is reproducible.
 services:
   sidecar:
     image: ghcr.io/xmm2022/openlist-guangyapan:feat-cas-tools-fixed-by-release
@@ -6,7 +16,7 @@ services:
     environment:
       OPENLIST_ADMIN_TOKEN: ${ECHO_SIDECAR_TOKEN}
     volumes:
-      - ./sidecar-data:/opt/openlist/data
+      - ./sidecar-data:/opt/openlist/data     # sidecar's own DB + bound credentials
     restart: unless-stopped
 
   echo:
@@ -16,12 +26,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      ECHO_ADMIN_TOKEN: ${ECHO_ADMIN_TOKEN}
-      ECHO_SIDECAR_TOKEN: ${ECHO_SIDECAR_TOKEN}
+      ECHO_ADMIN_TOKEN: ${ECHO_ADMIN_TOKEN}     # required: Echo refuses to start without it
+      ECHO_SIDECAR_TOKEN: ${ECHO_SIDECAR_TOKEN}  # until set, /readyz reports 503 (sidecar unauthorized)
     volumes:
       - ./config.example.yaml:/etc/echo/config.yaml:ro
       - ./data:/data
-      - ./output:/data/output
-      - ./ingest:/data/ingest
-      - ./secrets:/data/secrets:ro
+      - ./output:/data/output                   # .echo placeholder output tree
+      - ./ingest:/data/ingest                   # producer job working directories
+      - ./secrets:/data/secrets:ro              # cookie/credential files (admin places these)
     restart: unless-stopped
+
+  # Optional: front Echo with nginx/caddy using nginx.example.conf.

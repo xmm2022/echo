@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -18,6 +19,8 @@ type RestoreDeps struct {
 	Sidecar  Sidecar
 	Cache    *restore.LinkCache
 	Logger   *slog.Logger
+	// Metrics is optional; when nil, restore metrics are not recorded.
+	Metrics *metrics.Metrics
 }
 
 type linkResponse struct {
@@ -44,14 +47,22 @@ type restoreErrorResponse struct {
 // by file_id only — no path-based lookup (spec §13).
 func Restore(deps RestoreDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		provider, result := "unknown", "error"
+		defer func() {
+			deps.Metrics.ObserveRestore(provider, "json", result, time.Since(start).Seconds())
+		}()
+
 		fileID, ok := parseFileID(w, r)
 		if !ok {
+			result = "bad_request"
 			return
 		}
 		prefer := r.URL.Query().Get("prefer")
 
 		copies, err := deps.Resolver.LiveCopies(r.Context(), fileID, prefer)
 		if errors.Is(err, sql.ErrNoRows) {
+			result = "not_found"
 			writeRestoreError(w, http.StatusNotFound, "file-not-found", nil)
 			return
 		}
@@ -63,26 +74,31 @@ func Restore(deps RestoreDeps) http.HandlerFunc {
 
 		var dead []deadCopy
 		for _, fc := range copies {
+			provider = fc.Provider
 			if link, ok := deps.Cache.Get(fc.BlobID, fc.ID); ok {
 				// The cache is a 60s optimization (spec §4): a cached link is served
 				// even if another request marked this copy dead within the TTL
 				// window — the sidecar's own link validity is the real floor.
+				result = "ok"
 				writeJSON(w, http.StatusOK, newLinkResponse(fc, link))
 				return
 			}
 			link, err := deps.Sidecar.Link(r.Context(), fc.StorageMount, fc.RemotePath)
 			if err == nil {
+				result = "ok"
 				deps.Cache.Put(fc.BlobID, fc.ID, link)
 				writeJSON(w, http.StatusOK, newLinkResponse(fc, link))
 				return
 			}
 			reason, abort := handleCopyFailure(r.Context(), deps.Resolver, deps.Logger, "restore", fileID, fc, err)
 			if abort {
+				result = "unavailable"
 				writeRestoreError(w, http.StatusServiceUnavailable, reason, nil)
 				return
 			}
 			dead = append(dead, deadCopy{CopyID: fc.ID, Provider: fc.Provider, Reason: reason})
 		}
+		result = "not_found"
 		writeRestoreError(w, http.StatusNotFound, "all-copies-dead", dead)
 	}
 }

@@ -13,16 +13,25 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+
 	"github.com/xmm2022/echo/internal/config"
 	httpserver "github.com/xmm2022/echo/internal/http"
 	"github.com/xmm2022/echo/internal/http/handlers"
 	"github.com/xmm2022/echo/internal/ingest"
 	"github.com/xmm2022/echo/internal/job"
+	"github.com/xmm2022/echo/internal/logging"
+	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/web"
 )
+
+// version is the Echo build version, surfaced via echo_build_info and /readyz.
+// Override at build time with -ldflags "-X main.version=<tag>".
+var version = "v0.1.0-dev"
 
 const shutdownTimeout = 30 * time.Second
 
@@ -79,7 +88,20 @@ func runServe(args []string) error {
 	}
 	defer st.Close()
 
-	sidecar := sidecarclient.New(sidecarclient.FromEndpointConfig(cfg.Sidecar.Default))
+	// Metrics: a dedicated registry (kept off the global default) holds Echo's
+	// collectors plus the standard Go/process collectors and the pull-based state
+	// gauges. /metrics serves this registry (see Deps.Registry).
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	m := metrics.New(registry)
+	m.SetBuildInfo(version, cfg.Sidecar.Default.MinVersion)
+	registry.MustRegister(metrics.NewStateCollector(st.DB, &storeStateSource{store: st}, logger))
+
+	// rawSidecar drives readiness probes; the instrumented wrapper records
+	// business calls so periodic /readyz pings do not inflate sidecar metrics.
+	rawSidecar := sidecarclient.New(sidecarclient.FromEndpointConfig(cfg.Sidecar.Default))
+	sidecar := metrics.InstrumentSidecar(rawSidecar, m, "default")
 
 	// Job runner: drives ingest jobs (manual + producer).
 	runner, err := job.New(job.Config{
@@ -88,9 +110,12 @@ func runServe(args []string) error {
 			Store:   st,
 			Sidecar: sidecar,
 			Config:  ingestConfig(cfg),
+			Metrics: m,
+			Logger:  logger,
 		}),
 		MaxConcurrent: cfg.Jobs.MaxConcurrent,
 		Logger:        logger,
+		Metrics:       m,
 	})
 	if err != nil {
 		return fmt.Errorf("build job runner: %w", err)
@@ -111,8 +136,8 @@ func runServe(args []string) error {
 	deps := httpserver.Deps{
 		Logger:     logger,
 		AdminToken: cfg.Auth.AdminToken,
-		Restore:    &handlers.RestoreDeps{Resolver: resolver, Sidecar: sidecar, Cache: cache, Logger: logger},
-		Stream:     &handlers.StreamDeps{Resolver: resolver, Sidecar: sidecar, Logger: logger},
+		Restore:    &handlers.RestoreDeps{Resolver: resolver, Sidecar: sidecar, Cache: cache, Logger: logger, Metrics: m},
+		Stream:     &handlers.StreamDeps{Resolver: resolver, Sidecar: sidecar, Logger: logger, Metrics: m},
 		API: &handlers.APIDeps{
 			Store:   st,
 			Sidecar: sidecar,
@@ -121,6 +146,12 @@ func runServe(args []string) error {
 			Logger:  logger,
 		},
 		Web: &web.Deps{Store: st, Logger: logger},
+		Ready: &httpserver.ReadyChecker{
+			DB:      st.DB,
+			Sidecar: rawSidecar,
+			Version: version,
+		},
+		Registry: registry,
 	}
 
 	srv := httpserver.New(cfg, deps)
@@ -180,6 +211,28 @@ func apiConfig(cfg *config.Config) handlers.APIConfig {
 	}
 }
 
+// storeStateSource adapts the store to the metrics gauge collector's read side
+// (echo_account_status / echo_hash_conflicts_open), sampled at scrape time.
+type storeStateSource struct {
+	store *store.Store
+}
+
+func (s *storeStateSource) AccountStatuses(ctx context.Context) ([]metrics.AccountStatus, error) {
+	accounts, err := s.store.ListAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]metrics.AccountStatus, len(accounts))
+	for i, a := range accounts {
+		out[i] = metrics.AccountStatus{Provider: a.Provider, AccountID: a.ID, Status: a.Status}
+	}
+	return out, nil
+}
+
+func (s *storeStateSource) OpenHashConflicts(ctx context.Context) (int64, error) {
+	return s.store.CountOpenHashConflicts(ctx)
+}
+
 func newLogger(cfg config.LogConfig) (*slog.Logger, error) {
 	level, err := parseLogLevel(cfg.Level)
 	if err != nil {
@@ -187,14 +240,17 @@ func newLogger(cfg config.LogConfig) (*slog.Logger, error) {
 	}
 
 	opts := &slog.HandlerOptions{Level: level}
+	var base slog.Handler
 	switch strings.ToLower(cfg.Format) {
 	case "", "json":
-		return slog.New(slog.NewJSONHandler(os.Stdout, opts)), nil
+		base = slog.NewJSONHandler(os.Stdout, opts)
 	case "text":
-		return slog.New(slog.NewTextHandler(os.Stdout, opts)), nil
+		base = slog.NewTextHandler(os.Stdout, opts)
 	default:
 		return nil, fmt.Errorf("log.format must be json or text, got %q", cfg.Format)
 	}
+	// Wrap with the redactor so secrets never reach stdout (spec §8 backstop).
+	return slog.New(logging.NewRedactHandler(base)), nil
 }
 
 func parseLogLevel(value string) (slog.Level, error) {

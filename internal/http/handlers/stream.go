@@ -6,7 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 )
@@ -17,6 +19,8 @@ type StreamDeps struct {
 	Resolver *restore.Resolver
 	Sidecar  Sidecar
 	Logger   *slog.Logger
+	// Metrics is optional; when nil, stream metrics are not recorded.
+	Metrics *metrics.Metrics
 }
 
 // Stream serves GET /api/stream/{file_id}?prefer= — Echo reverse-proxies the
@@ -24,14 +28,22 @@ type StreamDeps struct {
 // Entry is by file_id only — no path-based lookup (spec §13).
 func Stream(deps StreamDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		provider, result := "unknown", "error"
+		defer func() {
+			deps.Metrics.ObserveRestore(provider, "stream", result, time.Since(start).Seconds())
+		}()
+
 		fileID, ok := parseFileID(w, r)
 		if !ok {
+			result = "bad_request"
 			return
 		}
 		prefer := r.URL.Query().Get("prefer")
 
 		copies, err := deps.Resolver.LiveCopies(r.Context(), fileID, prefer)
 		if errors.Is(err, sql.ErrNoRows) {
+			result = "not_found"
 			writeStreamError(w, http.StatusNotFound, "file-not-found")
 			return
 		}
@@ -42,10 +54,12 @@ func Stream(deps StreamDeps) http.HandlerFunc {
 		}
 
 		for _, fc := range copies {
+			provider = fc.Provider
 			req := restore.StreamRequestFor(fc, r.Header)
-			result, err := deps.Sidecar.Stream(r.Context(), req)
+			result2, err := deps.Sidecar.Stream(r.Context(), req)
 			if err == nil {
-				if cErr := writeStreamResult(w, result); cErr != nil {
+				result = "ok"
+				if cErr := writeStreamResult(w, result2); cErr != nil {
 					// Mid-stream break: headers are already sent, so we cannot
 					// change the status — just record it and stop (no retry).
 					deps.Logger.Warn("stream: copy interrupted", "file_id", fileID, "copy_id", fc.ID, "err", cErr)
@@ -54,10 +68,12 @@ func Stream(deps StreamDeps) http.HandlerFunc {
 			}
 			reason, abort := handleCopyFailure(r.Context(), deps.Resolver, deps.Logger, "stream", fileID, fc, err)
 			if abort {
+				result = "unavailable"
 				writeStreamError(w, http.StatusServiceUnavailable, reason)
 				return
 			}
 		}
+		result = "not_found"
 		writeStreamError(w, http.StatusNotFound, "all-copies-dead")
 	}
 }

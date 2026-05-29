@@ -16,6 +16,10 @@ WHERE status = 'open'
 ORDER BY observed_at DESC
 LIMIT ? OFFSET ?;
 
+-- name: CountOpenHashConflicts :one
+SELECT COUNT(*) FROM hash_conflicts
+WHERE status = 'open';
+
 -- name: UpdateHashConflictStatus :exec
 UPDATE hash_conflicts
 SET status = ?

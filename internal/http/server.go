@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/xmm2022/echo/internal/config"
@@ -43,6 +44,11 @@ type Deps struct {
 	Stream     *handlers.StreamDeps
 	API        *handlers.APIDeps
 	Web        *web.Deps
+	// Ready backs /readyz with real DB + sidecar probes. When nil, /readyz
+	// reports not_ready (503) — the pre-wiring default used in tests.
+	Ready *ReadyChecker
+	// Registry serves /metrics. When nil the default Prometheus registry is used.
+	Registry *prometheus.Registry
 }
 
 // Handler builds a minimal handler exposing only the operational endpoints. Used
@@ -67,8 +73,16 @@ func HandlerWithDeps(deps Deps) http.Handler {
 
 	// Operational endpoints: always public (liveness/readiness probes, scrape).
 	r.Get("/healthz", healthz)
-	r.Get("/readyz", readyz)
-	r.Handle("/metrics", promhttp.Handler())
+	if deps.Ready != nil {
+		r.Get("/readyz", deps.Ready.handler())
+	} else {
+		r.Get("/readyz", readyz)
+	}
+	if deps.Registry != nil {
+		r.Handle("/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
+	} else {
+		r.Handle("/metrics", promhttp.Handler())
+	}
 
 	// Public, data-free dashboard shell + vendored assets (browser auth happens
 	// client-side: the admin pastes the token, app.js attaches it to /ui + /api).

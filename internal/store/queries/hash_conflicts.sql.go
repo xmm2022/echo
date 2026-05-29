@@ -9,6 +9,18 @@ import (
 	"context"
 )
 
+const countOpenHashConflicts = `-- name: CountOpenHashConflicts :one
+SELECT COUNT(*) FROM hash_conflicts
+WHERE status = 'open'
+`
+
+func (q *Queries) CountOpenHashConflicts(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countOpenHashConflicts)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getHashConflict = `-- name: GetHashConflict :one
 SELECT id, blob_id_a, blob_id_b, reason, detail, observed_at, status FROM hash_conflicts
 WHERE id = ?

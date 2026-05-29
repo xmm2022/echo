@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/xmm2022/echo/internal/castree"
 	"github.com/xmm2022/echo/internal/echofile"
+	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/pathsafe"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
@@ -67,6 +69,10 @@ type Deps struct {
 	Config     Config
 	Now        func() time.Time
 	ExecRunner producerExecRunner
+	// Metrics is optional; when nil, ingest metrics are not recorded.
+	Metrics *metrics.Metrics
+	// Logger is optional; when nil, slog.Default() is used for key events.
+	Logger *slog.Logger
 }
 
 type FailedItem struct {
@@ -111,6 +117,7 @@ type manualRunner struct {
 	now          func() time.Time
 	progress     *progressTracker
 	dedup        *deduper
+	metrics      *metrics.Metrics
 }
 
 func RunManual(ctx context.Context, job Job, deps Deps) error {
@@ -150,6 +157,7 @@ func RunManual(ctx context.Context, job Job, deps Deps) error {
 
 	progress := newProgressTracker(deps.Store, job.ID, len(items)+len(parseErrs), progressInterval(deps.Config), now)
 	for _, parseErr := range parseErrs {
+		deps.Metrics.IncIngestItem(account.Provider, "parse_error")
 		if err := progress.Failed(ctx, "", parseErr.Error()); err != nil {
 			return err
 		}
@@ -165,6 +173,7 @@ func RunManual(ctx context.Context, job Job, deps Deps) error {
 		now:          now,
 		progress:     progress,
 		dedup:        newDeduper(),
+		metrics:      deps.Metrics,
 	}
 
 	workerCount := deps.Config.WorkerPerJob
@@ -237,6 +246,7 @@ func RunManual(ctx context.Context, job Job, deps Deps) error {
 func (r *manualRunner) processItem(ctx context.Context, item castree.Item) error {
 	relPath, err := normalizeRelPath(item.RelPath)
 	if err != nil {
+		r.metrics.IncIngestItem(r.account.Provider, "parse_error")
 		return r.progress.Failed(ctx, item.RelPath, "invalid rel_path: "+err.Error())
 	}
 	item.RelPath = relPath
@@ -246,33 +256,41 @@ func (r *manualRunner) processItem(ctx context.Context, item castree.Item) error
 
 	key := makeDedupKey(r.library.ID, item.RelPath, r.account.ID, r.account.StorageMount, r.targetSubdir)
 	if !r.dedup.Add(key) {
+		r.metrics.IncIngestItem(r.account.Provider, "skipped_dup")
 		return r.progress.Done(ctx, "skipped duplicate item")
 	}
 
 	blobID, err := r.resolveCandidateAndHashes(ctx, item)
 	if err != nil {
+		r.metrics.IncIngestItem(r.account.Provider, "failed")
 		return r.progress.Failed(ctx, item.RelPath, err.Error())
 	}
 
 	restore, terminated, err := restoreWithSidecar(ctx, r.sidecar, r.job.CASTreePath, r.account, item, r.targetSubdir)
 	if err != nil {
+		// Fatal pipeline error (not a per-item terminal result): the job aborts.
 		return err
 	}
 	if terminated {
+		r.metrics.IncIngestItem(r.account.Provider, "failed")
 		return r.progress.Failed(ctx, item.RelPath, restoreFailureReason(restore))
 	}
 
 	entry, terminated, reason, err := applyTwoPhaseCommit(ctx, r.store, r.library, r.account, item, blobID, restore, r.now)
 	if err != nil {
+		r.metrics.IncIngestItem(r.account.Provider, "failed")
 		return r.progress.Failed(ctx, item.RelPath, err.Error())
 	}
 	if terminated {
+		r.metrics.IncIngestItem(r.account.Provider, "failed")
 		return r.progress.Failed(ctx, item.RelPath, reason)
 	}
 
 	if err := writeEchoFile(ctx, r.store, r.library, entry, item, r.now); err != nil {
+		r.metrics.IncIngestItem(r.account.Provider, "failed")
 		return r.progress.Failed(ctx, item.RelPath, err.Error())
 	}
+	r.metrics.IncIngestItem(r.account.Provider, "restored")
 	return r.progress.Done(ctx, "ingested "+item.RelPath)
 }
 
@@ -609,6 +627,10 @@ func insertHashConflict(ctx context.Context, q *queries.Queries, blobIDA, blobID
 	if err != nil {
 		return queries.HashConflict{}, fmt.Errorf("insert hash conflict %s: %w", reason, err)
 	}
+	// Key event (spec §8): a new cross-blob hash conflict was recorded. Logged
+	// via slog.Default() (the redacted logger main installs) rather than threading
+	// a logger through the two-phase-commit leaf path.
+	slog.Default().Info("hash conflict detected", "reason", reason, "blob_id_a", blobIDA, "blob_id_b", blobIDB)
 	return conflict, nil
 }
 

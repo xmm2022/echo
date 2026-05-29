@@ -7,8 +7,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -62,9 +64,18 @@ func RunProducer(ctx context.Context, job Job, deps Deps) error {
 	if runner == nil {
 		runner = ingestexec.OSRunner{}
 	}
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	spec, err := prepareProducerRun(job, deps.Config.Producer)
 	if err != nil {
+		// Record rejected requests only for known tools so the {tool} label stays
+		// bounded (an unknown tool name must not become a new metric series).
+		if errors.Is(err, ErrProducerUnauthorized) && isAllowedProducerTool(job.Tool) {
+			deps.Metrics.IncProducerRun(job.Tool, "unauthorized")
+		}
 		return err
 	}
 
@@ -105,6 +116,7 @@ func RunProducer(ctx context.Context, job Job, deps Deps) error {
 	if err != nil {
 		return fmt.Errorf("create producer run: %w", err)
 	}
+	logger.Info("producer run started", "tool", spec.Tool, "job_id", job.ID, "producer_run_id", run.ID)
 
 	result, runErr := runner.Run(ctx, ingestexec.Command{
 		Path:    spec.Binary,
@@ -132,15 +144,21 @@ func RunProducer(ctx context.Context, job Job, deps Deps) error {
 	if finishErr != nil {
 		return fmt.Errorf("finish producer run: %w", finishErr)
 	}
+	logger.Info("producer run finished",
+		"tool", spec.Tool, "job_id", job.ID, "producer_run_id", run.ID,
+		"exit_code", exitCode, "timed_out", result.TimedOut)
 	if runErr != nil || exitCode != 0 {
 		if result.TimedOut {
+			deps.Metrics.IncProducerRun(spec.Tool, "timeout")
 			return fmt.Errorf("%w: timed out after %s", ErrProducerExitFailed, spec.Timeout)
 		}
+		deps.Metrics.IncProducerRun(spec.Tool, "exit_failed")
 		if runErr != nil {
 			return fmt.Errorf("%w: %v", ErrProducerExitFailed, runErr)
 		}
 		return fmt.Errorf("%w: exit code %d", ErrProducerExitFailed, exitCode)
 	}
+	deps.Metrics.IncProducerRun(spec.Tool, "success")
 
 	outputDir, manifestPath, err := validateProducerOutputs(spec.Workdir)
 	if err != nil {
