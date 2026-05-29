@@ -20,6 +20,11 @@ WHERE status = ?
 ORDER BY created_at, id
 LIMIT ?;
 
+-- name: ListJobIDsByStatus :many
+SELECT id FROM jobs
+WHERE status = ?
+ORDER BY created_at, id;
+
 -- name: MarkJobRunning :exec
 UPDATE jobs
 SET status = 'running',
@@ -30,6 +35,13 @@ WHERE id = ?;
 UPDATE jobs
 SET progress = ?
 WHERE id = ?;
+
+-- name: FailRunningJobs :exec
+UPDATE jobs
+SET status = 'failed',
+    error = ?,
+    finished_at = ?
+WHERE status = 'running';
 
 -- name: FinishJob :exec
 UPDATE jobs

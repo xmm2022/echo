@@ -73,6 +73,24 @@ func (q *Queries) DeleteJob(ctx context.Context, arg DeleteJobParams) error {
 	return err
 }
 
+const failRunningJobs = `-- name: FailRunningJobs :exec
+UPDATE jobs
+SET status = 'failed',
+    error = ?,
+    finished_at = ?
+WHERE status = 'running'
+`
+
+type FailRunningJobsParams struct {
+	Error      sql.NullString `json:"error"`
+	FinishedAt sql.NullInt64  `json:"finished_at"`
+}
+
+func (q *Queries) FailRunningJobs(ctx context.Context, arg FailRunningJobsParams) error {
+	_, err := q.db.ExecContext(ctx, failRunningJobs, arg.Error, arg.FinishedAt)
+	return err
+}
+
 const finishJob = `-- name: FinishJob :exec
 UPDATE jobs
 SET status = ?,
@@ -123,6 +141,39 @@ func (q *Queries) GetJob(ctx context.Context, arg GetJobParams) (Job, error) {
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const listJobIDsByStatus = `-- name: ListJobIDsByStatus :many
+SELECT id FROM jobs
+WHERE status = ?
+ORDER BY created_at, id
+`
+
+type ListJobIDsByStatusParams struct {
+	Status string `json:"status"`
+}
+
+func (q *Queries) ListJobIDsByStatus(ctx context.Context, arg ListJobIDsByStatusParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listJobIDsByStatus, arg.Status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listJobsByStatus = `-- name: ListJobsByStatus :many
