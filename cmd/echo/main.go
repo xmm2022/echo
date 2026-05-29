@@ -32,6 +32,8 @@ func run(args []string) error {
 	}
 
 	switch args[0] {
+	case "migrate":
+		return runMigrate(args[1:])
 	case "serve":
 		return runServe(args[1:])
 	default:
