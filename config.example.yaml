@@ -13,7 +13,10 @@ sidecar:
   default:
     base_url: http://sidecar:5244
     auth_token_env: ECHO_SIDECAR_TOKEN
-    min_version: "feat-cas-tools@fixed-by-release"
+    # Must exactly match the first sidecar version string Echo reads from
+    # /api/public/settings or /ping. Replace this Phase 12 placeholder after the
+    # real sidecar reports its commit/tag.
+    min_version: "TBD-pending-real-sidecar-version"
     request_timeout: 60s
     stream_timeout: 10m
 

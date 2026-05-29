@@ -10,7 +10,7 @@
 # release (R2) so the deployment is reproducible.
 services:
   sidecar:
-    image: ghcr.io/xmm2022/openlist-guangyapan:feat-cas-tools-fixed-by-release
+    image: ghcr.io/xmm2022/openlist-guangyapan:feat-cas-tools-3324d78
     ports:
       - "5244:5244"
     environment:

@@ -6,21 +6,23 @@
 # sync with sidecar.default.min_version and the Echo release notes so a release
 # is reproducible. Override with: docker build --build-arg SIDECAR_TOOLS_REF=<ref>
 ARG SIDECAR_TOOLS_REF=3324d78
+ARG ECHO_VERSION=v0.1.0-dev
 
 # ---- stage 1: build the echo control-plane binary ----
 FROM golang:1.22-alpine AS echo-build
+ARG ECHO_VERSION
 RUN apk add --no-cache ca-certificates
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/echo ./cmd/echo
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -trimpath -ldflags="-s -w -X main.version=${ECHO_VERSION}" -o /out/echo ./cmd/echo
 RUN mkdir -p /out/data/ingest /out/data/secrets /out/data/output
 
 # ---- stage 2: build 115share2cas from the pinned sidecar ref ----
 # cas139 (Python) is deliberately NOT built into this image (spec §9): it runs in
 # a 139 client environment; users prepare its .cas output and manual-import it.
-FROM golang:1.22-alpine AS tools-build
+FROM golang:1.24-alpine AS tools-build
 ARG SIDECAR_TOOLS_REF
 RUN apk add --no-cache git
 WORKDIR /sidecar
