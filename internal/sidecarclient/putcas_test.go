@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,8 +35,8 @@ func TestPutCASRestoresWithContentLengthAndFilePath(t *testing.T) {
 	}
 
 	req := fake.LastPutCASRequest()
-	if req.FilePath != "/Movies/Film.mkv.cas" {
-		t.Fatalf("File-Path = %q, want /Movies/Film.mkv.cas", req.FilePath)
+	if req.FilePath != "/115-main/Movies/Film.mkv.cas" {
+		t.Fatalf("File-Path = %q, want /115-main/Movies/Film.mkv.cas", req.FilePath)
 	}
 	if req.ContentLength != int64(len("cas-payload")) {
 		t.Fatalf("ContentLength = %d, want %d", req.ContentLength, len("cas-payload"))
@@ -97,6 +99,27 @@ func TestPutCASErrorMapping(t *testing.T) {
 				t.Fatalf("PutCAS error = %v, want %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestPutCASRejectsOpenListEnvelopeError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"code":500,"message":"sig invalid","data":null}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := New(testConfig(server.URL, ""))
+	_, err := client.PutCAS(context.Background(), PutCASRequest{
+		StorageMount: "/115-main",
+		RemoteDir:    "/Movies",
+		CASName:      "Film.mkv.cas",
+		CASBody:      bytes.NewReader([]byte("cas-payload")),
+		CASSize:      int64(len("cas-payload")),
+	})
+	if err == nil || !strings.Contains(err.Error(), "sig invalid") {
+		t.Fatalf("PutCAS error = %v, want sidecar api error with message", err)
 	}
 }
 

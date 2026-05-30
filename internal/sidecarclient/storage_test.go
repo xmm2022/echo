@@ -18,7 +18,7 @@ func TestListStorages(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("ListStorages returned %d storages, want 2", len(got))
 	}
-	if got[0].ID != "115-main" || got[0].MountPath != "/115-main" || got[0].Provider != "115" {
+	if got[0].ID != "1" || got[0].MountPath != "/115-main" || got[0].Provider != "115" {
 		t.Fatalf("unexpected first storage: %#v", got[0])
 	}
 }

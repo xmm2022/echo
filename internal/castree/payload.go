@@ -7,9 +7,9 @@ import (
 	"fmt"
 )
 
-// Payload mirrors the upstream openlist-guangyapan-src feat/cas-tools
-// pkg/casmeta field table; Echo reimplements the codec instead of importing
-// sidecar code. See docs/superpowers/specs §10.
+// Payload mirrors the upstream cas-tools internal/casmeta field table (commit
+// 3324d78, the branch the spec calls feat/cas-tools); Echo reimplements the
+// codec instead of importing sidecar code. See docs/superpowers/specs §10.
 type Payload struct {
 	Name       string `json:"name"`
 	Size       int64  `json:"size"`

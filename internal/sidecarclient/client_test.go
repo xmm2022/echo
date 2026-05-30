@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -14,8 +15,7 @@ import (
 
 func TestVersionRequiresExactMinVersion(t *testing.T) {
 	fake := fakesidecar.New(t, fakesidecar.Options{
-		Version: "display-version",
-		Commit:  "sidecar-abc123",
+		Version: "sidecar-abc123",
 	})
 	client := New(testConfig(fake.URL(), "sidecar-abc123"))
 
@@ -34,7 +34,7 @@ func TestVersionRequiresExactMinVersion(t *testing.T) {
 	}
 }
 
-func TestRequestInjectsBearerToken(t *testing.T) {
+func TestRequestInjectsSidecarToken(t *testing.T) {
 	t.Setenv("ECHO_TEST_SIDECAR_TOKEN", "secret-token")
 	fake := fakesidecar.New(t, fakesidecar.Options{Version: "sidecar-abc123"})
 	client := New(testConfig(fake.URL(), "sidecar-abc123"))
@@ -44,8 +44,71 @@ func TestRequestInjectsBearerToken(t *testing.T) {
 	}
 
 	got := fake.LastAuthorization()
-	if got != "Bearer secret-token" {
-		t.Fatalf("Authorization = %q, want Bearer secret-token", got)
+	if got != "secret-token" {
+		t.Fatalf("Authorization = %q, want secret-token", got)
+	}
+}
+
+func TestListStoragesAcceptsOpenListPageShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/admin/storage/list" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"message":"success","data":{"content":[{"id":1,"provider":"wrong","driver":"GuangYaPan","mount_path":"/guangya","status":"work"}],"total":1}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := New(testConfig(server.URL, ""))
+	storages, err := client.ListStorages(context.Background())
+	if err != nil {
+		t.Fatalf("ListStorages returned error: %v", err)
+	}
+	if len(storages) != 1 {
+		t.Fatalf("len(storages) = %d, want 1", len(storages))
+	}
+	got := storages[0]
+	if got.ID != "1" || got.Provider != "GuangYaPan" || got.MountPath != "/guangya" || got.Status != "work" {
+		t.Fatalf("storage = %+v, want OpenList page storage decoded", got)
+	}
+}
+
+func TestListStoragesRejectsNonPageShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"message":"success","data":[{"id":1,"driver":"115","mount_path":"/115-main","status":"ok"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := New(testConfig(server.URL, ""))
+	if _, err := client.ListStorages(context.Background()); err == nil {
+		t.Fatal("ListStorages error = nil, want non-page shape rejected")
+	}
+}
+
+func TestListStoragesRejectsStringID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"message":"success","data":{"content":[{"id":"1","driver":"115","mount_path":"/115-main","status":"ok"}],"total":1}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := New(testConfig(server.URL, ""))
+	if _, err := client.ListStorages(context.Background()); err == nil {
+		t.Fatal("ListStorages error = nil, want string id rejected")
+	}
+}
+
+func TestListStoragesRequiresOpenListEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"content":[{"id":1,"driver":"115","mount_path":"/115-main","status":"ok"}],"total":1}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := New(testConfig(server.URL, ""))
+	if _, err := client.ListStorages(context.Background()); err == nil {
+		t.Fatal("ListStorages error = nil, want missing OpenList code rejected")
 	}
 }
 

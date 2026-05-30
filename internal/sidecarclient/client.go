@@ -192,7 +192,7 @@ func (c *Client) doNoCancel(ctx context.Context, method, path string, body io.Re
 		}
 	}
 	if c.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.authToken)
+		req.Header.Set("Authorization", c.authToken)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -238,11 +238,29 @@ func decodeData(r io.Reader, dst any) error {
 	if err != nil {
 		return err
 	}
+	// Every OpenList JSON response is wrapped in {code,message,data}. A body
+	// without a code is not a valid sidecar envelope and is rejected — we pin to
+	// the real contract instead of best-effort decoding arbitrary JSON.
 	var wrapped struct {
-		Data json.RawMessage `json:"data"`
+		Code    *int            `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(data, &wrapped); err == nil && len(wrapped.Data) > 0 && !bytes.Equal(wrapped.Data, []byte("null")) {
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return fmt.Errorf("decode sidecar response: %w", err)
+	}
+	if wrapped.Code == nil {
+		return fmt.Errorf("sidecar response missing OpenList envelope code")
+	}
+	if *wrapped.Code != 0 && *wrapped.Code != http.StatusOK {
+		msg := wrapped.Message
+		if msg == "" {
+			msg = http.StatusText(*wrapped.Code)
+		}
+		return fmt.Errorf("sidecar api error: code=%d message=%s", *wrapped.Code, msg)
+	}
+	if len(wrapped.Data) > 0 && !bytes.Equal(wrapped.Data, []byte("null")) {
 		return json.Unmarshal(wrapped.Data, dst)
 	}
-	return json.Unmarshal(data, dst)
+	return nil
 }

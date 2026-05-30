@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -53,6 +54,9 @@ type Server struct {
 
 type PutCASRequest struct {
 	FilePath      string
+	RawFilePath   string
+	AsTask        string
+	Overwrite     string
 	ContentLength int64
 	Body          []byte
 }
@@ -172,11 +176,8 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	if s.maybeHang(r) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"version": s.version,
-		"commit":  s.commit,
-	})
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "pong")
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -184,11 +185,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if s.maybeHang(r) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]string{
-			"version": s.version,
-			"commit":  s.commit,
-		},
+	writeOpenListJSON(w, http.StatusOK, http.StatusOK, "success", map[string]string{
+		"version": s.version,
 	})
 }
 
@@ -198,14 +196,15 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.storageStatus != http.StatusOK {
-		writeJSON(w, s.storageStatus, map[string]string{"message": "storage error"})
+		writeOpenListJSON(w, s.storageStatus, s.storageStatus, "storage error", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": []map[string]string{
-			{"id": "115-main", "provider": "115", "mount_path": "/115-main", "status": "ok"},
-			{"id": "189-main", "provider": "189pc", "mount_path": "/189-main", "status": "ok"},
+	writeOpenListJSON(w, http.StatusOK, http.StatusOK, "success", map[string]any{
+		"content": []map[string]any{
+			{"id": 1, "driver": "115", "mount_path": "/115-main", "status": "ok"},
+			{"id": 2, "driver": "189pc", "mount_path": "/189-main", "status": "ok"},
 		},
+		"total": int64(2),
 	})
 }
 
@@ -215,14 +214,26 @@ func (s *Server) handlePutCAS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(r.Body)
-	filePath := r.Header.Get("File-Path")
+	rawFilePath := r.Header.Get("File-Path")
+	filePath, err := url.PathUnescape(rawFilePath)
+	if err != nil {
+		writeOpenListJSON(w, http.StatusBadRequest, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
 	contentLength := r.ContentLength
 	if contentLength < 0 {
 		contentLength, _ = strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
 	}
 	s.mu.Lock()
 	s.putCASCount++
-	s.lastPutCAS = PutCASRequest{FilePath: filePath, ContentLength: contentLength, Body: body}
+	s.lastPutCAS = PutCASRequest{
+		FilePath:      filePath,
+		RawFilePath:   rawFilePath,
+		AsTask:        r.Header.Get("As-Task"),
+		Overwrite:     r.Header.Get("Overwrite"),
+		ContentLength: contentLength,
+		Body:          body,
+	}
 	s.inFlightPutCAS++
 	if s.inFlightPutCAS > s.maxInFlightPutCAS {
 		s.maxInFlightPutCAS = s.inFlightPutCAS
@@ -246,25 +257,15 @@ func (s *Server) handlePutCAS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !strings.HasSuffix(filePath, ".cas") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "not a .cas file"})
+		writeOpenListJSON(w, http.StatusBadRequest, http.StatusBadRequest, "not a .cas file", nil)
 		return
 	}
 	if s.putCASStatus != http.StatusOK {
-		writeJSON(w, s.putCASStatus, map[string]string{"message": "put cas error"})
+		writeOpenListJSON(w, s.putCASStatus, s.putCASStatus, "put cas error", nil)
 		return
 	}
 
-	cloudPath := strings.TrimSuffix(filePath, ".cas")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"status":     "restored",
-			"cloud_path": cloudPath,
-			"size_bytes": int64(len(body)),
-			"hashes": map[string]string{
-				"sha1": "fake-sha1",
-			},
-		},
-	})
+	writeOpenListJSON(w, http.StatusOK, http.StatusOK, "success", nil)
 }
 
 func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
@@ -282,15 +283,13 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if s.linkStatus != http.StatusOK {
-		writeJSON(w, s.linkStatus, map[string]string{"message": "link error"})
+		writeOpenListJSON(w, s.linkStatus, s.linkStatus, "link error", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"url":        "https://download.example" + remotePath,
-			"headers":    map[string]string{"X-Download-Token": "fake-link-token"},
-			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		},
+	writeOpenListJSON(w, http.StatusOK, http.StatusOK, "success", map[string]any{
+		"url":        "https://download.example" + remotePath,
+		"headers":    map[string]string{"X-Download-Token": "fake-link-token"},
+		"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	})
 }
 
@@ -304,7 +303,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if s.streamStatus != 0 {
-		writeJSON(w, s.streamStatus, map[string]string{"message": "stream error"})
+		writeOpenListJSON(w, s.streamStatus, s.streamStatus, "stream error", nil)
 		return
 	}
 
@@ -369,6 +368,14 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeOpenListJSON(w http.ResponseWriter, httpStatus, code int, message string, data any) {
+	writeJSON(w, httpStatus, map[string]any{
+		"code":    code,
+		"message": message,
+		"data":    data,
+	})
 }
 
 func firstNonEmpty(values ...string) string {

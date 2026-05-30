@@ -69,7 +69,8 @@ type envConfig struct {
 	streamTimeout  time.Duration
 	// externalSidecarURL, when set, points the client at a real running sidecar
 	// instead of an in-process fake (used by integration_real). The fake is not
-	// created in that mode (env.fake is nil). externalSidecarToken is its bearer.
+	// created in that mode (env.fake is nil). externalSidecarToken is passed as
+	// the raw OpenList Authorization token.
 	externalSidecarURL   string
 	externalSidecarToken string
 }
@@ -118,7 +119,7 @@ func newEnv(t *testing.T, cfg envConfig) *testEnv {
 		}
 		fake = fakesidecar.New(t, cfg.fakeOpts)
 		sidecarURL = fake.URL()
-		// The sidecar client reads its bearer token from this env at construction.
+		// The sidecar client reads its raw OpenList Authorization token from this env.
 		t.Setenv(sidecarTokenEnv, "sidecar-test-token")
 	}
 
@@ -331,6 +332,7 @@ type jobResp struct {
 	ID           int64           `json:"id"`
 	Kind         string          `json:"kind"`
 	Status       string          `json:"status"`
+	Progress     json.RawMessage `json:"progress,omitempty"`
 	Error        string          `json:"error,omitempty"`
 	Payload      json.RawMessage `json:"payload,omitempty"`
 	ProducerRuns []producerRun   `json:"producer_runs,omitempty"`

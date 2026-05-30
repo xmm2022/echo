@@ -158,6 +158,15 @@ Echo **不**调以下东西 (越界):
 
 凭据存储在 sidecar 上 (sidecar 自己负责加密 + 刷新)。Echo DB 里 `accounts` 表只存 sidecar 上 storage 的引用 (sidecar id + storage mount path),不复制凭据。
 
+**Phase 12 实测契约细节** (对接真实 guangyapan sidecar 后固化,纠正 phase1-11 基于 fake 的假设):
+
+- **响应信封**: 所有 JSON 端点统一 `{"code":int,"message":string,"data":...}` (`server/common/resp.go` 的 `Resp[T]`)。Echo `decodeData` **强制要求 `code` 字段存在**,缺失即拒。**业务错误码在 body**,HTTP status 常为 200 (实测 guest 调 storage/list → HTTP 200 + body `code:401`);`code != 200` 视为错误。
+- **认证**: `Authorization: <token>` 裸 token,**无 `Bearer ` 前缀**。
+- **storage/list**: `data` 为分页 `{"content":[...],"total":N}` (`common.PageResp`),**只接受分页,裸数组拒**。元素字段取自 `model.Storage`: `id`(数字主键,**字符串 id 拒**)、`driver`(**无 `provider` 字段**;Echo 内部 `Provider` 由 `driver` 填充)、`mount_path`、`status`。
+- **fs/put** (`FsStream`): 目标路径走 `File-Path` header,**逐段 percent-escape**(服务端 `url.PathUnescape`);同步上传成功返回 `{code:200,data:null}`,**不回传 status/cloud_path** → Echo 默认 `restored` 并自行 derive cloud path。`skipped_dup` 主要由 Echo DB 层 blob 去重判定 (§4 步骤 3.d),sidecar 不回传该状态。
+- **版本探测**: `GET /api/public/settings` 的 `data.version`;`GET /ping` 返回纯文本 `pong`(无版本,不可 JSON 解析)。dev 构建 version 形如 `"dev (Commit: unknown) - Frontend: rolling - Build at: unknown"`,无稳定版本号 → `min_version` 留空跳过精确校验,release 构建再钉。
+- **.cas 字段表**: 对齐 `internal/casmeta` (cas-tools commit `3324d78`,即本 spec 所称 feat/cas-tools) 的 9 字段 `Payload` (`provider/name/size/md5/sliceMd5/sha1/preID/sha256/create_time`),**非**早先写的 `pkg/casmeta`。`provider=="115"` 时 `sha1`+`preID` 必填 (115 秒传必需)。
+
 ### Echo 包结构
 
 ```
@@ -898,6 +907,24 @@ Echo **不能**在 ingest 失败时改走"真实数据上传"。任何 sidecar �
 - 不做 sidecar 自动重启 (运维职责, 由 docker / systemd 管)
 - v0.1 不做跨进程分布式锁 (单 Echo 实例假设;sidecar 单实例假设)
 - 不做"假装秒传"的桩 (任何 Stub mode 都禁止合并到主分支,只允许在 integration test 用 sidecar fake server)
+
+### Phase 12 实测: sidecar 错误模型 (v0.2 修复待办)
+
+对接真实 guangyapan sidecar 后实测确认,真机错误语义与上面"分层错误类型 / 降级策略"的部分假设**不一致**,记录在此**留 v0.2 修复**(非阻塞——多副本 fallback 仍工作,见下):
+
+- **真机错误模型** (`server/common/common.go` + 实测):
+  - admin / fs API (`storage/list`、`fs/put`、`fs/link`): 失败一律 **HTTP 200 + body `{code,message}`** (`common.ErrorResp` 恒 `c.JSON(200,...)`),业务码在 body,HTTP status 不反映失败。
+  - 下载端点 (`/d/`): 失败用**真实 HTTP status + HTML** (`common.ErrorPage`);proxy 模式可能透传上游 status。
+  - **openlist 不区分"副本永久失效"与"临时故障"**: 文件不存在 / storage 失效都是 `code:500` / `HTTP500`,**没有 404/410 这种明确 dead 信号**。
+- **当前 echo 的偏差** (`handleCopyFailure` + `sidecarclient/{link,stream}.go`):
+  - `SidecarHTTPError{404,410} → MarkDead` 在真机**永不触发** → 失效副本不被持久标记,每次 restore 都重试一遍 (慢 + sidecar 多余负载,**非阻塞**)。
+  - `Link` 失败现为 generic 字符串错误 (`decodeData` 的 `"sidecar api error: code=..."`),未结构化 → `handleCopyFailure` 落兜底分支 (仍 `abort=false` 继续 fallback,所以**功能不挂**)。
+- **v0.2 修复方向**:
+  1. `sidecarclient` 加 `SidecarAPIError{Code,Message}`,`decodeData` 业务码非 200 时返回它 (替换 generic error)。
+  2. `handleCopyFailure` 按 `SidecarAPIError.Code` / `/d/` 真实 HTTP status 分类。
+  3. `fakesidecar` 修正为真机错误模型 (admin/fs API 错误 = HTTP200 + body code,而非当前的 HTTP status=code)。
+  4. **永久标 dead 的启发式** (连续失败计数等) —— openlist 不给 dead 信号,需真机多副本场景 (= 块2 真机验收) 才能定。
+- **块2 真机验收** (`real_115_test` 喂 cas-pipeline 产物连真机端到端): 需真机 sidecar token + 小样本 `.cas tree`,与上述错误模型修复一并在 v0.2 开工前做。
 
 ## 6. 配置与凭据
 

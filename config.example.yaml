@@ -13,10 +13,12 @@ sidecar:
   default:
     base_url: http://sidecar:5244
     auth_token_env: ECHO_SIDECAR_TOKEN
-    # Must exactly match the first sidecar version string Echo reads from
-    # /api/public/settings or /ping. Replace this Phase 12 placeholder after the
-    # real sidecar reports its commit/tag.
-    min_version: "TBD-pending-real-sidecar-version"
+    # Exact-match gate against the version string Echo reads from the sidecar's
+    # /api/public/settings (data.version). Empty = skip the version gate
+    # (liveness via /ping is still required). Pin to the sidecar's release
+    # tag/commit in production; the current guangyapan dev build reports
+    # "dev (Commit: unknown) - Frontend: rolling - Build at: unknown".
+    min_version: ""
     request_timeout: 60s
     stream_timeout: 10m
 

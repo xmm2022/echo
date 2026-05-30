@@ -57,6 +57,15 @@ OpenList (AGPL, OpenListTeam) — 通用网盘挂载框架
 
 Echo 不重写 driver，也不通过 Go module import sidecar；而是站在 sidecar (`openlist-guangyapan-src`) 的 OpenList HTTP API 之上做业务编排（ingest / restore / 资源池 / Job），sidecar 进程边界即接口契约。
 
+## CAS 生产：内置 producer vs 外部 cas-pipeline
+
+Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必须由生产器产出。两条路径，定位不同：
+
+- **外部 `cas-pipeline`（可控主力）**：独立工具，用 115 webapi 编排「转存进自有账号 → 建永久分享 → 生成 CAS → 删临时」（stage 模式），产出 `.cas tree` + `manifest.jsonl`，再走 `POST /api/ingest/manual` 导入。这是建设 115 资源池的**可控主力**——资源落在你自己账号下，不依赖他人分享存活。stage 那套有状态 / 有副作用的编排（配额、回收站、审核轮询）**不进 Echo**。
+- **内置 `115share2cas` producer（机会主义）**：`POST /api/ingest/producer` 直接 exec `115share2cas` 的 direct 模式，从**他人的分享链接**直接抽 CAS。方便，但**依赖该分享存活、不可控**，仅作机会主义入口。
+
+> 边界原则：Echo = CAS 消费 + 资源池（manual import + restore/stream + 跨云去重）；CAS 生产（尤其 115 的 stage 编排）交给外部工具。两者通过 `.cas tree` + `manifest.jsonl` 文件解耦，符合"进程边界即接口契约"的同源思路。
+
 ## HTTP API 与管理后台
 
 `echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。v0.1 用单一静态 admin token（`auth.admin_token`）做 Bearer 鉴权，所有 API 与管理后台数据接口都在鉴权之后；`/healthz`、`/readyz`、`/metrics` 与数据无关的仪表盘外壳 `/` 公开。
@@ -73,7 +82,7 @@ Echo 站在 OpenList 生态之上，CAS（秒传占位）模式与多云 driver 
   - `cmd/115share2cas`（`feat/cas-tools` 分支）— 115 分享 → 本地 CAS tree 生产器，已编译进 Echo 镜像
   - `tools/cas139`（`feat/cas-tools` 分支）— 139 分享 → CAS tree 生产器（Python，需在 139 客户端环境运行，产物走 manual import，**不**打包进镜像）
 
-`castree/payload.go` 的字段表对齐自 `feat/cas-tools` 的 `pkg/casmeta`。各产生器版本固定到 Echo release notes 与 `sidecar.default.min_version`（详见 `docker/Dockerfile` 的 `SIDECAR_TOOLS_REF`），保证 release 可复现。
+`castree/payload.go` 的字段表对齐自 `internal/casmeta`（cas-tools commit `3324d78`，即 `feat/cas-tools` 分支；9 字段含 `provider/sha1/preID`，`provider=115` 时 `sha1`+`preID` 必填）。各产生器版本固定到 Echo release notes 与 `sidecar.default.min_version`（详见 `docker/Dockerfile` 的 `SIDECAR_TOOLS_REF`），保证 release 可复现。
 
 ## License
 
