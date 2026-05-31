@@ -252,12 +252,15 @@ func decodeData(r io.Reader, dst any) error {
 	if wrapped.Code == nil {
 		return fmt.Errorf("sidecar response missing OpenList envelope code")
 	}
-	if *wrapped.Code != 0 && *wrapped.Code != http.StatusOK {
+	// Only code == 200 is success. The real sidecar reports admin/fs API
+	// failures as HTTP 200 with a non-200 envelope code, and code == 0 is an
+	// ambiguous/unknown response that must NOT be accepted as success.
+	if *wrapped.Code != http.StatusOK {
 		msg := wrapped.Message
 		if msg == "" {
 			msg = http.StatusText(*wrapped.Code)
 		}
-		return fmt.Errorf("sidecar api error: code=%d message=%s", *wrapped.Code, msg)
+		return &sidecarEnvelopeError{Code: *wrapped.Code, Message: msg}
 	}
 	if len(wrapped.Data) > 0 && !bytes.Equal(wrapped.Data, []byte("null")) {
 		return json.Unmarshal(wrapped.Data, dst)

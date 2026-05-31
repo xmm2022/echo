@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +125,45 @@ func TestStreamHTTP500ReturnsSidecarHTTPError(t *testing.T) {
 				t.Fatalf("Stream error = %T %[1]v, want SidecarHTTPError %d", err, status)
 			}
 		})
+	}
+}
+
+func TestStreamClassifiesHTMLFailureAsSuspectTransient(t *testing.T) {
+	const htmlBody = "<html><body>failed to get file: object not found</body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(htmlBody))
+	}))
+	defer srv.Close()
+
+	// Signature adaptation (see plan note): the real Config uses AuthTokenEnv +
+	// config.Duration, so the plan's literal New(Config{AuthToken:"tok", ...})
+	// does not compile. Use the package's testConfig helper instead.
+	client := New(testConfig(srv.URL, ""))
+	_, err := client.Stream(context.Background(), StreamRequest{
+		StorageMount: "/mnt",
+		RemotePath:   "/movie.mkv",
+		Headers:      http.Header{"Range": []string{"bytes=0-1023"}},
+	})
+	var typed *SidecarTypedError
+	if !errors.As(err, &typed) {
+		t.Fatalf("error = %T %[1]v, want SidecarTypedError", err)
+	}
+	if typed.Kind != SidecarErrTransient {
+		t.Fatalf("kind = %s, want transient for /d/ HTML 500", typed.Kind)
+	}
+	if typed.EvidenceClass != "html_snippet" {
+		t.Fatalf("evidence = %q, want html_snippet", typed.EvidenceClass)
+	}
+	if typed.Confidence != "suspect" {
+		t.Fatalf("confidence = %q, want suspect", typed.Confidence)
+	}
+	if typed.HTTPStatus != http.StatusInternalServerError {
+		t.Fatalf("http status = %d, want 500", typed.HTTPStatus)
+	}
+	if strings.Contains(typed.SafeMessage, "<html>") {
+		t.Fatalf("safe message leaked raw HTML: %q", typed.SafeMessage)
 	}
 }
 

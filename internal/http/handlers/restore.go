@@ -98,8 +98,21 @@ func Restore(deps RestoreDeps) http.HandlerFunc {
 			}
 			dead = append(dead, deadCopy{CopyID: fc.ID, Provider: fc.Provider, Reason: reason})
 		}
-		result = "not_found"
-		writeRestoreError(w, http.StatusNotFound, "all-copies-dead", dead)
+		// Exhausted every live copy without a success. 404 only when ALL copies were
+		// confirmed-dead; if any failed transiently (suspect/account/sidecar-error)
+		// surface 503 "try later" so a transient fault on every copy never becomes a
+		// permanent 404 (spec §5).
+		reasons := make([]string, len(dead))
+		for i, dc := range dead {
+			reasons[i] = dc.Reason
+		}
+		status, reason := exhaustionStatus(len(copies), reasons)
+		if status == http.StatusServiceUnavailable {
+			result = "unavailable"
+		} else {
+			result = "not_found"
+		}
+		writeRestoreError(w, status, reason, dead)
 	}
 }
 

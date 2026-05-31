@@ -53,6 +53,7 @@ func Stream(deps StreamDeps) http.HandlerFunc {
 			return
 		}
 
+		var reasons []string
 		for _, fc := range copies {
 			provider = fc.Provider
 			req := restore.StreamRequestFor(fc, r.Header)
@@ -72,9 +73,19 @@ func Stream(deps StreamDeps) http.HandlerFunc {
 				writeStreamError(w, http.StatusServiceUnavailable, reason)
 				return
 			}
+			reasons = append(reasons, reason)
 		}
-		result = "not_found"
-		writeStreamError(w, http.StatusNotFound, "all-copies-dead")
+		// Exhausted every live copy without a success. 404 only when ALL copies were
+		// confirmed-dead; if any failed transiently (suspect/account/sidecar-error)
+		// surface 503 "try later" so a transient fault on every copy never becomes a
+		// permanent 404 (spec §5).
+		status, reason := exhaustionStatus(len(copies), reasons)
+		if status == http.StatusServiceUnavailable {
+			result = "unavailable"
+		} else {
+			result = "not_found"
+		}
+		writeStreamError(w, status, reason)
 	}
 }
 

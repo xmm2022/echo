@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -47,6 +48,14 @@ func (c *Client) Link(ctx context.Context, storageMount, remotePath string) (*Di
 		ExpiresAt string            `json:"expires_at"`
 	}
 	if err := decodeData(resp.Body, &raw); err != nil {
+		// A non-success OpenList envelope (code != 200, incl. code == 0) on a
+		// 200 response is the real sidecar's way of signalling an fs/link
+		// failure. Classify it so callers can do correct multi-copy fallback
+		// and bad-copy eviction.
+		var env *sidecarEnvelopeError
+		if errors.As(err, &env) {
+			return nil, classifySidecarMessage("link", resp.StatusCode, env.Code, env.Message)
+		}
 		return nil, err
 	}
 	linkURL := raw.URL

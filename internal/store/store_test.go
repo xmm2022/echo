@@ -79,6 +79,159 @@ func TestFileCopiesUniqueRemoteKey(t *testing.T) {
 	}
 }
 
+func TestPhase0CopyFailureSchema(t *testing.T) {
+	st := openTestStore(t)
+
+	ctx := context.Background()
+	now := time.Now().Unix()
+	createAccount(t, ctx, st.Queries)
+	blob := createBlob(t, ctx, st.Queries, 1)
+	copy, err := st.InsertFileCopy(ctx, fileCopyParams(blob.ID, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copy.SchedulerState != "healthy" {
+		t.Fatalf("scheduler_state = %q, want healthy", copy.SchedulerState)
+	}
+	if err := st.InsertCopyFailure(ctx, queries.InsertCopyFailureParams{
+		CopyID: sql.NullInt64{Int64: copy.ID, Valid: true}, AccountID: sql.NullString{String: "115-main", Valid: true},
+		SidecarID: copy.SidecarID, StorageMount: copy.StorageMount, Operation: "link", Kind: "object_missing",
+		Confidence: "confirmed", EvidenceClass: "json_envelope", HttpStatus: sql.NullInt64{Int64: 200, Valid: true},
+		OpenlistCode: sql.NullInt64{Int64: 500, Valid: true}, SafeMessage: sql.NullString{String: "object not found", Valid: true},
+		ObservedAt: now, RequestID: sql.NullString{String: "req1", Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFileCopyLiveRevivesDeadCopy proves the FOLDED-IN invariant: a copy previously
+// retired (confirmed_dead) or hidden (suspect_dead) must be fully revived —
+// status='live' AND scheduler_state='healthy' with failure fields cleared — when a
+// later successful re-ingest writes it live again, so it reappears in
+// ListLiveCopiesByBlob. Both revival queries are covered: UpsertFileCopyLive (the
+// upsert/ON CONFLICT path) and UpdateFileCopyLive (the by-id path the ingest pipeline
+// actually takes for an already-known remote_path). Without resetting scheduler_state
+// the 0.3 live-copy filter would silently hide the revived copy forever.
+func TestFileCopyLiveRevivesDeadCopy(t *testing.T) {
+	markConfirmedDead := func(st *Store, ctx context.Context, id int64) error {
+		return st.MarkFileCopyConfirmedDead(ctx, queries.MarkFileCopyConfirmedDeadParams{
+			LastFailureAt:      sql.NullInt64{Int64: 5, Valid: true},
+			LastFailureKind:    sql.NullString{String: "object_missing", Valid: true},
+			LastFailureCode:    sql.NullInt64{Int64: 500, Valid: true},
+			LastFailureMessage: sql.NullString{String: "object not found", Valid: true},
+			DeadReason:         sql.NullString{String: "object not found", Valid: true},
+			DeadAt:             sql.NullInt64{Int64: 5, Valid: true},
+			ID:                 id,
+		})
+	}
+	markSuspectDead := func(st *Store, ctx context.Context, id int64) error {
+		return st.MarkFileCopySuspectDead(ctx, queries.MarkFileCopySuspectDeadParams{
+			LastFailureAt:      sql.NullInt64{Int64: 6, Valid: true},
+			LastFailureKind:    sql.NullString{String: "transient", Valid: true},
+			LastFailureCode:    sql.NullInt64{Int64: 500, Valid: true},
+			LastFailureMessage: sql.NullString{String: "failed to get file", Valid: true},
+			VerifyAfter:        sql.NullInt64{Int64: 9_999_999_999, Valid: true},
+			ID:                 id,
+		})
+	}
+
+	states := []struct {
+		name string
+		mark func(*Store, context.Context, int64) error
+	}{
+		{"confirmed_dead", markConfirmedDead},
+		{"suspect_dead", markSuspectDead},
+	}
+	mechanisms := []struct {
+		name   string
+		revive func(*Store, context.Context, int64, int64) error
+	}{
+		{
+			name: "upsert",
+			revive: func(st *Store, ctx context.Context, blobID, _ int64) error {
+				_, err := st.UpsertFileCopyLive(ctx, upsertFileCopyParams(blobID, 20))
+				return err
+			},
+		},
+		{
+			name: "update_by_id",
+			revive: func(st *Store, ctx context.Context, _, copyID int64) error {
+				return st.UpdateFileCopyLive(ctx, queries.UpdateFileCopyLiveParams{
+					LastSeen:    20,
+					CloudFileID: sql.NullString{String: "cloud-20", Valid: true},
+					Pickcode:    sql.NullString{String: "pick-20", Valid: true},
+					ID:          copyID,
+				})
+			},
+		},
+	}
+
+	for _, state := range states {
+		for _, mech := range mechanisms {
+			t.Run(state.name+"/"+mech.name, func(t *testing.T) {
+				ctx := context.Background()
+				st := openTestStore(t)
+				blob := createBlob(t, ctx, st.Queries, 1024)
+				createAccount(t, ctx, st.Queries)
+				copy, err := st.InsertFileCopy(ctx, fileCopyParams(blob.ID, 10))
+				if err != nil {
+					t.Fatalf("insert file copy: %v", err)
+				}
+				if err := state.mark(st, ctx, copy.ID); err != nil {
+					t.Fatalf("mark %s: %v", state.name, err)
+				}
+				// Sanity: the copy is hidden from the live pool while marked dead.
+				if hidden, err := st.ListLiveCopiesByBlob(ctx, queries.ListLiveCopiesByBlobParams{BlobID: blob.ID, Limit: 5}); err != nil {
+					t.Fatalf("list live copies (while %s): %v", state.name, err)
+				} else if len(hidden) != 0 {
+					t.Fatalf("live copies while %s = %d, want 0 (must be hidden)", state.name, len(hidden))
+				}
+
+				if err := mech.revive(st, ctx, blob.ID, copy.ID); err != nil {
+					t.Fatalf("revive via %s: %v", mech.name, err)
+				}
+
+				revived, err := st.GetFileCopyByRemotePath(ctx, queries.GetFileCopyByRemotePathParams{
+					SidecarID:    "default",
+					StorageMount: "/115-main",
+					RemotePath:   "/media/episode.mkv",
+				})
+				if err != nil {
+					t.Fatalf("reload revived copy: %v", err)
+				}
+				if revived.ID != copy.ID {
+					t.Fatalf("revival created a new copy id=%d, want same id=%d", revived.ID, copy.ID)
+				}
+				if revived.Status != "live" {
+					t.Fatalf("status = %q, want live", revived.Status)
+				}
+				if revived.SchedulerState != "healthy" {
+					t.Fatalf("scheduler_state = %q, want healthy after revival", revived.SchedulerState)
+				}
+				if revived.FailureCount != 0 {
+					t.Fatalf("failure_count = %d, want 0 after revival", revived.FailureCount)
+				}
+				if revived.VerifyAfter.Valid || revived.CooldownUntil.Valid {
+					t.Fatalf("verify_after/cooldown_until still set after revival: %+v / %+v", revived.VerifyAfter, revived.CooldownUntil)
+				}
+				if revived.LastFailureAt.Valid || revived.LastFailureKind.Valid || revived.LastFailureCode.Valid ||
+					revived.LastFailureMessage.Valid || revived.LastFailureConfidence.Valid ||
+					revived.DeadReason.Valid || revived.DeadAt.Valid {
+					t.Fatalf("failure/dead fields still set after revival: %+v", revived)
+				}
+
+				live, err := st.ListLiveCopiesByBlob(ctx, queries.ListLiveCopiesByBlobParams{BlobID: blob.ID, Limit: 5})
+				if err != nil {
+					t.Fatalf("list live copies (after revival): %v", err)
+				}
+				if len(live) != 1 || live[0].ID != copy.ID {
+					t.Fatalf("revived copy not in live pool: got %d rows", len(live))
+				}
+			})
+		}
+	}
+}
+
 func TestListLiveCopiesByBlobPreferProviderBindsProviderAndLimit(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

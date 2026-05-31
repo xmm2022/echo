@@ -12,6 +12,13 @@ CREATE TABLE accounts (
   owner_id        TEXT NOT NULL DEFAULT 'admin',
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL,
+  scheduler_state TEXT NOT NULL DEFAULT 'healthy' CHECK (scheduler_state IN ('healthy','cooldown','unhealthy','token_suspect','disabled')),
+  cooldown_until INTEGER,
+  recheck_after INTEGER,
+  status_reason TEXT,
+  last_error_at INTEGER,
+  last_error_kind TEXT,
+  last_error_message TEXT,
   UNIQUE (sidecar_id, storage_mount)
 );
 
@@ -72,10 +79,40 @@ CREATE TABLE file_copies (
   pickcode       TEXT,
   status         TEXT NOT NULL CHECK (status IN ('live','dead','pending')),
   last_seen      INTEGER NOT NULL,
+  scheduler_state TEXT NOT NULL DEFAULT 'healthy' CHECK (scheduler_state IN ('healthy','suspect_dead','confirmed_dead','cooldown')),
+  cooldown_until INTEGER,
+  verify_after INTEGER,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_failure_at INTEGER,
+  last_failure_kind TEXT,
+  last_failure_confidence TEXT CHECK (last_failure_confidence IS NULL OR last_failure_confidence IN ('confirmed','suspect','low')),
+  last_failure_code INTEGER,
+  last_failure_message TEXT,
+  dead_reason TEXT,
+  dead_at INTEGER,
   UNIQUE (sidecar_id, storage_mount, remote_path)
 );
 
 CREATE INDEX idx_file_copies_live ON file_copies(blob_id, status, last_seen DESC);
+CREATE INDEX idx_file_copies_scheduler ON file_copies(blob_id, status, scheduler_state, cooldown_until, last_seen DESC);
+CREATE INDEX idx_accounts_scheduler ON accounts(provider, scheduler_state, cooldown_until);
+
+CREATE TABLE copy_failures (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  copy_id         INTEGER,
+  account_id      TEXT,
+  sidecar_id      TEXT NOT NULL,
+  storage_mount   TEXT NOT NULL,
+  operation       TEXT NOT NULL,
+  kind            TEXT NOT NULL,
+  confidence      TEXT NOT NULL CHECK (confidence IN ('confirmed','suspect','low')),
+  evidence_class  TEXT NOT NULL CHECK (evidence_class IN ('json_envelope','http_status','html_snippet','transport')),
+  http_status     INTEGER,
+  openlist_code   INTEGER,
+  safe_message    TEXT,
+  observed_at     INTEGER NOT NULL,
+  request_id      TEXT
+);
 
 CREATE TABLE hash_conflicts (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,

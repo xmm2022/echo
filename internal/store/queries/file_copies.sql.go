@@ -10,8 +10,31 @@ import (
 	"database/sql"
 )
 
+const clearFileCopySchedulerFailure = `-- name: ClearFileCopySchedulerFailure :exec
+UPDATE file_copies
+SET scheduler_state = 'healthy',
+    cooldown_until = NULL,
+    verify_after = NULL,
+    failure_count = 0,
+    last_failure_at = NULL,
+    last_failure_kind = NULL,
+    last_failure_confidence = NULL,
+    last_failure_code = NULL,
+    last_failure_message = NULL
+WHERE id = ?
+`
+
+type ClearFileCopySchedulerFailureParams struct {
+	ID int64 `json:"id"`
+}
+
+func (q *Queries) ClearFileCopySchedulerFailure(ctx context.Context, arg ClearFileCopySchedulerFailureParams) error {
+	_, err := q.db.ExecContext(ctx, clearFileCopySchedulerFailure, arg.ID)
+	return err
+}
+
 const getFileCopyByRemotePath = `-- name: GetFileCopyByRemotePath :one
-SELECT id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen FROM file_copies
+SELECT id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen, scheduler_state, cooldown_until, verify_after, failure_count, last_failure_at, last_failure_kind, last_failure_confidence, last_failure_code, last_failure_message, dead_reason, dead_at FROM file_copies
 WHERE sidecar_id = ? AND storage_mount = ? AND remote_path = ?
 `
 
@@ -36,6 +59,17 @@ func (q *Queries) GetFileCopyByRemotePath(ctx context.Context, arg GetFileCopyBy
 		&i.Pickcode,
 		&i.Status,
 		&i.LastSeen,
+		&i.SchedulerState,
+		&i.CooldownUntil,
+		&i.VerifyAfter,
+		&i.FailureCount,
+		&i.LastFailureAt,
+		&i.LastFailureKind,
+		&i.LastFailureConfidence,
+		&i.LastFailureCode,
+		&i.LastFailureMessage,
+		&i.DeadReason,
+		&i.DeadAt,
 	)
 	return i, err
 }
@@ -47,7 +81,7 @@ INSERT INTO file_copies (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
-RETURNING id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen
+RETURNING id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen, scheduler_state, cooldown_until, verify_after, failure_count, last_failure_at, last_failure_kind, last_failure_confidence, last_failure_code, last_failure_message, dead_reason, dead_at
 `
 
 type InsertFileCopyParams struct {
@@ -89,14 +123,39 @@ func (q *Queries) InsertFileCopy(ctx context.Context, arg InsertFileCopyParams) 
 		&i.Pickcode,
 		&i.Status,
 		&i.LastSeen,
+		&i.SchedulerState,
+		&i.CooldownUntil,
+		&i.VerifyAfter,
+		&i.FailureCount,
+		&i.LastFailureAt,
+		&i.LastFailureKind,
+		&i.LastFailureConfidence,
+		&i.LastFailureCode,
+		&i.LastFailureMessage,
+		&i.DeadReason,
+		&i.DeadAt,
 	)
 	return i, err
 }
 
 const listLiveCopiesByBlob = `-- name: ListLiveCopiesByBlob :many
-SELECT id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen FROM file_copies
-WHERE blob_id = ? AND status = 'live'
-ORDER BY last_seen DESC
+SELECT
+  file_copies.id, file_copies.blob_id, file_copies.provider, file_copies.account_id,
+  file_copies.sidecar_id, file_copies.storage_mount, file_copies.remote_path,
+  file_copies.cloud_file_id, file_copies.pickcode, file_copies.status, file_copies.last_seen,
+  file_copies.scheduler_state, file_copies.cooldown_until, file_copies.verify_after,
+  file_copies.failure_count, file_copies.last_failure_at, file_copies.last_failure_kind,
+  file_copies.last_failure_confidence, file_copies.last_failure_code, file_copies.last_failure_message,
+  file_copies.dead_reason, file_copies.dead_at
+FROM file_copies
+JOIN accounts ON accounts.id = file_copies.account_id
+WHERE file_copies.blob_id = ? AND file_copies.status = 'live'
+  AND file_copies.scheduler_state NOT IN ('confirmed_dead','suspect_dead')
+  AND (file_copies.cooldown_until IS NULL OR file_copies.cooldown_until <= unixepoch())
+  AND accounts.status NOT IN ('disabled','deleted')
+  AND accounts.scheduler_state NOT IN ('cooldown','unhealthy','token_suspect','disabled')
+  AND (accounts.cooldown_until IS NULL OR accounts.cooldown_until <= unixepoch())
+ORDER BY file_copies.last_seen DESC
 LIMIT ?
 `
 
@@ -126,6 +185,17 @@ func (q *Queries) ListLiveCopiesByBlob(ctx context.Context, arg ListLiveCopiesBy
 			&i.Pickcode,
 			&i.Status,
 			&i.LastSeen,
+			&i.SchedulerState,
+			&i.CooldownUntil,
+			&i.VerifyAfter,
+			&i.FailureCount,
+			&i.LastFailureAt,
+			&i.LastFailureKind,
+			&i.LastFailureConfidence,
+			&i.LastFailureCode,
+			&i.LastFailureMessage,
+			&i.DeadReason,
+			&i.DeadAt,
 		); err != nil {
 			return nil, err
 		}
@@ -143,13 +213,21 @@ func (q *Queries) ListLiveCopiesByBlob(ctx context.Context, arg ListLiveCopiesBy
 const listLiveCopiesByBlobPreferProvider = `-- name: ListLiveCopiesByBlobPreferProvider :many
 SELECT
   id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path,
-  cloud_file_id, pickcode, status, last_seen
+  cloud_file_id, pickcode, status, last_seen, scheduler_state, cooldown_until,
+  verify_after, failure_count, last_failure_at, last_failure_kind,
+  last_failure_confidence, last_failure_code, last_failure_message, dead_reason, dead_at
 FROM (
   SELECT
-    file_copies.id, file_copies.blob_id, file_copies.provider, file_copies.account_id, file_copies.sidecar_id, file_copies.storage_mount, file_copies.remote_path, file_copies.cloud_file_id, file_copies.pickcode, file_copies.status, file_copies.last_seen,
-    CASE WHEN provider = ?1 THEN 0 ELSE 1 END AS provider_rank
+    file_copies.id, file_copies.blob_id, file_copies.provider, file_copies.account_id, file_copies.sidecar_id, file_copies.storage_mount, file_copies.remote_path, file_copies.cloud_file_id, file_copies.pickcode, file_copies.status, file_copies.last_seen, file_copies.scheduler_state, file_copies.cooldown_until, file_copies.verify_after, file_copies.failure_count, file_copies.last_failure_at, file_copies.last_failure_kind, file_copies.last_failure_confidence, file_copies.last_failure_code, file_copies.last_failure_message, file_copies.dead_reason, file_copies.dead_at,
+    CASE WHEN file_copies.provider = ?1 THEN 0 ELSE 1 END AS provider_rank
   FROM file_copies
-  WHERE blob_id = ?2 AND status = 'live'
+  JOIN accounts ON accounts.id = file_copies.account_id
+  WHERE file_copies.blob_id = ?2 AND file_copies.status = 'live'
+    AND file_copies.scheduler_state NOT IN ('confirmed_dead','suspect_dead')
+    AND (file_copies.cooldown_until IS NULL OR file_copies.cooldown_until <= unixepoch())
+    AND accounts.status NOT IN ('disabled','deleted')
+    AND accounts.scheduler_state NOT IN ('cooldown','unhealthy','token_suspect','disabled')
+    AND (accounts.cooldown_until IS NULL OR accounts.cooldown_until <= unixepoch())
 )
 ORDER BY provider_rank,
          last_seen DESC
@@ -183,6 +261,17 @@ func (q *Queries) ListLiveCopiesByBlobPreferProvider(ctx context.Context, arg Li
 			&i.Pickcode,
 			&i.Status,
 			&i.LastSeen,
+			&i.SchedulerState,
+			&i.CooldownUntil,
+			&i.VerifyAfter,
+			&i.FailureCount,
+			&i.LastFailureAt,
+			&i.LastFailureKind,
+			&i.LastFailureConfidence,
+			&i.LastFailureCode,
+			&i.LastFailureMessage,
+			&i.DeadReason,
+			&i.DeadAt,
 		); err != nil {
 			return nil, err
 		}
@@ -195,6 +284,44 @@ func (q *Queries) ListLiveCopiesByBlobPreferProvider(ctx context.Context, arg Li
 		return nil, err
 	}
 	return items, nil
+}
+
+const markFileCopyConfirmedDead = `-- name: MarkFileCopyConfirmedDead :exec
+UPDATE file_copies
+SET status = 'dead',
+    scheduler_state = 'confirmed_dead',
+    failure_count = failure_count + 1,
+    last_failure_at = ?,
+    last_failure_kind = ?,
+    last_failure_confidence = 'confirmed',
+    last_failure_code = ?,
+    last_failure_message = ?,
+    dead_reason = ?,
+    dead_at = ?
+WHERE id = ?
+`
+
+type MarkFileCopyConfirmedDeadParams struct {
+	LastFailureAt      sql.NullInt64  `json:"last_failure_at"`
+	LastFailureKind    sql.NullString `json:"last_failure_kind"`
+	LastFailureCode    sql.NullInt64  `json:"last_failure_code"`
+	LastFailureMessage sql.NullString `json:"last_failure_message"`
+	DeadReason         sql.NullString `json:"dead_reason"`
+	DeadAt             sql.NullInt64  `json:"dead_at"`
+	ID                 int64          `json:"id"`
+}
+
+func (q *Queries) MarkFileCopyConfirmedDead(ctx context.Context, arg MarkFileCopyConfirmedDeadParams) error {
+	_, err := q.db.ExecContext(ctx, markFileCopyConfirmedDead,
+		arg.LastFailureAt,
+		arg.LastFailureKind,
+		arg.LastFailureCode,
+		arg.LastFailureMessage,
+		arg.DeadReason,
+		arg.DeadAt,
+		arg.ID,
+	)
+	return err
 }
 
 const markFileCopyDead = `-- name: MarkFileCopyDead :exec
@@ -214,12 +341,60 @@ func (q *Queries) MarkFileCopyDead(ctx context.Context, arg MarkFileCopyDeadPara
 	return err
 }
 
+const markFileCopySuspectDead = `-- name: MarkFileCopySuspectDead :exec
+UPDATE file_copies
+SET scheduler_state = 'suspect_dead',
+    failure_count = failure_count + 1,
+    last_failure_at = ?,
+    last_failure_kind = ?,
+    last_failure_confidence = 'suspect',
+    last_failure_code = ?,
+    last_failure_message = ?,
+    verify_after = ?
+WHERE id = ?
+`
+
+type MarkFileCopySuspectDeadParams struct {
+	LastFailureAt      sql.NullInt64  `json:"last_failure_at"`
+	LastFailureKind    sql.NullString `json:"last_failure_kind"`
+	LastFailureCode    sql.NullInt64  `json:"last_failure_code"`
+	LastFailureMessage sql.NullString `json:"last_failure_message"`
+	VerifyAfter        sql.NullInt64  `json:"verify_after"`
+	ID                 int64          `json:"id"`
+}
+
+func (q *Queries) MarkFileCopySuspectDead(ctx context.Context, arg MarkFileCopySuspectDeadParams) error {
+	_, err := q.db.ExecContext(ctx, markFileCopySuspectDead,
+		arg.LastFailureAt,
+		arg.LastFailureKind,
+		arg.LastFailureCode,
+		arg.LastFailureMessage,
+		arg.VerifyAfter,
+		arg.ID,
+	)
+	return err
+}
+
 const updateFileCopyLive = `-- name: UpdateFileCopyLive :exec
 UPDATE file_copies
 SET status = 'live',
     last_seen = ?,
     cloud_file_id = COALESCE(?, cloud_file_id),
-    pickcode = COALESCE(?, pickcode)
+    pickcode = COALESCE(?, pickcode),
+    -- A successful re-ingest revives a copy that was suspect/confirmed dead (this is
+    -- the path the ingest pipeline takes for an already-known remote path): reset the
+    -- scheduler state and failure fields so the 0.3 live-copy filter stops hiding it.
+    scheduler_state = 'healthy',
+    cooldown_until = NULL,
+    verify_after = NULL,
+    failure_count = 0,
+    last_failure_at = NULL,
+    last_failure_kind = NULL,
+    last_failure_confidence = NULL,
+    last_failure_code = NULL,
+    last_failure_message = NULL,
+    dead_reason = NULL,
+    dead_at = NULL
 WHERE id = ?
 `
 
@@ -251,8 +426,22 @@ ON CONFLICT(sidecar_id, storage_mount, remote_path) DO UPDATE
 SET status = 'live',
     last_seen = excluded.last_seen,
     cloud_file_id = COALESCE(excluded.cloud_file_id, file_copies.cloud_file_id),
-    pickcode = COALESCE(excluded.pickcode, file_copies.pickcode)
-RETURNING id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen
+    pickcode = COALESCE(excluded.pickcode, file_copies.pickcode),
+    -- A successful re-ingest revives a copy that was suspect/confirmed dead: reset
+    -- the scheduler state and failure fields so the 0.3 live-copy filter
+    -- (scheduler_state NOT IN ('confirmed_dead','suspect_dead')) stops hiding it.
+    scheduler_state = 'healthy',
+    cooldown_until = NULL,
+    verify_after = NULL,
+    failure_count = 0,
+    last_failure_at = NULL,
+    last_failure_kind = NULL,
+    last_failure_confidence = NULL,
+    last_failure_code = NULL,
+    last_failure_message = NULL,
+    dead_reason = NULL,
+    dead_at = NULL
+RETURNING id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen, scheduler_state, cooldown_until, verify_after, failure_count, last_failure_at, last_failure_kind, last_failure_confidence, last_failure_code, last_failure_message, dead_reason, dead_at
 `
 
 type UpsertFileCopyLiveParams struct {
@@ -292,6 +481,17 @@ func (q *Queries) UpsertFileCopyLive(ctx context.Context, arg UpsertFileCopyLive
 		&i.Pickcode,
 		&i.Status,
 		&i.LastSeen,
+		&i.SchedulerState,
+		&i.CooldownUntil,
+		&i.VerifyAfter,
+		&i.FailureCount,
+		&i.LastFailureAt,
+		&i.LastFailureKind,
+		&i.LastFailureConfidence,
+		&i.LastFailureCode,
+		&i.LastFailureMessage,
+		&i.DeadReason,
+		&i.DeadAt,
 	)
 	return i, err
 }

@@ -206,6 +206,24 @@ func copyStatus(t *testing.T, st *store.Store, copyID int64) string {
 	return status
 }
 
+func copyScheduler(t *testing.T, st *store.Store, copyID int64) string {
+	t.Helper()
+	var schedulerState string
+	if err := st.DB.QueryRow("SELECT scheduler_state FROM file_copies WHERE id = ?", copyID).Scan(&schedulerState); err != nil {
+		t.Fatalf("query copy %d scheduler_state: %v", copyID, err)
+	}
+	return schedulerState
+}
+
+func accountScheduler(t *testing.T, st *store.Store, accountID string) string {
+	t.Helper()
+	var schedulerState string
+	if err := st.DB.QueryRow("SELECT scheduler_state FROM accounts WHERE id = ?", accountID).Scan(&schedulerState); err != nil {
+		t.Fatalf("query account %s scheduler_state: %v", accountID, err)
+	}
+	return schedulerState
+}
+
 // --- tests ---
 
 func TestRestoreReturnsLinkJSONOnSuccess(t *testing.T) {
@@ -249,8 +267,19 @@ func TestRestoreReturnsLinkJSONOnSuccess(t *testing.T) {
 
 func TestRestoreFallsBackWhenFirstCopyGone(t *testing.T) {
 	seed := seedTwoCopies(t)
+	// Real hardware has no 404/410 dead signal: a confirmed object-missing link
+	// envelope (HTTP 200 + code != 200) is the only confirm-dead signal, and it
+	// retires the copy then falls back to the next.
 	sc := &fakeSidecar{linkByPath: map[string]linkOutcome{
-		path115: {err: &sidecarclient.SidecarHTTPError{StatusCode: http.StatusNotFound, Method: http.MethodPost, URL: path115}},
+		path115: {err: &sidecarclient.SidecarTypedError{
+			Kind:          sidecarclient.SidecarErrObjectMissing,
+			Operation:     "link",
+			HTTPStatus:    http.StatusOK,
+			OpenListCode:  500,
+			SafeMessage:   "object not found",
+			EvidenceClass: "json_envelope",
+			Confidence:    "confirmed",
+		}},
 		path189: {link: &sidecarclient.DirectLink{URL: "https://dl.example/189/episode.mkv"}},
 	}}
 	deps := newRestoreDeps(seed.store, sc)
@@ -317,6 +346,53 @@ func TestRestoreFallsBackOnOther4xxWithoutMarkingDead(t *testing.T) {
 	}
 }
 
+// TestRestoreFallsBackWhenFirstCopySuspect is the restore-path regression test for
+// the abort-early bug: an unconfirmed object-missing (suspect) failure on the first
+// copy must fall back to a healthy copy B and return its link (200), NOT abort with
+// 503. Copy A stays live (scheduler_state suspect_dead) so a transient fault never
+// causes a permanent loss; copy B serves the link. Before the fix the suspect case
+// returned abort=true → 503 with copy B never tried.
+func TestRestoreFallsBackWhenFirstCopySuspect(t *testing.T) {
+	seed := seedTwoCopies(t)
+	sc := &fakeSidecar{linkByPath: map[string]linkOutcome{
+		path115: {err: &sidecarclient.SidecarTypedError{
+			Kind:          sidecarclient.SidecarErrObjectMissing,
+			Operation:     "link",
+			HTTPStatus:    http.StatusOK,
+			OpenListCode:  500,
+			SafeMessage:   "temporarily unavailable",
+			EvidenceClass: "html_snippet",
+			Confidence:    "suspect", // not "confirmed" → suspect, not gone
+		}},
+		path189: {link: &sidecarclient.DirectLink{URL: "https://dl.example/189/episode.mkv"}},
+	}}
+	deps := newRestoreDeps(seed.store, sc)
+
+	rec := doRestore(t, deps, intToStr(seed.fileID), "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (fall back to copy B on suspect); body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Provider string `json:"provider"`
+		CopyID   int64  `json:"copy_id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.CopyID != seed.copy189ID {
+		t.Fatalf("copy_id = %d, want %d (copy B after fallback)", resp.CopyID, seed.copy189ID)
+	}
+	if sc.linkCallCount() != 2 {
+		t.Fatalf("link calls = %d, want 2 (first suspect, fall back to second)", sc.linkCallCount())
+	}
+	// First copy must NOT be confirm-dead: it stays live, only flagged suspect_dead.
+	if got := copyStatus(t, seed.store, seed.copy115ID); got != "live" {
+		t.Fatalf("copy 115 status = %q, want live (suspect must NOT mark dead)", got)
+	}
+	if got := copyScheduler(t, seed.store, seed.copy115ID); got != "suspect_dead" {
+		t.Fatalf("copy 115 scheduler_state = %q, want suspect_dead", got)
+	}
+}
+
 func TestRestoreReturns503OnUnreachable(t *testing.T) {
 	seed := seedTwoCopies(t)
 	sc := &fakeSidecar{linkByPath: map[string]linkOutcome{
@@ -338,9 +414,24 @@ func TestRestoreReturns503OnUnreachable(t *testing.T) {
 
 func TestRestoreReturns404WhenAllCopiesDead(t *testing.T) {
 	seed := seedTwoCopies(t)
+	// "All copies dead → 404" is now reason-aware: 404 is reserved for copies that
+	// are CONFIRMED dead. On real hardware the only confirm-dead signal is a link
+	// operation that returns HTTP 200 with an OpenList envelope code != 200 and a
+	// confirmed object-missing message, so both copies must fail that way for the
+	// request to legitimately collapse to 404 (a transient/suspect failure would be
+	// 503 instead — see TestRestoreReturns503WhenAllCopiesTransient).
+	confirmedGone := linkOutcome{err: &sidecarclient.SidecarTypedError{
+		Kind:          sidecarclient.SidecarErrObjectMissing,
+		Operation:     "link",
+		HTTPStatus:    http.StatusOK,
+		OpenListCode:  500,
+		SafeMessage:   "object not found",
+		EvidenceClass: "json_envelope",
+		Confidence:    "confirmed",
+	}}
 	sc := &fakeSidecar{linkByPath: map[string]linkOutcome{
-		path115: {err: &sidecarclient.SidecarHTTPError{StatusCode: http.StatusNotFound, Method: http.MethodPost, URL: path115}},
-		path189: {err: &sidecarclient.SidecarHTTPError{StatusCode: http.StatusGone, Method: http.MethodPost, URL: path189}},
+		path115: confirmedGone,
+		path189: confirmedGone,
 	}}
 	deps := newRestoreDeps(seed.store, sc)
 
@@ -365,6 +456,42 @@ func TestRestoreReturns404WhenAllCopiesDead(t *testing.T) {
 	if len(resp.DeadCopies) != 2 {
 		t.Fatalf("dead_copies count = %d, want 2", len(resp.DeadCopies))
 	}
+	// Both copies are now confirmed dead.
+	if got := copyStatus(t, seed.store, seed.copy115ID); got != "dead" {
+		t.Fatalf("copy 115 status = %q, want dead", got)
+	}
+	if got := copyStatus(t, seed.store, seed.copy189ID); got != "dead" {
+		t.Fatalf("copy 189 status = %q, want dead", got)
+	}
+}
+
+// TestRestoreReturns503WhenAllCopiesTransient is the counterpart to the all-dead
+// 404 case: when every live copy fails TRANSIENTLY (here a raw 5xx SidecarHTTPError,
+// which never marks dead), exhausting the copies must surface 503 "try later", NOT a
+// permanent 404 — a transient backend blip across all copies is not a dead file.
+func TestRestoreReturns503WhenAllCopiesTransient(t *testing.T) {
+	seed := seedTwoCopies(t)
+	sc := &fakeSidecar{linkByPath: map[string]linkOutcome{
+		path115: {err: &sidecarclient.SidecarHTTPError{StatusCode: http.StatusBadGateway, Method: http.MethodPost, URL: path115}},
+		path189: {err: &sidecarclient.SidecarHTTPError{StatusCode: http.StatusBadGateway, Method: http.MethodPost, URL: path189}},
+	}}
+	deps := newRestoreDeps(seed.store, sc)
+
+	rec := doRestore(t, deps, intToStr(seed.fileID), "")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (all copies transient); body=%s", rec.Code, rec.Body.String())
+	}
+	if sc.linkCallCount() != 2 {
+		t.Fatalf("link calls = %d, want 2 (both copies tried before 503)", sc.linkCallCount())
+	}
+	// Neither copy is marked dead — a 5xx is not a confirm-dead signal.
+	if got := copyStatus(t, seed.store, seed.copy115ID); got != "live" {
+		t.Fatalf("copy 115 status = %q, want live", got)
+	}
+	if got := copyStatus(t, seed.store, seed.copy189ID); got != "live" {
+		t.Fatalf("copy 189 status = %q, want live", got)
+	}
 }
 
 func TestRestoreReturns404ForMissingFile(t *testing.T) {
@@ -386,6 +513,38 @@ func TestRestoreReturns400ForInvalidFileID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRestoreMarksConfirmedDeadOnlyForObjectMissingLinkEnvelope covers the only
+// real-hardware confirm-dead signal: a /api/fs/link call that returns HTTP 200 with
+// an OpenList envelope whose code != 200 and a confirmed object-missing message.
+// Harness note: the plan's deps.sidecar.linkErr / deps.resolver.markConfirmedDeadCalls
+// do not exist here — the resolver is the real restore.Resolver over a real store, so
+// the "confirmed dead once" assertion is read from the DB (the linked copy becomes
+// status 'dead' + scheduler_state 'confirmed_dead').
+func TestRestoreMarksConfirmedDeadOnlyForObjectMissingLinkEnvelope(t *testing.T) {
+	seed := seedTwoCopies(t)
+	sc := &fakeSidecar{linkByPath: map[string]linkOutcome{
+		path115: {err: &sidecarclient.SidecarTypedError{
+			Kind:          sidecarclient.SidecarErrObjectMissing,
+			Operation:     "link",
+			HTTPStatus:    http.StatusOK,
+			OpenListCode:  500,
+			SafeMessage:   "object not found",
+			EvidenceClass: "json_envelope",
+			Confidence:    "confirmed",
+		}},
+	}}
+	deps := newRestoreDeps(seed.store, sc)
+
+	doRestore(t, deps, intToStr(seed.fileID), "115")
+
+	if got := copyStatus(t, seed.store, seed.copy115ID); got != "dead" {
+		t.Fatalf("copy 115 status = %q, want dead (confirmed object-missing)", got)
+	}
+	if got := copyScheduler(t, seed.store, seed.copy115ID); got != "confirmed_dead" {
+		t.Fatalf("copy 115 scheduler_state = %q, want confirmed_dead", got)
 	}
 }
 

@@ -74,7 +74,47 @@ func (c *Client) Stream(ctx context.Context, req StreamRequest) (*StreamResult, 
 		return result, nil
 	default:
 		defer resp.Body.Close()
+		// A real OpenList /d/ download failure arrives as a non-2xx HTTP status
+		// with an HTML body (e.g. 500 + "<html>...failed to get file...</html>"),
+		// NOT a JSON {code,message,data} envelope. The HTML may literally say
+		// "object not found", but on real hardware that is low-confidence
+		// evidence, so we classify it as a transient/suspect html_snippet failure
+		// and deliberately do NOT route it through classifySidecarMessage (which
+		// would mark it object-missing/dead). JSON-envelope failures keep their
+		// existing SidecarHTTPError behavior.
+		if isHTMLResponse(resp) {
+			return nil, streamHTMLError(resp)
+		}
 		return nil, c.httpError(resp)
+	}
+}
+
+// streamHTMLDownloadBodyLimit bounds how much of a failed /d/ HTML body we read
+// before classifying it, so a hostile or oversized error page cannot exhaust
+// memory. safeSidecarMessage caps the resulting SafeMessage at 512 bytes.
+const streamHTMLDownloadBodyLimit = 4 << 10 // 4 KiB
+
+// isHTMLResponse reports whether the response advertises an HTML body via its
+// Content-Type header (the shape real OpenList /d/ failures take).
+func isHTMLResponse(resp *http.Response) bool {
+	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
+}
+
+// streamHTMLError builds a transient/suspect typed error from a non-2xx /d/ HTML
+// response. It reads at most streamHTMLDownloadBodyLimit of the body, redacts and
+// strips tags for the SafeMessage, and keeps the raw snippet in RawMessage (which
+// must never be logged or serialized to clients).
+func streamHTMLError(resp *http.Response) error {
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, streamHTMLDownloadBodyLimit))
+	raw := string(snippet)
+	return &SidecarTypedError{
+		Kind:          SidecarErrTransient,
+		Operation:     "stream",
+		HTTPStatus:    resp.StatusCode,
+		SafeMessage:   safeSidecarMessage(raw),
+		RawMessage:    raw,
+		EvidenceClass: "html_snippet",
+		Confidence:    "suspect",
 	}
 }
 

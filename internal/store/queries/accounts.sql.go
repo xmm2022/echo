@@ -60,7 +60,7 @@ func (q *Queries) DeleteAccount(ctx context.Context, arg DeleteAccountParams) er
 }
 
 const getAccount = `-- name: GetAccount :one
-SELECT id, provider, sidecar_id, storage_mount, status, last_check, owner_id, created_at, updated_at FROM accounts
+SELECT id, provider, sidecar_id, storage_mount, status, last_check, owner_id, created_at, updated_at, scheduler_state, cooldown_until, recheck_after, status_reason, last_error_at, last_error_kind, last_error_message FROM accounts
 WHERE id = ?
 `
 
@@ -81,12 +81,19 @@ func (q *Queries) GetAccount(ctx context.Context, arg GetAccountParams) (Account
 		&i.OwnerID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SchedulerState,
+		&i.CooldownUntil,
+		&i.RecheckAfter,
+		&i.StatusReason,
+		&i.LastErrorAt,
+		&i.LastErrorKind,
+		&i.LastErrorMessage,
 	)
 	return i, err
 }
 
 const listAccounts = `-- name: ListAccounts :many
-SELECT id, provider, sidecar_id, storage_mount, status, last_check, owner_id, created_at, updated_at FROM accounts
+SELECT id, provider, sidecar_id, storage_mount, status, last_check, owner_id, created_at, updated_at, scheduler_state, cooldown_until, recheck_after, status_reason, last_error_at, last_error_kind, last_error_message FROM accounts
 ORDER BY id
 `
 
@@ -109,6 +116,13 @@ func (q *Queries) ListAccounts(ctx context.Context) ([]Account, error) {
 			&i.OwnerID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SchedulerState,
+			&i.CooldownUntil,
+			&i.RecheckAfter,
+			&i.StatusReason,
+			&i.LastErrorAt,
+			&i.LastErrorKind,
+			&i.LastErrorMessage,
 		); err != nil {
 			return nil, err
 		}
@@ -121,6 +135,46 @@ func (q *Queries) ListAccounts(ctx context.Context) ([]Account, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const markAccountSchedulerState = `-- name: MarkAccountSchedulerState :exec
+UPDATE accounts
+SET scheduler_state = ?,
+    cooldown_until = ?,
+    recheck_after = ?,
+    status_reason = ?,
+    last_error_at = ?,
+    last_error_kind = ?,
+    last_error_message = ?,
+    updated_at = ?
+WHERE id = ?
+`
+
+type MarkAccountSchedulerStateParams struct {
+	SchedulerState   string         `json:"scheduler_state"`
+	CooldownUntil    sql.NullInt64  `json:"cooldown_until"`
+	RecheckAfter     sql.NullInt64  `json:"recheck_after"`
+	StatusReason     sql.NullString `json:"status_reason"`
+	LastErrorAt      sql.NullInt64  `json:"last_error_at"`
+	LastErrorKind    sql.NullString `json:"last_error_kind"`
+	LastErrorMessage sql.NullString `json:"last_error_message"`
+	UpdatedAt        int64          `json:"updated_at"`
+	ID               string         `json:"id"`
+}
+
+func (q *Queries) MarkAccountSchedulerState(ctx context.Context, arg MarkAccountSchedulerStateParams) error {
+	_, err := q.db.ExecContext(ctx, markAccountSchedulerState,
+		arg.SchedulerState,
+		arg.CooldownUntil,
+		arg.RecheckAfter,
+		arg.StatusReason,
+		arg.LastErrorAt,
+		arg.LastErrorKind,
+		arg.LastErrorMessage,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	return err
 }
 
 const updateAccount = `-- name: UpdateAccount :exec

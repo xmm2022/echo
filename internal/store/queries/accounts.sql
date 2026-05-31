@@ -32,3 +32,15 @@ WHERE id = ?;
 -- name: DeleteAccount :exec
 DELETE FROM accounts
 WHERE id = ?;
+
+-- name: MarkAccountSchedulerState :exec
+UPDATE accounts
+SET scheduler_state = ?,
+    cooldown_until = ?,
+    recheck_after = ?,
+    status_reason = ?,
+    last_error_at = ?,
+    last_error_kind = ?,
+    last_error_message = ?,
+    updated_at = ?
+WHERE id = ?;

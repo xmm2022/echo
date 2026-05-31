@@ -9,15 +9,22 @@ import (
 )
 
 type Account struct {
-	ID           string        `json:"id"`
-	Provider     string        `json:"provider"`
-	SidecarID    string        `json:"sidecar_id"`
-	StorageMount string        `json:"storage_mount"`
-	Status       string        `json:"status"`
-	LastCheck    sql.NullInt64 `json:"last_check"`
-	OwnerID      string        `json:"owner_id"`
-	CreatedAt    int64         `json:"created_at"`
-	UpdatedAt    int64         `json:"updated_at"`
+	ID               string         `json:"id"`
+	Provider         string         `json:"provider"`
+	SidecarID        string         `json:"sidecar_id"`
+	StorageMount     string         `json:"storage_mount"`
+	Status           string         `json:"status"`
+	LastCheck        sql.NullInt64  `json:"last_check"`
+	OwnerID          string         `json:"owner_id"`
+	CreatedAt        int64          `json:"created_at"`
+	UpdatedAt        int64          `json:"updated_at"`
+	SchedulerState   string         `json:"scheduler_state"`
+	CooldownUntil    sql.NullInt64  `json:"cooldown_until"`
+	RecheckAfter     sql.NullInt64  `json:"recheck_after"`
+	StatusReason     sql.NullString `json:"status_reason"`
+	LastErrorAt      sql.NullInt64  `json:"last_error_at"`
+	LastErrorKind    sql.NullString `json:"last_error_kind"`
+	LastErrorMessage sql.NullString `json:"last_error_message"`
 }
 
 type Blob struct {
@@ -39,18 +46,46 @@ type BlobHash struct {
 	Size          int64  `json:"size"`
 }
 
+type CopyFailure struct {
+	ID            int64          `json:"id"`
+	CopyID        sql.NullInt64  `json:"copy_id"`
+	AccountID     sql.NullString `json:"account_id"`
+	SidecarID     string         `json:"sidecar_id"`
+	StorageMount  string         `json:"storage_mount"`
+	Operation     string         `json:"operation"`
+	Kind          string         `json:"kind"`
+	Confidence    string         `json:"confidence"`
+	EvidenceClass string         `json:"evidence_class"`
+	HttpStatus    sql.NullInt64  `json:"http_status"`
+	OpenlistCode  sql.NullInt64  `json:"openlist_code"`
+	SafeMessage   sql.NullString `json:"safe_message"`
+	ObservedAt    int64          `json:"observed_at"`
+	RequestID     sql.NullString `json:"request_id"`
+}
+
 type FileCopy struct {
-	ID           int64          `json:"id"`
-	BlobID       int64          `json:"blob_id"`
-	Provider     string         `json:"provider"`
-	AccountID    string         `json:"account_id"`
-	SidecarID    string         `json:"sidecar_id"`
-	StorageMount string         `json:"storage_mount"`
-	RemotePath   string         `json:"remote_path"`
-	CloudFileID  sql.NullString `json:"cloud_file_id"`
-	Pickcode     sql.NullString `json:"pickcode"`
-	Status       string         `json:"status"`
-	LastSeen     int64          `json:"last_seen"`
+	ID                    int64          `json:"id"`
+	BlobID                int64          `json:"blob_id"`
+	Provider              string         `json:"provider"`
+	AccountID             string         `json:"account_id"`
+	SidecarID             string         `json:"sidecar_id"`
+	StorageMount          string         `json:"storage_mount"`
+	RemotePath            string         `json:"remote_path"`
+	CloudFileID           sql.NullString `json:"cloud_file_id"`
+	Pickcode              sql.NullString `json:"pickcode"`
+	Status                string         `json:"status"`
+	LastSeen              int64          `json:"last_seen"`
+	SchedulerState        string         `json:"scheduler_state"`
+	CooldownUntil         sql.NullInt64  `json:"cooldown_until"`
+	VerifyAfter           sql.NullInt64  `json:"verify_after"`
+	FailureCount          int64          `json:"failure_count"`
+	LastFailureAt         sql.NullInt64  `json:"last_failure_at"`
+	LastFailureKind       sql.NullString `json:"last_failure_kind"`
+	LastFailureConfidence sql.NullString `json:"last_failure_confidence"`
+	LastFailureCode       sql.NullInt64  `json:"last_failure_code"`
+	LastFailureMessage    sql.NullString `json:"last_failure_message"`
+	DeadReason            sql.NullString `json:"dead_reason"`
+	DeadAt                sql.NullInt64  `json:"dead_at"`
 }
 
 type HashConflict struct {

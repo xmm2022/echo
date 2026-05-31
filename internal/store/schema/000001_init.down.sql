@@ -7,6 +7,10 @@ DROP TABLE IF EXISTS jobs;
 DROP INDEX IF EXISTS idx_hash_conflicts_status;
 DROP TABLE IF EXISTS hash_conflicts;
 
+DROP TABLE IF EXISTS copy_failures;
+
+DROP INDEX IF EXISTS idx_accounts_scheduler;
+DROP INDEX IF EXISTS idx_file_copies_scheduler;
 DROP INDEX IF EXISTS idx_file_copies_live;
 DROP TABLE IF EXISTS file_copies;
 
