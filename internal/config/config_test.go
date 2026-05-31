@@ -20,6 +20,7 @@ func TestLoadPathAppliesEnvAndValidatesRoots(t *testing.T) {
 	}
 
 	t.Setenv("ECHO_ADMIN_TOKEN", "admin")
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
 	t.Setenv("ECHO_MANUAL_IMPORT_ROOTS", manual)
 	t.Setenv("ECHO_SERVER_BIND", ":18080")
 
@@ -35,6 +36,9 @@ func TestLoadPathAppliesEnvAndValidatesRoots(t *testing.T) {
 	}
 	if cfg.Auth.AdminToken != "admin" {
 		t.Fatalf("expected env-expanded admin token, got %q", cfg.Auth.AdminToken)
+	}
+	if cfg.Auth.BootstrapAdminToken != "boot" {
+		t.Fatalf("expected env-expanded bootstrap token, got %q", cfg.Auth.BootstrapAdminToken)
 	}
 	if len(cfg.ManualImportRoots) != 1 || cfg.ManualImportRoots[0] != manual {
 		t.Fatalf("unexpected manual import roots: %#v", cfg.ManualImportRoots)
@@ -52,6 +56,7 @@ func TestLoadPathRejectsRelativeManualImportRoot(t *testing.T) {
 	}
 
 	t.Setenv("ECHO_ADMIN_TOKEN", "admin")
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
 	t.Setenv("ECHO_MANUAL_IMPORT_ROOTS", "relative")
 
 	path := filepath.Join(tmp, "config.yaml")
@@ -77,6 +82,7 @@ database:
   path: %s
 auth:
   admin_token: "${ECHO_ADMIN_TOKEN}"
+  bootstrap_admin_token: "${ECHO_BOOTSTRAP_ADMIN_TOKEN}"
 sidecar:
   default:
     base_url: http://sidecar:5244

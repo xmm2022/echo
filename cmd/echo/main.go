@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/config"
 	httpserver "github.com/xmm2022/echo/internal/http"
 	"github.com/xmm2022/echo/internal/http/handlers"
@@ -132,10 +133,12 @@ func runServe(args []string) error {
 	// Restore/stream plane.
 	resolver := restore.NewResolver(st.Queries, nil)
 	cache := restore.NewLinkCache(nil)
+	authenticator := &auth.Authenticator{Store: st}
 
 	deps := httpserver.Deps{
 		Logger:     logger,
 		AdminToken: cfg.Auth.AdminToken,
+		AuthCheck:  authenticator.Authenticate,
 		Restore:    &handlers.RestoreDeps{Resolver: resolver, Sidecar: sidecar, Cache: cache, Logger: logger, Metrics: m},
 		Stream:     &handlers.StreamDeps{Resolver: resolver, Sidecar: sidecar, Logger: logger, Metrics: m},
 		API: &handlers.APIDeps{
@@ -145,7 +148,8 @@ func runServe(args []string) error {
 			Config:  apiConfig(cfg),
 			Logger:  logger,
 		},
-		Web: &web.Deps{Store: st, Logger: logger},
+		Bootstrap: &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
+		Web:       &web.Deps{Store: st, Logger: logger},
 		Ready: &httpserver.ReadyChecker{
 			DB:      st.DB,
 			Sidecar: rawSidecar,

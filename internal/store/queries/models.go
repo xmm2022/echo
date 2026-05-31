@@ -27,6 +27,18 @@ type Account struct {
 	LastErrorMessage sql.NullString `json:"last_error_message"`
 }
 
+type ApiToken struct {
+	ID         string        `json:"id"`
+	UserID     string        `json:"user_id"`
+	Name       string        `json:"name"`
+	TokenHash  string        `json:"token_hash"`
+	Scopes     string        `json:"scopes"`
+	ExpiresAt  sql.NullInt64 `json:"expires_at"`
+	LastUsedAt sql.NullInt64 `json:"last_used_at"`
+	CreatedAt  int64         `json:"created_at"`
+	RevokedAt  sql.NullInt64 `json:"revoked_at"`
+}
+
 type Blob struct {
 	ID            int64          `json:"id"`
 	Size          int64          `json:"size"`
@@ -145,4 +157,15 @@ type ProducerRun struct {
 	ExitCode     sql.NullInt64  `json:"exit_code"`
 	StartedAt    int64          `json:"started_at"`
 	FinishedAt   sql.NullInt64  `json:"finished_at"`
+}
+
+type User struct {
+	ID           string         `json:"id"`
+	Username     string         `json:"username"`
+	Role         string         `json:"role"`
+	Status       string         `json:"status"`
+	PasswordHash sql.NullString `json:"password_hash"`
+	CreatedAt    int64          `json:"created_at"`
+	UpdatedAt    int64          `json:"updated_at"`
+	LastLoginAt  sql.NullInt64  `json:"last_login_at"`
 }

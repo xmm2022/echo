@@ -33,16 +33,18 @@ func New(cfg *config.Config, deps Deps) *http.Server {
 	}
 }
 
-// Deps configures the HTTP handler. Restore, Stream, API, and Web are optional;
-// when nil their routes are not mounted. AdminToken guards every API and UI route
-// (an empty token fails closed — see middleware.Auth). cmd/echo supplies all of
-// these once the store, sidecar client, and job runner are wired (Phase 9).
+// Deps configures the HTTP handler. Restore, Stream, API, Bootstrap, and Web are
+// optional; when nil their routes are not mounted. AuthCheck guards every API and
+// UI route when wired; AdminToken remains the static-token fallback for tests and
+// compatibility (an empty token fails closed — see middleware.Auth).
 type Deps struct {
 	Logger     *slog.Logger
 	AdminToken string
+	AuthCheck  authmw.CheckFunc
 	Restore    *handlers.RestoreDeps
 	Stream     *handlers.StreamDeps
 	API        *handlers.APIDeps
+	Bootstrap  *handlers.APIDeps
 	Web        *web.Deps
 	// Ready backs /readyz with real DB + sidecar probes. When nil, /readyz
 	// reports not_ready (503) — the pre-wiring default used in tests.
@@ -91,9 +93,17 @@ func HandlerWithDeps(deps Deps) http.Handler {
 		r.Handle("/static/*", web.Static())
 	}
 
+	if deps.Bootstrap != nil {
+		deps.Bootstrap.MountBootstrap(r)
+	}
+
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
-		r.Use(authmw.Auth(deps.AdminToken))
+		if deps.AuthCheck != nil {
+			r.Use(authmw.AuthFunc(deps.AuthCheck))
+		} else {
+			r.Use(authmw.Auth(deps.AdminToken))
+		}
 
 		// Restore/stream carry no request timeout: a stream proxies bytes for as
 		// long as the client reads.

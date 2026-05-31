@@ -7,7 +7,14 @@ database:
   path: /data/echo.db
 
 auth:
-  admin_token: "${ECHO_ADMIN_TOKEN}"
+  # bootstrap_admin_token: operator credential used ONLY to mint admin API
+  # tokens (including recovery after all admin tokens are lost/revoked). It does
+  # NOT authenticate ordinary /api or /ui requests. Required for `serve`.
+  bootstrap_admin_token: "${ECHO_BOOTSTRAP_ADMIN_TOKEN}"
+  # admin_token: deprecated v0.1 static credential, accepted for backward
+  # compatibility only — not a long-term management credential. Manage access
+  # via DB-backed API tokens minted through the bootstrap endpoint.
+  # admin_token: "${ECHO_ADMIN_TOKEN}"
 
 sidecar:
   default:

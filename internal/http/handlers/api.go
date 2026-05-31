@@ -54,12 +54,13 @@ type APIConfig struct {
 // APIDeps wires the admin API handlers (accounts / libraries / ingest / jobs /
 // manifest / conflicts). Restore and stream keep their own dep structs.
 type APIDeps struct {
-	Store   *store.Store
-	Sidecar StorageLister
-	Jobs    JobController
-	Config  APIConfig
-	Logger  *slog.Logger
-	Now     func() time.Time
+	Store               *store.Store
+	Sidecar             StorageLister
+	Jobs                JobController
+	Config              APIConfig
+	Logger              *slog.Logger
+	Now                 func() time.Time
+	BootstrapAdminToken string
 }
 
 // Mount registers every admin API route on r. Callers mount it inside the

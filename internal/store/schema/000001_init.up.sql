@@ -2,6 +2,37 @@
 
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE users (
+  id             TEXT PRIMARY KEY,
+  username       TEXT NOT NULL UNIQUE,
+  role           TEXT NOT NULL CHECK (role IN ('admin','user')),
+  status         TEXT NOT NULL CHECK (status IN ('active','disabled')),
+  password_hash  TEXT,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  last_login_at  INTEGER
+);
+
+INSERT INTO users (
+  id, username, role, status, password_hash, created_at, updated_at, last_login_at
+) VALUES (
+  'admin', 'admin', 'admin', 'active', NULL, 0, 0, NULL
+);
+
+CREATE TABLE api_tokens (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  token_hash   TEXT NOT NULL UNIQUE,
+  scopes       TEXT NOT NULL,
+  expires_at   INTEGER,
+  last_used_at INTEGER,
+  created_at   INTEGER NOT NULL,
+  revoked_at   INTEGER
+);
+
+CREATE INDEX idx_api_tokens_user ON api_tokens(user_id, revoked_at, expires_at);
+
 CREATE TABLE accounts (
   id              TEXT PRIMARY KEY,
   provider        TEXT NOT NULL,

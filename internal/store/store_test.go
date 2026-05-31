@@ -10,8 +10,69 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
+
+func TestPhase1SeedsAdminUser(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	admin, err := st.GetUser(ctx, queries.GetUserParams{ID: "admin"})
+	if err != nil {
+		t.Fatalf("get admin user: %v", err)
+	}
+	if admin.Username != "admin" || admin.Role != "admin" || admin.Status != "active" {
+		t.Fatalf("admin = (%q,%q,%q), want admin/admin/active", admin.Username, admin.Role, admin.Status)
+	}
+	if admin.PasswordHash.Valid {
+		t.Fatalf("admin password_hash = %q, want NULL", admin.PasswordHash.String)
+	}
+	if admin.CreatedAt != 0 || admin.UpdatedAt != 0 {
+		t.Fatalf("admin timestamps = (%d,%d), want 0/0", admin.CreatedAt, admin.UpdatedAt)
+	}
+	if admin.LastLoginAt.Valid {
+		t.Fatalf("admin last_login_at = %d, want NULL", admin.LastLoginAt.Int64)
+	}
+}
+
+func TestPhase1APITokenHashOnly(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := int64(1000)
+
+	plain := "selector.secret"
+	hash := auth.HashToken(plain)
+	if !strings.HasPrefix(hash, "sha256:") {
+		t.Fatalf("hash = %q, want sha256 prefix", hash)
+	}
+	if hash == plain {
+		t.Fatal("hash equals plaintext token")
+	}
+	if second := auth.HashToken(plain); second != hash {
+		t.Fatalf("second hash = %q, want %q", second, hash)
+	}
+	if len(hash) != len("sha256:")+64 {
+		t.Fatalf("hash length = %d, want %d", len(hash), len("sha256:")+64)
+	}
+	if err := st.CreateAPIToken(ctx, queries.CreateAPITokenParams{
+		ID: "tok1", UserID: "admin", Name: "cli", TokenHash: hash,
+		Scopes: `["admin","read","playback"]`, ExpiresAt: sql.NullInt64{},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	got, err := st.GetAPITokenByHash(ctx, queries.GetAPITokenByHashParams{TokenHash: hash})
+	if err != nil {
+		t.Fatalf("get token: %v", err)
+	}
+	if got.TokenHash != hash || strings.Contains(got.TokenHash, plain) {
+		t.Fatalf("token_hash = %q, want stored hash without plaintext", got.TokenHash)
+	}
+	if got.UserID != "admin" || got.RevokedAt.Valid {
+		t.Fatalf("token row = %#v", got)
+	}
+}
 
 func TestMigrationUpDownClean(t *testing.T) {
 	db, err := sql.Open("sqlite", testDSN(t))
@@ -31,7 +92,7 @@ func TestMigrationUpDownClean(t *testing.T) {
 		t.Fatalf("migrate down: %v", err)
 	}
 	for _, name := range []string{
-		"accounts", "libraries", "blobs", "library_entries", "blob_hashes",
+		"users", "api_tokens", "accounts", "libraries", "blobs", "library_entries", "blob_hashes",
 		"file_copies", "hash_conflicts", "jobs", "producer_runs",
 	} {
 		if tableExists(t, db, name) {

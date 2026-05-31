@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/xmm2022/echo/internal/auth"
 )
 
 func TestAuthBearer(t *testing.T) {
@@ -67,5 +69,37 @@ func TestAuthBodyDrainedNotRequired(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestAuthFuncMiddleware(t *testing.T) {
+	check := func(r *http.Request) (auth.UserContext, bool) {
+		if r.Header.Get("Authorization") != "Bearer good" {
+			return auth.UserContext{}, false
+		}
+		return auth.UserContext{UserID: "admin", Role: "admin", Scopes: []string{"admin"}}, true
+	}
+
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		user := auth.FromContext(r.Context())
+		if user.UserID != "admin" {
+			t.Fatalf("context user = %q, want admin", user.UserID)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AuthFunc(check)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !called {
+		t.Fatal("next handler not called")
 	}
 }

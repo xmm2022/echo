@@ -3,11 +3,15 @@
 package middleware
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
-	"strings"
+
+	"github.com/xmm2022/echo/internal/auth"
 )
+
+type CheckFunc func(*http.Request) (auth.UserContext, bool)
 
 // Auth returns middleware enforcing the static admin bearer token. Requests must
 // carry `Authorization: Bearer <token>` (scheme is case-insensitive per RFC 7235).
@@ -18,10 +22,7 @@ func Auth(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if token == "" || !validBearer(r.Header.Get("Authorization"), token) {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="echo"`)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+				writeUnauthorized(w)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -29,14 +30,35 @@ func Auth(token string) func(http.Handler) http.Handler {
 	}
 }
 
+func AuthFunc(check CheckFunc) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, ok := check(r)
+			if !ok {
+				writeUnauthorized(w)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(auth.NewContext(r.Context(), user)))
+		})
+	}
+}
+
 func validBearer(header, token string) bool {
-	const prefix = "Bearer "
-	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+	got := auth.BearerToken(header)
+	if got == "" || token == "" {
 		return false
 	}
-	got := strings.TrimSpace(header[len(prefix):])
-	if got == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	// Compare fixed-length digests so a timing side-channel cannot leak the
+	// configured token's length (ConstantTimeCompare returns early on a length
+	// mismatch). Mirrors the bootstrap-token check in the handlers package.
+	gotSum := sha256.Sum256([]byte(got))
+	wantSum := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) == 1
+}
+
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="echo"`)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
 }

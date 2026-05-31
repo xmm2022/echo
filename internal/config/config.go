@@ -61,7 +61,8 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	AdminToken string `yaml:"admin_token"`
+	AdminToken          string `yaml:"admin_token"`
+	BootstrapAdminToken string `yaml:"bootstrap_admin_token"`
 }
 
 type SidecarConfig struct {
@@ -136,6 +137,7 @@ func (c *Config) expandEnv() {
 	c.Server.Bind = os.ExpandEnv(c.Server.Bind)
 	c.Database.Path = os.ExpandEnv(c.Database.Path)
 	c.Auth.AdminToken = os.ExpandEnv(c.Auth.AdminToken)
+	c.Auth.BootstrapAdminToken = os.ExpandEnv(c.Auth.BootstrapAdminToken)
 	c.Sidecar.Default.BaseURL = os.ExpandEnv(c.Sidecar.Default.BaseURL)
 	c.Sidecar.Default.AuthTokenEnv = os.ExpandEnv(c.Sidecar.Default.AuthTokenEnv)
 	c.Sidecar.Default.MinVersion = os.ExpandEnv(c.Sidecar.Default.MinVersion)
@@ -167,6 +169,7 @@ func (c *Config) applyEnvOverrides() error {
 	}
 	setString("ECHO_DATABASE_PATH", &c.Database.Path)
 	setString("ECHO_ADMIN_TOKEN", &c.Auth.AdminToken)
+	setString("ECHO_BOOTSTRAP_ADMIN_TOKEN", &c.Auth.BootstrapAdminToken)
 	setString("ECHO_SIDECAR_DEFAULT_BASE_URL", &c.Sidecar.Default.BaseURL)
 	setString("ECHO_SIDECAR_DEFAULT_AUTH_TOKEN_ENV", &c.Sidecar.Default.AuthTokenEnv)
 	setString("ECHO_SIDECAR_DEFAULT_MIN_VERSION", &c.Sidecar.Default.MinVersion)
@@ -228,8 +231,8 @@ func (c *Config) validate() error {
 	if !filepath.IsAbs(c.Database.Path) {
 		return fieldAbsolute("database.path", c.Database.Path)
 	}
-	if c.Auth.AdminToken == "" {
-		return fieldRequired("auth.admin_token")
+	if c.Auth.BootstrapAdminToken == "" {
+		return fieldRequired("auth.bootstrap_admin_token")
 	}
 
 	sidecar := c.Sidecar.Default

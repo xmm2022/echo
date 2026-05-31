@@ -23,3 +23,7 @@ DROP TABLE IF EXISTS library_entries;
 DROP TABLE IF EXISTS blobs;
 DROP TABLE IF EXISTS libraries;
 DROP TABLE IF EXISTS accounts;
+
+DROP INDEX IF EXISTS idx_api_tokens_user;
+DROP TABLE IF EXISTS api_tokens;
+DROP TABLE IF EXISTS users;
