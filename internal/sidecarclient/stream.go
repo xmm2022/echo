@@ -74,6 +74,9 @@ func (c *Client) Stream(ctx context.Context, req StreamRequest) (*StreamResult, 
 		return result, nil
 	default:
 		defer resp.Body.Close()
+		if isUnsignedOpenListDownload(resp) {
+			return c.streamViaDirectLink(ctx, req)
+		}
 		// A real OpenList /d/ download failure arrives as a non-2xx HTTP status
 		// with an HTML body (e.g. 500 + "<html>...failed to get file...</html>"),
 		// NOT a JSON {code,message,data} envelope. The HTML may literally say
@@ -89,6 +92,58 @@ func (c *Client) Stream(ctx context.Context, req StreamRequest) (*StreamResult, 
 	}
 }
 
+func (c *Client) streamViaDirectLink(ctx context.Context, req StreamRequest) (*StreamResult, error) {
+	link, err := c.Link(ctx, req.StorageMount, req.RemotePath)
+	if err != nil {
+		return nil, err
+	}
+
+	header := http.Header{}
+	for key, values := range link.Headers {
+		for _, value := range values {
+			header.Add(key, value)
+		}
+	}
+	for _, key := range streamRequestHeaders {
+		for _, value := range req.Headers.Values(key) {
+			header.Add(key, value)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, c.streamTimeout)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	for key, values := range header {
+		for _, value := range values {
+			httpReq.Header.Add(key, value)
+		}
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		cancel()
+		return nil, classifyTransportError(err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent, http.StatusNotModified, http.StatusRequestedRangeNotSatisfiable:
+		return &StreamResult{
+			StatusCode: resp.StatusCode,
+			Header:     copyHeaders(resp.Header, streamResponseHeaders),
+			Body:       &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel},
+		}, nil
+	default:
+		defer cancel()
+		defer resp.Body.Close()
+		if isHTMLResponse(resp) {
+			return nil, streamHTMLError(resp)
+		}
+		return nil, &SidecarHTTPError{StatusCode: resp.StatusCode, Method: resp.Request.Method, URL: resp.Request.URL.String()}
+	}
+}
+
 // streamHTMLDownloadBodyLimit bounds how much of a failed /d/ HTML body we read
 // before classifying it, so a hostile or oversized error page cannot exhaust
 // memory. safeSidecarMessage caps the resulting SafeMessage at 512 bytes.
@@ -98,6 +153,15 @@ const streamHTMLDownloadBodyLimit = 4 << 10 // 4 KiB
 // Content-Type header (the shape real OpenList /d/ failures take).
 func isHTMLResponse(resp *http.Response) bool {
 	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
+}
+
+func isUnsignedOpenListDownload(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, streamHTMLDownloadBodyLimit))
+	msg := strings.ToLower(string(snippet))
+	return strings.Contains(msg, "expire missing")
 }
 
 // streamHTMLError builds a transient/suspect typed error from a non-2xx /d/ HTML
