@@ -123,3 +123,32 @@ func TestApplyCopyFailureWritesConfirmedAndSuspectStates(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyCopyFailureDefaultsNilClockToCurrentTime(t *testing.T) {
+	st := newPlaybackTestStore(t)
+	ctx := context.Background()
+	_, entry, account := createPlaybackUserEntryAndPool(t, ctx, st, time.Now())
+	copy := createPlaybackCopy(t, ctx, st, entry.BlobID, account.ID, "115", time.Now().Unix())
+	recorder := NewFailureRecorder(st.Queries, nil)
+
+	typed := &sidecarclient.SidecarTypedError{
+		Kind:          sidecarclient.SidecarErrObjectMissing,
+		Operation:     "link",
+		HTTPStatus:    http.StatusOK,
+		OpenListCode:  500,
+		SafeMessage:   "object not found",
+		EvidenceClass: "json_envelope",
+		Confidence:    "confirmed",
+	}
+	if err := recorder.ApplyCopyFailure(ctx, copy.ID, account.ID, typed, "req-nil-clock"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetFileCopyByID(ctx, queries.GetFileCopyByIDParams{ID: copy.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "dead" || got.SchedulerState != "confirmed_dead" || !got.DeadAt.Valid {
+		t.Fatalf("copy state = %s/%s dead_at=%+v, want confirmed dead with timestamp", got.Status, got.SchedulerState, got.DeadAt)
+	}
+}

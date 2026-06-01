@@ -40,6 +40,9 @@ type FailureRecorder struct {
 
 // NewFailureRecorder builds a FailureRecorder over q, using now as its clock.
 func NewFailureRecorder(q FailureQuerier, now func() time.Time) *FailureRecorder {
+	if now == nil {
+		now = time.Now
+	}
 	return &FailureRecorder{q: q, now: now}
 }
 

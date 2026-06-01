@@ -115,6 +115,28 @@ func TestStreamHEADDoesNotCallSidecarStream(t *testing.T) {
 	}
 }
 
+func TestStreamHEADDisabledPoolReturnsTemporaryUnavailable(t *testing.T) {
+	deps := newStreamHandlerTestDeps(t)
+	if _, err := deps.st.DB.ExecContext(context.Background(), `UPDATE account_pool_assignments SET enabled = 0`); err != nil {
+		t.Fatalf("disable pool assignment: %v", err)
+	}
+	deps.sidecar.failOnStream = true
+
+	req := httptest.NewRequest(http.MethodHead, "/emby/stream/"+deps.validToken, nil)
+	rec := httptest.NewRecorder()
+	deps.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("HEAD status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("X-Echo-Reason"); got != "temporary_unavailable" {
+		t.Fatalf("X-Echo-Reason = %q, want temporary_unavailable", got)
+	}
+	if deps.sidecar.streamCalls != 0 {
+		t.Fatalf("sidecar stream calls = %d, want 0 for HEAD", deps.sidecar.streamCalls)
+	}
+}
+
 func TestStreamGETInvalidTokenReturns404(t *testing.T) {
 	deps := newStreamHandlerTestDeps(t)
 	deps.sidecar.failOnStream = true // if the byte path were wrongly taken, it'd surface
@@ -173,6 +195,27 @@ func TestStreamGETSuccessCountsBytesAndFinishesEvent(t *testing.T) {
 	}
 	if !httpStatus.Valid || httpStatus.Int64 != http.StatusOK {
 		t.Fatalf("http_status = %v, want 200", httpStatus)
+	}
+}
+
+func TestStreamGETDisabledPoolReturnsTemporaryUnavailable(t *testing.T) {
+	deps := newStreamHandlerTestDeps(t)
+	if _, err := deps.st.DB.ExecContext(context.Background(), `UPDATE account_pool_assignments SET enabled = 0`); err != nil {
+		t.Fatalf("disable pool assignment: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/emby/stream/"+deps.validToken, nil)
+	rec := httptest.NewRecorder()
+	deps.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("X-Echo-Reason"); got != "temporary_unavailable" {
+		t.Fatalf("X-Echo-Reason = %q, want temporary_unavailable", got)
+	}
+	if deps.sidecar.streamCalls != 0 {
+		t.Fatalf("sidecar stream calls = %d, want 0 without an enabled pool", deps.sidecar.streamCalls)
 	}
 }
 

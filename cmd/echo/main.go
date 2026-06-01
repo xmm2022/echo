@@ -270,7 +270,9 @@ func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.S
 	mapper := embyproxy.NewDBSourceMapper(st.Queries, nil)
 	rewriter := embyproxy.NewRewriter(mapper, mgr, playbackQuota, embyResolver)
 	// RedactMappedPath defaults to true in NewRewriter; honor the operator's config toggle.
-	rewriter.RedactMappedPath = embyCfg.Playback.RedactMappedPath
+	if embyCfg.Playback.RedactMappedPath != nil {
+		rewriter.RedactMappedPath = *embyCfg.Playback.RedactMappedPath
+	}
 
 	playbackInfo := embyproxy.PlaybackInfoHandler(embyproxy.PlaybackInfoConfig{
 		PublicBaseURL: embyServer.PublicBaseUrl,

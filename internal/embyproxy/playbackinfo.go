@@ -199,9 +199,13 @@ func (rw *Rewriter) rewriteMappedSource(
 	// and redact the upstream filesystem Path. Done up front so any early return below is
 	// still safe.
 	source["RequiredHttpHeaders"] = map[string]any{}
+	if _, ok := source["AddApiKeyToDirectStreamUrl"]; ok {
+		source["AddApiKeyToDirectStreamUrl"] = false
+	}
 	if rw.RedactMappedPath {
 		source["Path"] = "echo://mapped/" + strconv.FormatInt(mapped.LibraryEntryID, 10)
 	}
+	redactNestedURLFields(source)
 
 	urlFields := urlFieldNames(source)
 
@@ -223,10 +227,12 @@ func (rw *Rewriter) rewriteMappedSource(
 	}
 
 	// Only allowlisted *Url fields remain. A source is Echo-playable iff it advertises a
-	// direct-play locator (DirectStreamUrl or StreamUrl) that Echo can serve from a copy.
+	// direct-play locator (DirectStreamUrl or StreamUrl), or Emby reports it as direct
+	// playable without materializing a URL field (real local-file PlaybackInfo does this).
 	_, hasDirect := source["DirectStreamUrl"]
 	_, hasStream := source["StreamUrl"]
-	playable := hasDirect || hasStream
+	directPlayable := boolField(source, "SupportsDirectPlay") || boolField(source, "SupportsDirectStream")
+	playable := hasDirect || hasStream || directPlayable
 
 	if playable {
 		// Authorize + check a live copy exists + check quota before minting a session.
@@ -250,7 +256,7 @@ func (rw *Rewriter) rewriteMappedSource(
 				return err
 			}
 			streamURL := publicBase + prefix + "/stream/" + token
-			if hasDirect {
+			if hasDirect || (!hasStream && directPlayable) {
 				source["DirectStreamUrl"] = streamURL
 			}
 			if hasStream {
@@ -272,11 +278,19 @@ func (rw *Rewriter) rewriteMappedSource(
 		}
 		// A check failed (unauthorized / no live copy / quota / temporarily unavailable):
 		// fall through to the error-backed path with the determined reason.
+		if !hasDirect && !hasStream && directPlayable {
+			urlFields = append(urlFields, "DirectStreamUrl")
+		}
 		return rw.makeErrorBacked(ctx, source, mediaSourceID, urlFields, rctx, publicBase, prefix, reason, result)
 	}
 
 	// Not Echo-playable (e.g. transcode-only): error-backed with reason unsupported_transcode.
 	return rw.makeErrorBacked(ctx, source, mediaSourceID, urlFields, rctx, publicBase, prefix, "unsupported_transcode", result)
+}
+
+func boolField(source map[string]any, name string) bool {
+	value, _ := source[name].(bool)
+	return value
 }
 
 // makeErrorBacked mints ONE error token with reason and points every present *Url field at
@@ -318,7 +332,7 @@ func (rw *Rewriter) authorizeSource(ctx context.Context, rctx RewriteContext, ma
 		return "", err
 	}
 	if len(copies) == 0 {
-		return "no_live_copy", nil
+		return "temporary_unavailable", nil
 	}
 
 	if qerr := rw.Quota.CheckStreamAllowed(ctx, rctx.EchoUserID); qerr != nil {
@@ -368,13 +382,39 @@ func errorStatusForReason(reason string) int {
 // urlFieldNames returns the source keys ending in "Url", sorted for deterministic output.
 func urlFieldNames(source map[string]any) []string {
 	var names []string
-	for key := range source {
-		if strings.HasSuffix(key, "Url") {
+	for key, value := range source {
+		if _, ok := value.(string); ok && strings.HasSuffix(key, "Url") {
 			names = append(names, key)
 		}
 	}
 	sort.Strings(names)
 	return names
+}
+
+func redactNestedURLFields(source map[string]any) {
+	for key, value := range source {
+		if _, ok := value.(string); ok && strings.HasSuffix(key, "Url") {
+			continue
+		}
+		redactURLFieldsRecursive(value)
+	}
+}
+
+func redactURLFieldsRecursive(value any) {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			if _, ok := child.(string); ok && strings.HasSuffix(key, "Url") {
+				delete(node, key)
+				continue
+			}
+			redactURLFieldsRecursive(child)
+		}
+	case []any:
+		for _, child := range node {
+			redactURLFieldsRecursive(child)
+		}
+	}
 }
 
 // hasUnknownURLField reports whether any *Url field is outside the playable allowlist.
@@ -393,6 +433,7 @@ type dbItemMappingQuerier interface {
 	ListEnabledEmbyLibraryMappings(context.Context, queries.ListEnabledEmbyLibraryMappingsParams) ([]queries.EmbyLibraryMapping, error)
 	GetLibraryEntry(context.Context, queries.GetLibraryEntryParams) (queries.LibraryEntry, error)
 	GetValidEmbyItemMapping(context.Context, queries.GetValidEmbyItemMappingParams) (queries.EmbyItemMapping, error)
+	ListItemMappingsByItem(context.Context, queries.ListItemMappingsByItemParams) ([]queries.EmbyItemMapping, error)
 	UpsertEmbyItemMapping(context.Context, queries.UpsertEmbyItemMappingParams) error
 }
 
@@ -421,7 +462,7 @@ func (m *DBSourceMapper) clock() time.Time {
 // "unmapped" contract. Any error returned must fail the rewrite closed.
 func (m *DBSourceMapper) MapSource(ctx context.Context, embyServerID, itemID, mediaSourceID, rawPath string) (MappedSource, bool, error) {
 	if rawPath == "" {
-		return MappedSource{}, false, nil
+		return m.mapCachedSource(ctx, embyServerID, itemID, mediaSourceID)
 	}
 
 	mappings, err := m.q.ListEnabledEmbyLibraryMappings(ctx, queries.ListEnabledEmbyLibraryMappingsParams{EmbyServerID: embyServerID})
@@ -492,6 +533,63 @@ func (m *DBSourceMapper) MapSource(ctx context.Context, embyServerID, itemID, me
 		PathNorm:       res.PathNorm,
 		MappingID:      res.MappingID,
 	}, true, nil
+}
+
+func (m *DBSourceMapper) mapCachedSource(ctx context.Context, embyServerID, itemID, mediaSourceID string) (MappedSource, bool, error) {
+	if itemID == "" {
+		return MappedSource{}, false, nil
+	}
+	rows, err := m.q.ListItemMappingsByItem(ctx, queries.ListItemMappingsByItemParams{
+		EmbyServerID: embyServerID,
+		EmbyItemID:   itemID,
+	})
+	if err != nil {
+		return MappedSource{}, false, err
+	}
+	if len(rows) == 0 {
+		return MappedSource{}, false, nil
+	}
+	mappings, err := m.q.ListEnabledEmbyLibraryMappings(ctx, queries.ListEnabledEmbyLibraryMappingsParams{EmbyServerID: embyServerID})
+	if err != nil {
+		return MappedSource{}, false, err
+	}
+	enabledMappings := make(map[int64]struct{}, len(mappings))
+	for _, row := range mappings {
+		enabledMappings[row.ID] = struct{}{}
+	}
+	for _, row := range rows {
+		if mediaSourceID != "" && row.MediaSourceID != mediaSourceID {
+			continue
+		}
+		if row.PathNormVersion != PathNormVersion {
+			continue
+		}
+		if _, ok := enabledMappings[row.MappingID]; !ok {
+			continue
+		}
+		entry, err := m.q.GetLibraryEntry(ctx, queries.GetLibraryEntryParams{
+			LibraryID: row.LibraryID,
+			RelPath:   row.RelPath,
+		})
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return MappedSource{}, false, err
+		}
+		if entry.ID != row.LibraryEntryID || entry.BlobID != row.BlobID || entry.UpdatedAt != row.LibraryEntryUpdatedAt {
+			continue
+		}
+		return MappedSource{
+			LibraryID:      row.LibraryID,
+			LibraryEntryID: row.LibraryEntryID,
+			BlobID:         row.BlobID,
+			RelPath:        row.RelPath,
+			PathNorm:       row.MediaSourcePathNorm,
+			MappingID:      row.MappingID,
+		}, true, nil
+	}
+	return MappedSource{}, false, nil
 }
 
 // maxPlaybackInfoBody caps how many bytes of an upstream PlaybackInfo response Echo will

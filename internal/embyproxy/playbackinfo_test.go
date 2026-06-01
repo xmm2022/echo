@@ -75,6 +75,201 @@ func TestRewritePlaybackInfoMappedSourceUsesEchoURLOnly(t *testing.T) {
 	}
 }
 
+func TestRewritePlaybackInfoNeutralizesBooleanURLSuffixFlags(t *testing.T) {
+	raw := []byte(`{
+		"MediaSources": [{
+			"Id": "ms1",
+			"Path": "/media/movies/Film.mkv",
+			"DirectStreamUrl": "http://emby:8096/Videos/item1/stream",
+			"AddApiKeyToDirectStreamUrl": true,
+			"RequiredHttpHeaders": {"X-Emby-Token": "secret"}
+		}]
+	}`)
+	rewrite := newRewriteHarness(t)
+	out, result, err := rewrite.Rewrite(raw, validRewriteContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	source := decoded["MediaSources"].([]any)[0].(map[string]any)
+	if value, ok := source["AddApiKeyToDirectStreamUrl"].(bool); !ok || value {
+		t.Fatalf("AddApiKeyToDirectStreamUrl = %#v, want boolean false", source["AddApiKeyToDirectStreamUrl"])
+	}
+	if value, _ := source["DirectStreamUrl"].(string); !strings.HasPrefix(value, "https://echo.example.com/emby/stream/") {
+		t.Fatalf("DirectStreamUrl = %q, want Echo stream URL", value)
+	}
+	if result.SessionsCreated != 1 || result.ErrorTokensCreated != 0 {
+		t.Fatalf("rewrite result = %#v", result)
+	}
+	assertNoUpstreamPlayableLocator(t, decoded)
+}
+
+func TestRewritePlaybackInfoSynthesizesStreamURLForDirectPlayableMappedSource(t *testing.T) {
+	raw := []byte(`{
+		"MediaSources": [{
+			"Id": "ms1",
+			"Path": "/media/movies/Film.mkv",
+			"Protocol": "File",
+			"SupportsDirectPlay": true,
+			"SupportsDirectStream": true,
+			"AddApiKeyToDirectStreamUrl": false,
+			"RequiredHttpHeaders": {}
+		}]
+	}`)
+	rewrite := newRewriteHarness(t)
+	out, result, err := rewrite.Rewrite(raw, validRewriteContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	source := decoded["MediaSources"].([]any)[0].(map[string]any)
+	if value, _ := source["DirectStreamUrl"].(string); !strings.HasPrefix(value, "https://echo.example.com/emby/stream/") {
+		t.Fatalf("DirectStreamUrl = %q, want synthesized Echo stream URL", value)
+	}
+	if result.SessionsCreated != 1 || result.ErrorTokensCreated != 0 {
+		t.Fatalf("rewrite result = %#v", result)
+	}
+	assertNoUpstreamPlayableLocator(t, decoded)
+}
+
+func TestRewritePlaybackInfoStripsNestedSubtitleURLButKeepsMetadata(t *testing.T) {
+	raw := []byte(`{
+		"MediaSources": [{
+			"Id": "ms1",
+			"Path": "/media/movies/Film.mkv",
+			"DirectStreamUrl": "http://emby:8096/Videos/item1/stream",
+			"MediaStreams": [{
+				"Type": "Subtitle",
+				"DisplayTitle": "English",
+				"Codec": "srt",
+				"DeliveryUrl": "http://emby:8096/Videos/item1/Subtitles/0/Stream.srt?api_key=secret"
+			}]
+		}]
+	}`)
+	rewrite := newRewriteHarness(t)
+	out, _, err := rewrite.Rewrite(raw, validRewriteContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	stream := decoded["MediaSources"].([]any)[0].(map[string]any)["MediaStreams"].([]any)[0].(map[string]any)
+	if _, ok := stream["DeliveryUrl"]; ok {
+		t.Fatalf("DeliveryUrl survived on mapped subtitle stream: %#v", stream)
+	}
+	if stream["Type"] != "Subtitle" || stream["DisplayTitle"] != "English" || stream["Codec"] != "srt" {
+		t.Fatalf("subtitle metadata not preserved: %#v", stream)
+	}
+	assertNoUpstreamPlayableLocator(t, decoded)
+}
+
+func TestRewritePlaybackInfoPathlessSourceUsesCachedMappingEvidence(t *testing.T) {
+	st := newEmbyProxyTestStore(t)
+	seed, rewrite := seedRewriteHarnessStore(t, st)
+	seedCachedItemMapping(t, st, seed, "item1", "ms1", "/media/movies/Film.mkv")
+
+	raw := []byte(`{
+		"MediaSources": [{
+			"Id": "ms1",
+			"DirectStreamUrl": "http://emby:8096/Videos/item1/stream?api_key=secret",
+			"RequiredHttpHeaders": {"X-Emby-Token": "secret"}
+		}]
+	}`)
+	out, result, err := rewrite.Rewrite(raw, validRewriteContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	source := decoded["MediaSources"].([]any)[0].(map[string]any)
+	if value, _ := source["DirectStreamUrl"].(string); !strings.HasPrefix(value, "https://echo.example.com/emby/stream/") {
+		t.Fatalf("DirectStreamUrl = %q, want Echo stream URL from cached mapping", value)
+	}
+	if pathValue, _ := source["Path"].(string); !strings.HasPrefix(pathValue, "echo://mapped/") {
+		t.Fatalf("Path = %q, want redacted mapped placeholder", pathValue)
+	}
+	if result.SessionsCreated != 1 || result.UnmappedSources != 0 {
+		t.Fatalf("rewrite result = %#v", result)
+	}
+	assertNoUpstreamPlayableLocator(t, decoded)
+}
+
+func TestRewritePlaybackInfoDisabledPoolReturnsTemporaryUnavailable(t *testing.T) {
+	st := newEmbyProxyTestStore(t)
+	_, rewrite := seedRewriteHarnessStore(t, st)
+	if _, err := st.DB.ExecContext(context.Background(), `UPDATE account_pool_assignments SET enabled = 0`); err != nil {
+		t.Fatalf("disable pool assignment: %v", err)
+	}
+
+	raw := readFixture(t, "single_source.json")
+	out, result, err := rewrite.Rewrite(raw, validRewriteContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorReason != "temporary_unavailable" {
+		t.Fatalf("error reason = %q, want temporary_unavailable", result.ErrorReason)
+	}
+	if result.SessionsCreated != 0 || result.ErrorTokensCreated != 1 {
+		t.Fatalf("rewrite result = %#v", result)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	assertNoUpstreamPlayableLocator(t, decoded)
+}
+
+func TestRewritePlaybackInfoDisabledPoolSynthesizesErrorURLForDirectPlayableSource(t *testing.T) {
+	st := newEmbyProxyTestStore(t)
+	_, rewrite := seedRewriteHarnessStore(t, st)
+	if _, err := st.DB.ExecContext(context.Background(), `UPDATE account_pool_assignments SET enabled = 0`); err != nil {
+		t.Fatalf("disable pool assignment: %v", err)
+	}
+
+	raw := []byte(`{
+		"MediaSources": [{
+			"Id": "ms1",
+			"Path": "/media/movies/Film.mkv",
+			"Protocol": "File",
+			"SupportsDirectPlay": true,
+			"SupportsDirectStream": true,
+			"RequiredHttpHeaders": {}
+		}]
+	}`)
+	out, result, err := rewrite.Rewrite(raw, validRewriteContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	source := decoded["MediaSources"].([]any)[0].(map[string]any)
+	if value, _ := source["DirectStreamUrl"].(string); !strings.HasPrefix(value, "https://echo.example.com/emby/error/") {
+		t.Fatalf("DirectStreamUrl = %q, want synthesized Echo error URL", value)
+	}
+	if result.ErrorReason != "temporary_unavailable" || result.SessionsCreated != 0 || result.ErrorTokensCreated != 1 {
+		t.Fatalf("rewrite result = %#v", result)
+	}
+	assertNoUpstreamPlayableLocator(t, decoded)
+}
+
 func TestRewritePlaybackInfoTranscodeOnlyBecomesErrorURL(t *testing.T) {
 	raw := readFixture(t, "transcode_only.json")
 	rewrite := newRewriteHarness(t)
@@ -266,12 +461,18 @@ func newPlaybackInfoHandlerHarnessWithMappedEvidence(t *testing.T, upstreamURL, 
 	t.Helper()
 	st := newEmbyProxyTestStore(t)
 	seed, rw := seedRewriteHarnessStore(t, st)
+	seedCachedItemMapping(t, st, seed, itemID, "ms1", "/media/movies/Film.mkv")
+	return mountPlaybackInfoOnly(t, st, rw, upstreamURL)
+}
+
+func seedCachedItemMapping(t *testing.T, st *store.Store, seed rewriteHarnessSeed, itemID, mediaSourceID, rawPath string) {
+	t.Helper()
 	if err := st.UpsertEmbyItemMapping(context.Background(), queries.UpsertEmbyItemMappingParams{
 		EmbyServerID:          "default",
 		EmbyItemID:            itemID,
-		MediaSourceID:         "ms1",
+		MediaSourceID:         mediaSourceID,
 		MappingID:             seed.mappingID,
-		MediaSourcePathRaw:    "/media/movies/Film.mkv",
+		MediaSourcePathRaw:    rawPath,
 		MediaSourcePathNorm:   "/media/movies/Film.mkv",
 		PathNormVersion:       PathNormVersion,
 		LibraryID:             seed.libraryID,
@@ -286,7 +487,6 @@ func newPlaybackInfoHandlerHarnessWithMappedEvidence(t *testing.T, upstreamURL, 
 	}); err != nil {
 		t.Fatalf("upsert emby item mapping: %v", err)
 	}
-	return mountPlaybackInfoOnly(t, st, rw, upstreamURL)
 }
 
 // newPlaybackInfoHandlerHarnessWithoutMappedEvidence seeds only the emby server + user link

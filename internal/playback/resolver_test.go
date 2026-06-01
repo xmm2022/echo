@@ -66,6 +66,25 @@ func TestResolveCopiesFiltersSchedulerAndAccountCooldown(t *testing.T) {
 	}
 }
 
+func TestResolveCopiesDefaultsNilClockToCurrentTime(t *testing.T) {
+	st := newPlaybackTestStore(t)
+	ctx := context.Background()
+
+	_, entry := createPlaybackLibraryEntry(t, ctx, st, "admin")
+	account := createPlaybackAccount(t, ctx, st, "acct1", "115")
+	copy := createPlaybackCopy(t, ctx, st, entry.BlobID, account.ID, "115", time.Now().Unix())
+	createPoolAssignment(t, ctx, st, "admin", account.ID, "115", 100, 1)
+
+	resolver := NewResolver(st.Queries, nil)
+	copies, err := resolver.ResolveCopies(ctx, "admin", entry.ID, "", 5)
+	if err != nil {
+		t.Fatalf("resolve copies: %v", err)
+	}
+	if len(copies) != 1 || copies[0].ID != copy.ID {
+		t.Fatalf("copies = %#v, want copy %d", copies, copy.ID)
+	}
+}
+
 // --- helpers: real store + sqlc, mirroring internal/store/store_test.go patterns ---
 
 func nowFunc(t time.Time) func() time.Time {

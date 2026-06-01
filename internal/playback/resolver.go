@@ -48,6 +48,9 @@ type Resolver struct {
 // NewResolver builds a Resolver. streamTimeout uses defaultStreamTimeout for now; a
 // later phase will wire it to config.
 func NewResolver(q Querier, now func() time.Time) *Resolver {
+	if now == nil {
+		now = time.Now
+	}
 	return &Resolver{
 		q:             q,
 		now:           now,

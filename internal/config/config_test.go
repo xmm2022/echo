@@ -146,11 +146,71 @@ emby_proxy:
 	if cfg.EmbyProxy.ProxyPrefix != "/emby" || cfg.EmbyProxy.Upstream.BaseURL != "http://emby:8096" {
 		t.Fatalf("emby proxy config = %+v", cfg.EmbyProxy)
 	}
-	if cfg.EmbyProxy.ConfigSync != "seed_if_missing" || cfg.EmbyProxy.Playback.MaxCandidateCopies != 5 || !cfg.EmbyProxy.Playback.RedactMappedPath {
+	if cfg.EmbyProxy.ConfigSync != "seed_if_missing" || cfg.EmbyProxy.Playback.MaxCandidateCopies != 5 ||
+		cfg.EmbyProxy.Playback.RedactMappedPath == nil || !*cfg.EmbyProxy.Playback.RedactMappedPath {
 		t.Fatalf("emby proxy runtime options = %+v", cfg.EmbyProxy)
 	}
 	if len(cfg.EmbyProxy.PathMappings) != 1 || cfg.EmbyProxy.PathMappings[0].EchoRelPrefix != "movies" {
 		t.Fatalf("path mappings = %+v", cfg.EmbyProxy.PathMappings)
+	}
+}
+
+func TestV02ConfigDefaultsRedactMappedPathToTrue(t *testing.T) {
+	for _, dir := range []string{"/tmp/echo-work", "/tmp/echo-secrets"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := writeTempConfig(t, `
+server:
+  bind: ":8080"
+  read_timeout: 5s
+  write_timeout: 5s
+database:
+  path: "/tmp/echo.db"
+auth:
+  bootstrap_admin_token: "boot"
+sidecar:
+  default:
+    base_url: "http://sidecar:5244"
+    auth_token_env: "ECHO_SIDECAR_TOKEN"
+    min_version: "0.1.0"
+    request_timeout: 5s
+    stream_timeout: 30s
+producer:
+  workdir_root: "/tmp/echo-work"
+  secrets_root: "/tmp/echo-secrets"
+  default_timeout: 1m
+  tools:
+    "115share2cas":
+      binary: /usr/local/bin/115share2cas
+      api_args_allowlist: ["share_url"]
+jobs:
+  max_concurrent: 1
+  worker_per_job: 1
+echo_output_defaults:
+  kind: "local"
+  base_path: "/tmp/echo-output"
+secrets_root: "/data/secrets"
+emby_proxy:
+  enabled: true
+  public_base_url: "https://echo.example.com"
+  proxy_prefix: "/emby"
+  upstream:
+    id: "default"
+    name: "main"
+    base_url: "http://emby:8096"
+    api_key_ref: "env:EMBY_API_KEY"
+  playback:
+    session_ttl: "12h"
+    max_candidate_copies: 5
+`)
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmbyProxy.Playback.RedactMappedPath == nil || !*cfg.EmbyProxy.Playback.RedactMappedPath {
+		t.Fatalf("redact_mapped_path default = false, want true")
 	}
 }
 

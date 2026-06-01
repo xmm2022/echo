@@ -84,9 +84,9 @@ type EmbyPlaybackConfig struct {
 	// MaxCandidateCopies is validated (1..20) but not yet threaded into the resolver,
 	// which currently uses a hardcoded limit of 5 (this knob's documented default).
 	// Follow-up: wire into playback.NewResolver/ResolveCopies.
-	MaxCandidateCopies int  `yaml:"max_candidate_copies"`
-	RedactMappedPath   bool `yaml:"redact_mapped_path"`
-	MappedOnly         bool `yaml:"mapped_only"`
+	MaxCandidateCopies int   `yaml:"max_candidate_copies"`
+	RedactMappedPath   *bool `yaml:"redact_mapped_path"`
+	MappedOnly         bool  `yaml:"mapped_only"`
 }
 
 type EmbyPathMappingConfig struct {
@@ -395,6 +395,10 @@ func (c *Config) validateEmbyProxy() error {
 
 	if !c.EmbyProxy.Enabled {
 		return nil
+	}
+	if c.EmbyProxy.Playback.RedactMappedPath == nil {
+		redact := true
+		c.EmbyProxy.Playback.RedactMappedPath = &redact
 	}
 
 	if c.EmbyProxy.PublicBaseURL == "" {

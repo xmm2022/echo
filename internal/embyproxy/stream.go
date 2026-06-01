@@ -68,7 +68,7 @@ func StreamHandler(mgr *SessionManager, resolver *playback.Resolver, quota *play
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
-			handleStreamHead(w, r, mgr, quota, logger)
+			handleStreamHead(w, r, mgr, resolver, quota, logger)
 			return
 		}
 		handleStreamGet(w, r, mgr, resolver, quota, sidecar, failures, m, logger)
@@ -101,7 +101,7 @@ func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager
 		return
 	}
 	if len(copies) == 0 {
-		writeStreamReason(w, http.StatusServiceUnavailable, "no_live_copy")
+		writeStreamReason(w, http.StatusServiceUnavailable, "temporary_unavailable")
 		return
 	}
 
@@ -200,7 +200,7 @@ func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager
 	writeStreamReason(w, http.StatusServiceUnavailable, "temporary_unavailable")
 }
 
-func handleStreamHead(w http.ResponseWriter, r *http.Request, mgr *SessionManager, quota *playback.Quota, logger *slog.Logger) {
+func handleStreamHead(w http.ResponseWriter, r *http.Request, mgr *SessionManager, resolver *playback.Resolver, quota *playback.Quota, logger *slog.Logger) {
 	ctx := r.Context()
 	reqID := chimw.GetReqID(ctx)
 	token := chi.URLParam(r, "token")
@@ -208,6 +208,23 @@ func handleStreamHead(w http.ResponseWriter, r *http.Request, mgr *SessionManage
 	session, err := mgr.LookupPlaybackSession(ctx, token)
 	if err != nil {
 		writeStreamReason(w, http.StatusNotFound, "temporary_unavailable")
+		return
+	}
+	copies, err := resolver.ResolveCopies(ctx, session.EchoUserID, session.LibraryEntryID.Int64, nullToString(session.PreferProvider), 5)
+	switch {
+	case errors.Is(err, playback.ErrUnauthorized):
+		writeStreamReason(w, http.StatusForbidden, "unauthorized")
+		return
+	case errors.Is(err, playback.ErrEntryMissing):
+		writeStreamReason(w, http.StatusNotFound, "temporary_unavailable")
+		return
+	case err != nil:
+		logger.Error("emby stream: resolve copies for probe", "request_id", reqID, "err", err)
+		writeStreamReason(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	if len(copies) == 0 {
+		writeStreamReason(w, http.StatusServiceUnavailable, "temporary_unavailable")
 		return
 	}
 	if err := quota.CheckStreamAllowed(ctx, session.EchoUserID); errors.Is(err, playback.ErrQuotaExceeded) {
