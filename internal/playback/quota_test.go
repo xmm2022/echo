@@ -54,6 +54,14 @@ func TestQuotaCountsActualBytesAndActiveStreams(t *testing.T) {
 // unfinished DB row AND registers a lease for the same event id; with MaxStreams=1 the
 // union must see a count of exactly 1 (-> exceeded). A separate purely in-memory lease
 // for a different id is still counted distinctly.
+func TestQuotaReconcileUsesDefaultClockWhenNil(t *testing.T) {
+	st := newPlaybackTestStore(t)
+	q := NewQuota(st.Queries, nil, time.Hour)
+	if err := q.ReconcileInterruptedStreams(context.Background()); err != nil {
+		t.Fatalf("reconcile interrupted streams with nil clock: %v", err)
+	}
+}
+
 func TestQuotaActiveStreamUnionDoesNotDoubleCount(t *testing.T) {
 	st := newPlaybackTestStore(t)
 	ctx := context.Background()

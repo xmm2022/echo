@@ -50,6 +50,13 @@ func NewQuota(q QuotaQuerier, now func() time.Time, streamTimeout time.Duration)
 	}
 }
 
+func (q *Quota) clock() time.Time {
+	if q.now != nil {
+		return q.now()
+	}
+	return time.Now()
+}
+
 // StartStreamInput describes a stream to record. Phase 2 only sets RequestID,
 // EchoUserID, Operation and StartedAt; the remaining fields are wired through to the
 // playback_events row but left zero/nil (NULL) by current callers.
@@ -99,7 +106,7 @@ func (q *Quota) CheckStreamAllowed(ctx context.Context, echoUserID string) error
 	if policy.Period == "none" {
 		return nil
 	}
-	now := q.now()
+	now := q.clock()
 	start, end, ok := periodWindow(policy.Period, now)
 	if !ok {
 		// Unknown period: fail closed rather than silently allowing unmetered access.
@@ -210,7 +217,7 @@ func (q *Quota) FinishStream(ctx context.Context, id int64, in FinishStreamInput
 // streamTimeout as 'interrupted', reclaiming streams orphaned by a crash. It is wired at
 // startup in a later phase.
 func (q *Quota) ReconcileInterruptedStreams(ctx context.Context) error {
-	now := q.now()
+	now := q.clock()
 	return q.q.MarkStalePlaybackEventsInterrupted(ctx, queries.MarkStalePlaybackEventsInterruptedParams{
 		FinishedAt: sql.NullInt64{Int64: now.Unix(), Valid: true},
 		StartedAt:  now.Add(-q.streamTimeout).Unix(),
