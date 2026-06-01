@@ -53,3 +53,49 @@ func (q *Queries) InsertCopyFailure(ctx context.Context, arg InsertCopyFailurePa
 	)
 	return err
 }
+
+const listCopyFailuresByCopy = `-- name: ListCopyFailuresByCopy :many
+SELECT id, copy_id, account_id, sidecar_id, storage_mount, operation, kind, confidence, evidence_class, http_status, openlist_code, safe_message, observed_at, request_id FROM copy_failures WHERE copy_id = ? ORDER BY observed_at ASC, id ASC
+`
+
+type ListCopyFailuresByCopyParams struct {
+	CopyID sql.NullInt64 `json:"copy_id"`
+}
+
+func (q *Queries) ListCopyFailuresByCopy(ctx context.Context, arg ListCopyFailuresByCopyParams) ([]CopyFailure, error) {
+	rows, err := q.db.QueryContext(ctx, listCopyFailuresByCopy, arg.CopyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CopyFailure
+	for rows.Next() {
+		var i CopyFailure
+		if err := rows.Scan(
+			&i.ID,
+			&i.CopyID,
+			&i.AccountID,
+			&i.SidecarID,
+			&i.StorageMount,
+			&i.Operation,
+			&i.Kind,
+			&i.Confidence,
+			&i.EvidenceClass,
+			&i.HttpStatus,
+			&i.OpenlistCode,
+			&i.SafeMessage,
+			&i.ObservedAt,
+			&i.RequestID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

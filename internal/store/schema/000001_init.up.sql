@@ -2,15 +2,34 @@
 
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE quota_policies (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                  TEXT NOT NULL,
+  period                TEXT NOT NULL CHECK (period IN ('day','month','rolling_24h','none')),
+  max_bytes             INTEGER,
+  max_streams           INTEGER,
+  max_playback_sessions INTEGER,
+  version               INTEGER NOT NULL DEFAULT 1,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL
+);
+
+INSERT INTO quota_policies (
+  id, name, period, max_bytes, max_streams, max_playback_sessions, version, created_at, updated_at
+) VALUES (
+  1, 'unlimited', 'none', NULL, NULL, NULL, 1, 0, 0
+);
+
 CREATE TABLE users (
-  id             TEXT PRIMARY KEY,
-  username       TEXT NOT NULL UNIQUE,
-  role           TEXT NOT NULL CHECK (role IN ('admin','user')),
-  status         TEXT NOT NULL CHECK (status IN ('active','disabled')),
-  password_hash  TEXT,
-  created_at     INTEGER NOT NULL,
-  updated_at     INTEGER NOT NULL,
-  last_login_at  INTEGER
+  id               TEXT PRIMARY KEY,
+  username         TEXT NOT NULL UNIQUE,
+  role             TEXT NOT NULL CHECK (role IN ('admin','user')),
+  status           TEXT NOT NULL CHECK (status IN ('active','disabled')),
+  quota_policy_id  INTEGER NOT NULL REFERENCES quota_policies(id) DEFAULT 1,
+  password_hash    TEXT,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  last_login_at    INTEGER
 );
 
 INSERT INTO users (
@@ -61,6 +80,72 @@ CREATE TABLE libraries (
   owner_id         TEXT NOT NULL DEFAULT 'admin',
   created_at       INTEGER NOT NULL
 );
+
+CREATE TABLE library_grants (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  library_id   INTEGER NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  echo_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  permission   TEXT NOT NULL CHECK (permission IN ('playback')),
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  created_by   TEXT REFERENCES users(id),
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  UNIQUE (library_id, echo_user_id, permission)
+);
+
+CREATE TABLE account_pool_assignments (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  echo_user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id              TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  provider                TEXT NOT NULL,
+  priority                INTEGER NOT NULL DEFAULT 100,
+  weight                  INTEGER NOT NULL DEFAULT 1,
+  max_concurrent_streams  INTEGER,
+  daily_bytes_limit       INTEGER,
+  enabled                 INTEGER NOT NULL DEFAULT 1,
+  created_at              INTEGER NOT NULL,
+  updated_at              INTEGER NOT NULL,
+  UNIQUE (echo_user_id, account_id)
+);
+
+CREATE TABLE quota_usage (
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  quota_policy_id  INTEGER NOT NULL,
+  policy_version   INTEGER NOT NULL,
+  period_start     INTEGER NOT NULL,
+  period_end       INTEGER NOT NULL,
+  bytes_used       INTEGER NOT NULL DEFAULT 0,
+  stream_count     INTEGER NOT NULL DEFAULT 0,
+  updated_at       INTEGER NOT NULL,
+  PRIMARY KEY (user_id, quota_policy_id, policy_version, period_start, period_end)
+);
+
+CREATE TABLE playback_events (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id        TEXT NOT NULL,
+  session_id        TEXT,
+  error_token_id    TEXT,
+  echo_user_id       TEXT REFERENCES users(id),
+  library_entry_id   INTEGER,
+  blob_id            INTEGER,
+  copy_id            INTEGER,
+  provider           TEXT,
+  account_id         TEXT,
+  operation          TEXT NOT NULL CHECK (operation IN ('playback_info','stream','stream_probe')),
+  status             TEXT NOT NULL,
+  bytes_sent         INTEGER NOT NULL DEFAULT 0,
+  range_header       TEXT,
+  http_status        INTEGER,
+  failure_kind       TEXT,
+  failure_message    TEXT,
+  started_at         INTEGER NOT NULL,
+  finished_at        INTEGER
+);
+
+CREATE INDEX idx_library_grants_user ON library_grants(echo_user_id, library_id, permission, enabled);
+CREATE INDEX idx_account_pool_user_provider ON account_pool_assignments(echo_user_id, provider, enabled, priority);
+CREATE INDEX idx_playback_events_user_time ON playback_events(echo_user_id, started_at DESC);
+CREATE INDEX idx_playback_events_unfinished ON playback_events(operation, finished_at, started_at);
 
 CREATE TABLE blobs (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,

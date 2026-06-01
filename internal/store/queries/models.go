@@ -27,6 +27,20 @@ type Account struct {
 	LastErrorMessage sql.NullString `json:"last_error_message"`
 }
 
+type AccountPoolAssignment struct {
+	ID                   int64         `json:"id"`
+	EchoUserID           string        `json:"echo_user_id"`
+	AccountID            string        `json:"account_id"`
+	Provider             string        `json:"provider"`
+	Priority             int64         `json:"priority"`
+	Weight               int64         `json:"weight"`
+	MaxConcurrentStreams sql.NullInt64 `json:"max_concurrent_streams"`
+	DailyBytesLimit      sql.NullInt64 `json:"daily_bytes_limit"`
+	Enabled              int64         `json:"enabled"`
+	CreatedAt            int64         `json:"created_at"`
+	UpdatedAt            int64         `json:"updated_at"`
+}
+
 type ApiToken struct {
 	ID         string        `json:"id"`
 	UserID     string        `json:"user_id"`
@@ -143,6 +157,39 @@ type LibraryEntry struct {
 	UpdatedAt   int64  `json:"updated_at"`
 }
 
+type LibraryGrant struct {
+	ID         int64          `json:"id"`
+	LibraryID  int64          `json:"library_id"`
+	EchoUserID string         `json:"echo_user_id"`
+	Permission string         `json:"permission"`
+	Enabled    int64          `json:"enabled"`
+	CreatedBy  sql.NullString `json:"created_by"`
+	CreatedAt  int64          `json:"created_at"`
+	UpdatedAt  int64          `json:"updated_at"`
+}
+
+type PlaybackEvent struct {
+	ID             int64          `json:"id"`
+	RequestID      string         `json:"request_id"`
+	SessionID      sql.NullString `json:"session_id"`
+	ErrorTokenID   sql.NullString `json:"error_token_id"`
+	EchoUserID     sql.NullString `json:"echo_user_id"`
+	LibraryEntryID sql.NullInt64  `json:"library_entry_id"`
+	BlobID         sql.NullInt64  `json:"blob_id"`
+	CopyID         sql.NullInt64  `json:"copy_id"`
+	Provider       sql.NullString `json:"provider"`
+	AccountID      sql.NullString `json:"account_id"`
+	Operation      string         `json:"operation"`
+	Status         string         `json:"status"`
+	BytesSent      int64          `json:"bytes_sent"`
+	RangeHeader    sql.NullString `json:"range_header"`
+	HttpStatus     sql.NullInt64  `json:"http_status"`
+	FailureKind    sql.NullString `json:"failure_kind"`
+	FailureMessage sql.NullString `json:"failure_message"`
+	StartedAt      int64          `json:"started_at"`
+	FinishedAt     sql.NullInt64  `json:"finished_at"`
+}
+
 type ProducerRun struct {
 	ID           int64          `json:"id"`
 	JobID        int64          `json:"job_id"`
@@ -159,13 +206,37 @@ type ProducerRun struct {
 	FinishedAt   sql.NullInt64  `json:"finished_at"`
 }
 
+type QuotaPolicy struct {
+	ID                  int64         `json:"id"`
+	Name                string        `json:"name"`
+	Period              string        `json:"period"`
+	MaxBytes            sql.NullInt64 `json:"max_bytes"`
+	MaxStreams          sql.NullInt64 `json:"max_streams"`
+	MaxPlaybackSessions sql.NullInt64 `json:"max_playback_sessions"`
+	Version             int64         `json:"version"`
+	CreatedAt           int64         `json:"created_at"`
+	UpdatedAt           int64         `json:"updated_at"`
+}
+
+type QuotaUsage struct {
+	UserID        string `json:"user_id"`
+	QuotaPolicyID int64  `json:"quota_policy_id"`
+	PolicyVersion int64  `json:"policy_version"`
+	PeriodStart   int64  `json:"period_start"`
+	PeriodEnd     int64  `json:"period_end"`
+	BytesUsed     int64  `json:"bytes_used"`
+	StreamCount   int64  `json:"stream_count"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
 type User struct {
-	ID           string         `json:"id"`
-	Username     string         `json:"username"`
-	Role         string         `json:"role"`
-	Status       string         `json:"status"`
-	PasswordHash sql.NullString `json:"password_hash"`
-	CreatedAt    int64          `json:"created_at"`
-	UpdatedAt    int64          `json:"updated_at"`
-	LastLoginAt  sql.NullInt64  `json:"last_login_at"`
+	ID            string         `json:"id"`
+	Username      string         `json:"username"`
+	Role          string         `json:"role"`
+	Status        string         `json:"status"`
+	QuotaPolicyID int64          `json:"quota_policy_id"`
+	PasswordHash  sql.NullString `json:"password_hash"`
+	CreatedAt     int64          `json:"created_at"`
+	UpdatedAt     int64          `json:"updated_at"`
+	LastLoginAt   sql.NullInt64  `json:"last_login_at"`
 }

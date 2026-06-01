@@ -2,6 +2,9 @@
 SELECT * FROM file_copies
 WHERE sidecar_id = ? AND storage_mount = ? AND remote_path = ?;
 
+-- name: GetFileCopyByID :one
+SELECT * FROM file_copies WHERE id = ?;
+
 -- name: InsertFileCopy :one
 INSERT INTO file_copies (
   blob_id, provider, account_id, sidecar_id, storage_mount, remote_path,

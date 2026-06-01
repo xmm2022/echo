@@ -5,3 +5,6 @@ INSERT INTO copy_failures (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 );
+
+-- name: ListCopyFailuresByCopy :many
+SELECT * FROM copy_failures WHERE copy_id = ? ORDER BY observed_at ASC, id ASC;

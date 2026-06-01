@@ -6,9 +6,9 @@ SELECT * FROM users WHERE username = ?;
 
 -- name: CreateUser :exec
 INSERT INTO users (
-  id, username, role, status, password_hash, created_at, updated_at, last_login_at
+  id, username, role, status, quota_policy_id, password_hash, created_at, updated_at, last_login_at
 ) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?
 );
 
 -- name: UpdateUserStatus :exec

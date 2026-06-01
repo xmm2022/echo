@@ -92,8 +92,9 @@ func TestMigrationUpDownClean(t *testing.T) {
 		t.Fatalf("migrate down: %v", err)
 	}
 	for _, name := range []string{
-		"users", "api_tokens", "accounts", "libraries", "blobs", "library_entries", "blob_hashes",
-		"file_copies", "hash_conflicts", "jobs", "producer_runs",
+		"users", "api_tokens", "quota_policies", "library_grants", "account_pool_assignments",
+		"quota_usage", "playback_events", "accounts", "libraries", "blobs", "library_entries",
+		"blob_hashes", "file_copies", "hash_conflicts", "jobs", "producer_runs",
 	} {
 		if tableExists(t, db, name) {
 			t.Fatalf("%s table still exists after migrate down", name)
@@ -102,6 +103,38 @@ func TestMigrationUpDownClean(t *testing.T) {
 
 	if err := MigrateUp(db); err != nil {
 		t.Fatalf("second migrate up after down: %v", err)
+	}
+}
+
+func TestPhase2QuotaPolicyBackfillsUsers(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	admin, err := st.GetUser(ctx, queries.GetUserParams{ID: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.QuotaPolicyID == 0 {
+		t.Fatalf("admin quota_policy_id = %d, want sentinel policy", admin.QuotaPolicyID)
+	}
+	policy, err := st.GetQuotaPolicy(ctx, queries.GetQuotaPolicyParams{ID: admin.QuotaPolicyID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Period != "none" {
+		t.Fatalf("sentinel period = %q, want none", policy.Period)
+	}
+}
+
+func TestPhase2PlaybackEventsHaveNullableSessionSnapshots(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	if _, err := st.InsertPlaybackEvent(ctx, queries.InsertPlaybackEventParams{
+		RequestID: "req1", SessionID: sql.NullString{}, ErrorTokenID: sql.NullString{},
+		EchoUserID: sql.NullString{String: "admin", Valid: true}, Operation: "stream",
+		Status: "ok", BytesSent: 123, StartedAt: 1000,
+	}); err != nil {
+		t.Fatalf("insert playback event without session table parent: %v", err)
 	}
 }
 

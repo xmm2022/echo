@@ -33,6 +33,44 @@ func (q *Queries) ClearFileCopySchedulerFailure(ctx context.Context, arg ClearFi
 	return err
 }
 
+const getFileCopyByID = `-- name: GetFileCopyByID :one
+SELECT id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen, scheduler_state, cooldown_until, verify_after, failure_count, last_failure_at, last_failure_kind, last_failure_confidence, last_failure_code, last_failure_message, dead_reason, dead_at FROM file_copies WHERE id = ?
+`
+
+type GetFileCopyByIDParams struct {
+	ID int64 `json:"id"`
+}
+
+func (q *Queries) GetFileCopyByID(ctx context.Context, arg GetFileCopyByIDParams) (FileCopy, error) {
+	row := q.db.QueryRowContext(ctx, getFileCopyByID, arg.ID)
+	var i FileCopy
+	err := row.Scan(
+		&i.ID,
+		&i.BlobID,
+		&i.Provider,
+		&i.AccountID,
+		&i.SidecarID,
+		&i.StorageMount,
+		&i.RemotePath,
+		&i.CloudFileID,
+		&i.Pickcode,
+		&i.Status,
+		&i.LastSeen,
+		&i.SchedulerState,
+		&i.CooldownUntil,
+		&i.VerifyAfter,
+		&i.FailureCount,
+		&i.LastFailureAt,
+		&i.LastFailureKind,
+		&i.LastFailureConfidence,
+		&i.LastFailureCode,
+		&i.LastFailureMessage,
+		&i.DeadReason,
+		&i.DeadAt,
+	)
+	return i, err
+}
+
 const getFileCopyByRemotePath = `-- name: GetFileCopyByRemotePath :one
 SELECT id, blob_id, provider, account_id, sidecar_id, storage_mount, remote_path, cloud_file_id, pickcode, status, last_seen, scheduler_state, cooldown_until, verify_after, failure_count, last_failure_at, last_failure_kind, last_failure_confidence, last_failure_code, last_failure_message, dead_reason, dead_at FROM file_copies
 WHERE sidecar_id = ? AND storage_mount = ? AND remote_path = ?

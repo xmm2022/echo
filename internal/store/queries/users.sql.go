@@ -12,21 +12,22 @@ import (
 
 const createUser = `-- name: CreateUser :exec
 INSERT INTO users (
-  id, username, role, status, password_hash, created_at, updated_at, last_login_at
+  id, username, role, status, quota_policy_id, password_hash, created_at, updated_at, last_login_at
 ) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 `
 
 type CreateUserParams struct {
-	ID           string         `json:"id"`
-	Username     string         `json:"username"`
-	Role         string         `json:"role"`
-	Status       string         `json:"status"`
-	PasswordHash sql.NullString `json:"password_hash"`
-	CreatedAt    int64          `json:"created_at"`
-	UpdatedAt    int64          `json:"updated_at"`
-	LastLoginAt  sql.NullInt64  `json:"last_login_at"`
+	ID            string         `json:"id"`
+	Username      string         `json:"username"`
+	Role          string         `json:"role"`
+	Status        string         `json:"status"`
+	QuotaPolicyID int64          `json:"quota_policy_id"`
+	PasswordHash  sql.NullString `json:"password_hash"`
+	CreatedAt     int64          `json:"created_at"`
+	UpdatedAt     int64          `json:"updated_at"`
+	LastLoginAt   sql.NullInt64  `json:"last_login_at"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
@@ -35,6 +36,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 		arg.Username,
 		arg.Role,
 		arg.Status,
+		arg.QuotaPolicyID,
 		arg.PasswordHash,
 		arg.CreatedAt,
 		arg.UpdatedAt,
@@ -44,7 +46,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, username, role, status, password_hash, created_at, updated_at, last_login_at FROM users WHERE id = ?
+SELECT id, username, role, status, quota_policy_id, password_hash, created_at, updated_at, last_login_at FROM users WHERE id = ?
 `
 
 type GetUserParams struct {
@@ -59,6 +61,7 @@ func (q *Queries) GetUser(ctx context.Context, arg GetUserParams) (User, error) 
 		&i.Username,
 		&i.Role,
 		&i.Status,
+		&i.QuotaPolicyID,
 		&i.PasswordHash,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -68,7 +71,7 @@ func (q *Queries) GetUser(ctx context.Context, arg GetUserParams) (User, error) 
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, role, status, password_hash, created_at, updated_at, last_login_at FROM users WHERE username = ?
+SELECT id, username, role, status, quota_policy_id, password_hash, created_at, updated_at, last_login_at FROM users WHERE username = ?
 `
 
 type GetUserByUsernameParams struct {
@@ -83,6 +86,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, arg GetUserByUsernamePa
 		&i.Username,
 		&i.Role,
 		&i.Status,
+		&i.QuotaPolicyID,
 		&i.PasswordHash,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -92,7 +96,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, arg GetUserByUsernamePa
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, role, status, password_hash, created_at, updated_at, last_login_at FROM users
+SELECT id, username, role, status, quota_policy_id, password_hash, created_at, updated_at, last_login_at FROM users
 ORDER BY username
 LIMIT ? OFFSET ?
 `
@@ -116,6 +120,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.Username,
 			&i.Role,
 			&i.Status,
+			&i.QuotaPolicyID,
 			&i.PasswordHash,
 			&i.CreatedAt,
 			&i.UpdatedAt,
