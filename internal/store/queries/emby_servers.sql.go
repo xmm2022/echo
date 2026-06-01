@@ -45,6 +45,32 @@ func (q *Queries) CreateEmbyServer(ctx context.Context, arg CreateEmbyServerPara
 	return err
 }
 
+const getEmbyServer = `-- name: GetEmbyServer :one
+SELECT id, name, base_url, api_key_ref, public_base_url, proxy_prefix, enabled, created_at, updated_at FROM emby_servers
+WHERE id = ?
+`
+
+type GetEmbyServerParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) GetEmbyServer(ctx context.Context, arg GetEmbyServerParams) (EmbyServer, error) {
+	row := q.db.QueryRowContext(ctx, getEmbyServer, arg.ID)
+	var i EmbyServer
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.BaseUrl,
+		&i.ApiKeyRef,
+		&i.PublicBaseUrl,
+		&i.ProxyPrefix,
+		&i.Enabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getEnabledEmbyServer = `-- name: GetEnabledEmbyServer :one
 SELECT id, name, base_url, api_key_ref, public_base_url, proxy_prefix, enabled, created_at, updated_at FROM emby_servers
 WHERE id = ? AND enabled = 1

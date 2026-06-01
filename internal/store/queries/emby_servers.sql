@@ -8,3 +8,7 @@ INSERT INTO emby_servers (
 -- name: GetEnabledEmbyServer :one
 SELECT * FROM emby_servers
 WHERE id = ? AND enabled = 1;
+
+-- name: GetEmbyServer :one
+SELECT * FROM emby_servers
+WHERE id = ?;

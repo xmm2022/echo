@@ -72,6 +72,16 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 
 最小管理后台（templ + htmx）在 `/`，只读地看 Job 与 hash 冲突。前端依赖 **vendored** 的 htmx（`internal/web/static/htmx.min.js`，不走 CDN，版本与来源见 [`internal/web/static/README.md`](internal/web/static/README.md)）。浏览器打开 `/` 后在页面里粘贴 admin token，脚本会把它作为 Bearer 头附加到后续 htmx 请求。
 
+### v0.2 Emby 反向代理（`/emby`）
+
+启用 `emby_proxy` 后，Echo 在 `proxy_prefix`（默认 `/emby`）下挂一层 Emby 反向代理：
+
+- Emby 客户端把服务器地址填成 `https://echo.example.com/emby`（本地测试用 `http://localhost:8080/emby`），其余请求透传到上游 Emby。
+- 命中库映射的 PlaybackInfo 源会被改写成 `/emby/stream/{token}` 或 `/emby/error/{token}`，上游 Emby 的真实 stream URL、签名 URL 与鉴权头一律不下发给客户端。
+- `/api/restore/{file_id}` 与 `/api/stream/{file_id}` 仍是 Echo 的管理 / v0.1 兼容 API，**不是** Emby PlaybackInfo 的改写目标，不要把它们填进 Emby。
+- `auth.bootstrap_admin_token` 只用于找回 / 签发 admin token；日常管理请求走 DB 里的 API token，而非这个 bootstrap 凭据。
+- 上游 Emby API key 通过 `emby_proxy.upstream.api_key_ref` 引用，支持 `env:NAME`（如 `env:EMBY_API_KEY`）或 `ref:relative/path`（相对 `secrets_root` 的常规文件，禁止绝对路径 / `..` / 软链逃逸）。
+
 ## 致谢
 
 Echo 站在 OpenList 生态之上，CAS（秒传占位）模式与多云 driver 均来自上游，谨此致谢（全部 AGPLv3）:

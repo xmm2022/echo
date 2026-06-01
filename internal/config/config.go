@@ -48,6 +48,52 @@ type Config struct {
 	Jobs               JobsConfig         `yaml:"jobs"`
 	EchoOutputDefaults EchoOutputDefaults `yaml:"echo_output_defaults"`
 	Log                LogConfig          `yaml:"log"`
+	Readiness          ReadyConfig        `yaml:"readiness"`
+	SecretsRoot        string             `yaml:"secrets_root"`
+	EmbyProxy          EmbyProxyConfig    `yaml:"emby_proxy"`
+}
+
+// ReadyConfig gates /readyz on v0.2 dependencies. It is distinct from the
+// http.ReadyConfig wiring type: this one carries yaml tags and is the
+// operator-facing surface; main.go maps it onto the http readiness checker.
+type ReadyConfig struct {
+	RequireSidecarContract     bool `yaml:"require_sidecar_contract"`
+	RequireSidecarConnectivity bool `yaml:"require_sidecar_connectivity"`
+	RequireEmbyConnectivity    bool `yaml:"require_emby_connectivity"`
+}
+
+type EmbyProxyConfig struct {
+	Enabled       bool                    `yaml:"enabled"`
+	ConfigSync    string                  `yaml:"config_sync"`
+	PublicBaseURL string                  `yaml:"public_base_url"`
+	ProxyPrefix   string                  `yaml:"proxy_prefix"`
+	Upstream      EmbyUpstreamConfig      `yaml:"upstream"`
+	Playback      EmbyPlaybackConfig      `yaml:"playback"`
+	PathMappings  []EmbyPathMappingConfig `yaml:"path_mappings"`
+}
+
+type EmbyUpstreamConfig struct {
+	ID        string `yaml:"id"`
+	Name      string `yaml:"name"`
+	BaseURL   string `yaml:"base_url"`
+	APIKeyRef string `yaml:"api_key_ref"`
+}
+
+type EmbyPlaybackConfig struct {
+	SessionTTL Duration `yaml:"session_ttl"`
+	// MaxCandidateCopies is validated (1..20) but not yet threaded into the resolver,
+	// which currently uses a hardcoded limit of 5 (this knob's documented default).
+	// Follow-up: wire into playback.NewResolver/ResolveCopies.
+	MaxCandidateCopies int  `yaml:"max_candidate_copies"`
+	RedactMappedPath   bool `yaml:"redact_mapped_path"`
+	MappedOnly         bool `yaml:"mapped_only"`
+}
+
+type EmbyPathMappingConfig struct {
+	LibraryID      int64  `yaml:"library_id"`
+	EmbyPathPrefix string `yaml:"emby_path_prefix"`
+	EchoRelPrefix  string `yaml:"echo_rel_prefix"`
+	CaseSensitive  bool   `yaml:"case_sensitive"`
 }
 
 type ServerConfig struct {
@@ -157,6 +203,18 @@ func (c *Config) expandEnv() {
 	c.EchoOutputDefaults.BasePath = os.ExpandEnv(c.EchoOutputDefaults.BasePath)
 	c.Log.Level = os.ExpandEnv(c.Log.Level)
 	c.Log.Format = os.ExpandEnv(c.Log.Format)
+	c.SecretsRoot = os.ExpandEnv(c.SecretsRoot)
+	c.EmbyProxy.ConfigSync = os.ExpandEnv(c.EmbyProxy.ConfigSync)
+	c.EmbyProxy.PublicBaseURL = os.ExpandEnv(c.EmbyProxy.PublicBaseURL)
+	c.EmbyProxy.ProxyPrefix = os.ExpandEnv(c.EmbyProxy.ProxyPrefix)
+	c.EmbyProxy.Upstream.ID = os.ExpandEnv(c.EmbyProxy.Upstream.ID)
+	c.EmbyProxy.Upstream.Name = os.ExpandEnv(c.EmbyProxy.Upstream.Name)
+	c.EmbyProxy.Upstream.BaseURL = os.ExpandEnv(c.EmbyProxy.Upstream.BaseURL)
+	c.EmbyProxy.Upstream.APIKeyRef = os.ExpandEnv(c.EmbyProxy.Upstream.APIKeyRef)
+	for i := range c.EmbyProxy.PathMappings {
+		c.EmbyProxy.PathMappings[i].EmbyPathPrefix = os.ExpandEnv(c.EmbyProxy.PathMappings[i].EmbyPathPrefix)
+		c.EmbyProxy.PathMappings[i].EchoRelPrefix = os.ExpandEnv(c.EmbyProxy.PathMappings[i].EchoRelPrefix)
+	}
 }
 
 func (c *Config) applyEnvOverrides() error {
@@ -316,6 +374,139 @@ func (c *Config) validate() error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("log.format must be json or text, got %q", c.Log.Format)
+	}
+	if err := c.validateEmbyProxy(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Config) validateEmbyProxy() error {
+	// config_sync defaults to seed_if_missing and is validated even when the
+	// proxy is disabled so an operator typo surfaces immediately.
+	if c.EmbyProxy.ConfigSync == "" {
+		c.EmbyProxy.ConfigSync = "seed_if_missing"
+	}
+	switch c.EmbyProxy.ConfigSync {
+	case "seed_if_missing", "overwrite_on_startup":
+	default:
+		return fmt.Errorf("emby_proxy.config_sync must be seed_if_missing or overwrite_on_startup, got %q", c.EmbyProxy.ConfigSync)
+	}
+
+	if !c.EmbyProxy.Enabled {
+		return nil
+	}
+
+	if c.EmbyProxy.PublicBaseURL == "" {
+		return fieldRequired("emby_proxy.public_base_url")
+	}
+	if parsed, err := url.Parse(c.EmbyProxy.PublicBaseURL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("emby_proxy.public_base_url must be an absolute URL, got %q", c.EmbyProxy.PublicBaseURL)
+	}
+	if c.EmbyProxy.ProxyPrefix == "" {
+		return fieldRequired("emby_proxy.proxy_prefix")
+	}
+	if !strings.HasPrefix(c.EmbyProxy.ProxyPrefix, "/") {
+		return fmt.Errorf("emby_proxy.proxy_prefix must start with %q, got %q", "/", c.EmbyProxy.ProxyPrefix)
+	}
+	if c.EmbyProxy.ProxyPrefix != "/" && strings.HasSuffix(c.EmbyProxy.ProxyPrefix, "/") {
+		return fmt.Errorf("emby_proxy.proxy_prefix must not end with %q, got %q", "/", c.EmbyProxy.ProxyPrefix)
+	}
+
+	up := c.EmbyProxy.Upstream
+	if up.ID == "" {
+		return fieldRequired("emby_proxy.upstream.id")
+	}
+	if up.Name == "" {
+		return fieldRequired("emby_proxy.upstream.name")
+	}
+	if up.BaseURL == "" {
+		return fieldRequired("emby_proxy.upstream.base_url")
+	}
+	if parsed, err := url.Parse(up.BaseURL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("emby_proxy.upstream.base_url must be an absolute URL, got %q", up.BaseURL)
+	}
+	if up.APIKeyRef == "" {
+		return fieldRequired("emby_proxy.upstream.api_key_ref")
+	}
+	if err := c.validateAPIKeyRef(up.APIKeyRef); err != nil {
+		return err
+	}
+
+	if c.EmbyProxy.Playback.SessionTTL.Duration <= 0 {
+		return fieldPositiveDuration("emby_proxy.playback.session_ttl")
+	}
+	if c.EmbyProxy.Playback.MaxCandidateCopies < 1 || c.EmbyProxy.Playback.MaxCandidateCopies > 20 {
+		return fmt.Errorf("emby_proxy.playback.max_candidate_copies must be between 1 and 20, got %d", c.EmbyProxy.Playback.MaxCandidateCopies)
+	}
+
+	for i, m := range c.EmbyProxy.PathMappings {
+		if m.LibraryID <= 0 {
+			return fieldPositiveInt(fmt.Sprintf("emby_proxy.path_mappings[%d].library_id", i))
+		}
+		if m.EmbyPathPrefix == "" {
+			return fieldRequired(fmt.Sprintf("emby_proxy.path_mappings[%d].emby_path_prefix", i))
+		}
+		if filepath.IsAbs(m.EchoRelPrefix) {
+			return fmt.Errorf("emby_proxy.path_mappings[%d].echo_rel_prefix must be a relative path, got %q", i, m.EchoRelPrefix)
+		}
+	}
+	return nil
+}
+
+// validateAPIKeyRef enforces the api_key_ref contract: either "env:NAME" or
+// "ref:relative/path", where the ref path is a regular file located inside
+// secrets_root after symlink resolution. Absolute paths, "..", symlink escapes,
+// missing files, and non-regular files are rejected.
+func (c *Config) validateAPIKeyRef(ref string) error {
+	const field = "emby_proxy.upstream.api_key_ref"
+	if name, ok := strings.CutPrefix(ref, "env:"); ok {
+		if name == "" {
+			return fmt.Errorf("%s env reference must name a variable, got %q", field, ref)
+		}
+		return nil
+	}
+	rel, ok := strings.CutPrefix(ref, "ref:")
+	if !ok {
+		return fmt.Errorf("%s must be %q or %q, got %q", field, "env:NAME", "ref:relative/path", ref)
+	}
+	if rel == "" {
+		return fmt.Errorf("%s ref path must not be empty", field)
+	}
+	if c.SecretsRoot == "" {
+		return fmt.Errorf("%s uses a ref path but secrets_root is not configured", field)
+	}
+	if filepath.IsAbs(rel) {
+		return fmt.Errorf("%s ref path must be relative, got %q", field, rel)
+	}
+	clean := filepath.Clean(rel)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("%s ref path must not traverse outside secrets_root, got %q", field, rel)
+	}
+
+	root, err := filepath.Abs(c.SecretsRoot)
+	if err != nil {
+		return fmt.Errorf("%s: resolve secrets_root: %w", field, err)
+	}
+	if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		root = resolved
+	}
+	target := filepath.Join(root, clean)
+
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return fmt.Errorf("%s ref path %q must resolve to an existing file: %w", field, rel, err)
+	}
+	prefix := root + string(os.PathSeparator)
+	if resolvedTarget != root && !strings.HasPrefix(resolvedTarget, prefix) {
+		return fmt.Errorf("%s ref path %q resolves outside secrets_root", field, rel)
+	}
+	info, err := os.Stat(resolvedTarget)
+	if err != nil {
+		return fmt.Errorf("%s ref path %q must be an existing file: %w", field, rel, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s ref path %q must be a regular file", field, rel)
 	}
 	return nil
 }

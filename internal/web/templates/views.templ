@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"database/sql"
 	"strconv"
 
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -35,6 +36,7 @@ templ Index() {
 				<h2>Hash conflicts</h2>
 				<div data-reload="true" hx-get="/ui/conflicts" hx-trigger="load, reload" hx-target="this">Loading…</div>
 			</section>
+			@V02Panels()
 		</body>
 	</html>
 }
@@ -92,4 +94,359 @@ templ ConflictsTable(conflicts []queries.HashConflict) {
 			</tbody>
 		</table>
 	}
+}
+
+// V02Panels groups the v0.2 management panels appended to the dashboard shell
+// after the v0.1 jobs/conflicts sections. Each div lazily htmx-loads its fragment
+// from /ui/* (auth-gated) on load and on a "reload" event.
+templ V02Panels() {
+	<section>
+		<h2>Emby servers</h2>
+		<div data-reload="true" hx-get="/ui/emby/servers" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>User links</h2>
+		<div data-reload="true" hx-get="/ui/emby/user-links" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>Library mappings</h2>
+		<div data-reload="true" hx-get="/ui/emby/library-mappings" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>Account pools</h2>
+		<div data-reload="true" hx-get="/ui/account-pools" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>Quota policies</h2>
+		<div data-reload="true" hx-get="/ui/quota/policies" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>Quota usage</h2>
+		<div data-reload="true" hx-get="/ui/quota/usage" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>Playback sessions</h2>
+		<div data-reload="true" hx-get="/ui/playback/sessions" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+	<section>
+		<h2>Playback events</h2>
+		<div data-reload="true" hx-get="/ui/playback/events" hx-trigger="load, reload" hx-target="this">Loading...</div>
+	</section>
+}
+
+// EmbyServersTable renders the Emby servers management fragment. It reads from
+// ListEmbyServersRow, which OMITS api_key_ref, so no secret reference can leak
+// here. The create form POSTs to /api/emby/servers and each row carries an inline
+// edit form PATCHing /api/emby/servers/{id}.
+templ EmbyServersTable(rows []queries.ListEmbyServersRow) {
+	<form hx-post="/api/emby/servers" hx-target="closest section" hx-swap="none">
+		<input name="id" placeholder="id"/>
+		<input name="name" placeholder="name"/>
+		<input name="base_url" placeholder="base_url"/>
+		<input name="apiKeyRef" placeholder="API key reference (env:NAME)"/>
+		<input name="public_base_url" placeholder="public_base_url"/>
+		<input name="proxy_prefix" placeholder="proxy_prefix"/>
+		<label><input type="checkbox" name="enabled"/> enabled</label>
+		<button type="submit">Add server</button>
+	</form>
+	if len(rows) == 0 {
+		<p>No Emby servers configured.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>Enabled</th><th></th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ row.ID }</td>
+						<td>{ row.Name }</td>
+						<td>{ row.BaseUrl }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+						<td>
+							<form hx-patch={ "/api/emby/servers/" + row.ID } hx-swap="none">
+								<input name="id" type="hidden" value={ row.ID }/>
+								<input name="name" value={ row.Name }/>
+								<input name="base_url" value={ row.BaseUrl }/>
+								<label><input type="checkbox" name="enabled" checked?={ row.Enabled == 1 }/> enabled</label>
+								<button type="submit">Save</button>
+							</form>
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// EmbyUserLinksTable renders the Emby user-link management fragment: a create form
+// POSTing to /api/emby/user-links and per-row inline PATCH forms.
+templ EmbyUserLinksTable(rows []queries.ListEmbyUserLinksRow) {
+	<form hx-post="/api/emby/user-links" hx-target="closest section" hx-swap="none">
+		<input name="emby_server_id" placeholder="emby_server_id"/>
+		<input name="emby_user_id" placeholder="emby_user_id"/>
+		<input name="echo_user_id" placeholder="echo_user_id"/>
+		<label><input type="checkbox" name="enabled"/> enabled</label>
+		<button type="submit">Add link</button>
+	</form>
+	if len(rows) == 0 {
+		<p>No user links configured.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Server</th><th>Emby user</th><th>Echo user</th><th>Enabled</th><th></th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.EmbyServerID }</td>
+						<td>{ row.EmbyUserID }</td>
+						<td>{ row.EchoUserID }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+						<td>
+							<form hx-patch={ "/api/emby/user-links/" + strconv.FormatInt(row.ID, 10) } hx-swap="none">
+								<input name="emby_server_id" type="hidden" value={ row.EmbyServerID }/>
+								<input name="emby_user_id" type="hidden" value={ row.EmbyUserID }/>
+								<input name="echo_user_id" value={ row.EchoUserID }/>
+								<label><input type="checkbox" name="enabled" checked?={ row.Enabled == 1 }/> enabled</label>
+								<button type="submit">Save</button>
+							</form>
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// EmbyLibraryMappingsTable renders the library-mapping management fragment: a create
+// form POSTing to /api/emby/library-mappings and per-row inline PATCH forms.
+templ EmbyLibraryMappingsTable(rows []queries.ListEmbyLibraryMappingsRow) {
+	<form hx-post="/api/emby/library-mappings" hx-target="closest section" hx-swap="none">
+		<input name="emby_server_id" placeholder="emby_server_id"/>
+		<input name="emby_path_prefix" placeholder="emby_path_prefix"/>
+		<input name="library_id" type="number" placeholder="library_id"/>
+		<input name="echo_rel_prefix" placeholder="echo_rel_prefix"/>
+		<label><input type="checkbox" name="case_sensitive"/> case_sensitive</label>
+		<label><input type="checkbox" name="enabled"/> enabled</label>
+		<button type="submit">Add mapping</button>
+	</form>
+	if len(rows) == 0 {
+		<p>No library mappings configured.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Server</th><th>Emby prefix</th><th>Library</th><th>Echo prefix</th><th>Enabled</th><th></th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.EmbyServerID }</td>
+						<td>{ row.EmbyPathPrefix }</td>
+						<td>{ strconv.FormatInt(row.LibraryID, 10) }</td>
+						<td>{ row.EchoRelPrefix }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+						<td>
+							<form hx-patch={ "/api/emby/library-mappings/" + strconv.FormatInt(row.ID, 10) } hx-swap="none">
+								<input name="emby_path_prefix" value={ row.EmbyPathPrefix }/>
+								<input name="library_id" type="number" value={ strconv.FormatInt(row.LibraryID, 10) }/>
+								<input name="echo_rel_prefix" value={ row.EchoRelPrefix }/>
+								<label><input type="checkbox" name="case_sensitive" checked?={ row.CaseSensitive == 1 }/> case_sensitive</label>
+								<label><input type="checkbox" name="enabled" checked?={ row.Enabled == 1 }/> enabled</label>
+								<button type="submit">Save</button>
+							</form>
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// AccountPoolsTable renders the account-pool-assignment management fragment: a create
+// form POSTing to /api/account-pools and per-row inline PATCH forms.
+templ AccountPoolsTable(rows []queries.AccountPoolAssignment) {
+	<form hx-post="/api/account-pools" hx-target="closest section" hx-swap="none">
+		<input name="echo_user_id" placeholder="echo_user_id"/>
+		<input name="account_id" placeholder="account_id"/>
+		<input name="provider" placeholder="provider"/>
+		<input name="priority" type="number" placeholder="priority"/>
+		<input name="weight" type="number" placeholder="weight"/>
+		<input name="max_concurrent_streams" type="number" placeholder="max_concurrent_streams"/>
+		<input name="daily_bytes_limit" type="number" placeholder="daily_bytes_limit"/>
+		<label><input type="checkbox" name="enabled"/> enabled</label>
+		<button type="submit">Add assignment</button>
+	</form>
+	if len(rows) == 0 {
+		<p>No account pool assignments configured.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Echo user</th><th>Account</th><th>Provider</th><th>Priority</th><th>Weight</th><th>Enabled</th><th></th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.EchoUserID }</td>
+						<td>{ row.AccountID }</td>
+						<td>{ row.Provider }</td>
+						<td>{ strconv.FormatInt(row.Priority, 10) }</td>
+						<td>{ strconv.FormatInt(row.Weight, 10) }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+						<td>
+							<form hx-patch={ "/api/account-pools/" + strconv.FormatInt(row.ID, 10) } hx-swap="none">
+								<input name="echo_user_id" type="hidden" value={ row.EchoUserID }/>
+								<input name="account_id" type="hidden" value={ row.AccountID }/>
+								<input name="provider" value={ row.Provider }/>
+								<input name="priority" type="number" value={ strconv.FormatInt(row.Priority, 10) }/>
+								<input name="weight" type="number" value={ strconv.FormatInt(row.Weight, 10) }/>
+								<input name="max_concurrent_streams" type="number" value={ nullInt(row.MaxConcurrentStreams) } placeholder="max_concurrent_streams"/>
+								<input name="daily_bytes_limit" type="number" value={ nullInt(row.DailyBytesLimit) } placeholder="daily_bytes_limit"/>
+								<label><input type="checkbox" name="enabled" checked?={ row.Enabled == 1 }/> enabled</label>
+								<button type="submit">Save</button>
+							</form>
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// QuotaPoliciesTable renders the quota-policy management fragment: a create form
+// POSTing to /api/quota/policies and per-row inline PATCH forms. Nullable limits
+// render as empty when unset.
+templ QuotaPoliciesTable(rows []queries.QuotaPolicy) {
+	<form hx-post="/api/quota/policies" hx-target="closest section" hx-swap="none">
+		<input name="name" placeholder="name"/>
+		<input name="period" placeholder="period (day/month/rolling_24h/none)"/>
+		<input name="max_bytes" type="number" placeholder="max_bytes"/>
+		<input name="max_streams" type="number" placeholder="max_streams"/>
+		<input name="max_playback_sessions" type="number" placeholder="max_playback_sessions"/>
+		<button type="submit">Add policy</button>
+	</form>
+	if len(rows) == 0 {
+		<p>No quota policies configured.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Name</th><th>Period</th><th>Max bytes</th><th>Max streams</th><th>Max sessions</th><th>Version</th><th></th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Name }</td>
+						<td>{ row.Period }</td>
+						<td>{ nullInt(row.MaxBytes) }</td>
+						<td>{ nullInt(row.MaxStreams) }</td>
+						<td>{ nullInt(row.MaxPlaybackSessions) }</td>
+						<td>{ strconv.FormatInt(row.Version, 10) }</td>
+						<td>
+							<form hx-patch={ "/api/quota/policies/" + strconv.FormatInt(row.ID, 10) } hx-swap="none">
+								<input name="name" value={ row.Name }/>
+								<input name="period" value={ row.Period }/>
+								<input name="max_bytes" type="number" value={ nullInt(row.MaxBytes) }/>
+								<input name="max_streams" type="number" value={ nullInt(row.MaxStreams) }/>
+								<input name="max_playback_sessions" type="number" value={ nullInt(row.MaxPlaybackSessions) }/>
+								<button type="submit">Save</button>
+							</form>
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// PlaybackSessionsTable renders the READ-ONLY playback-sessions fragment. It mirrors
+// the redaction in internal/http/handlers/playback_management.go: it DELIBERATELY
+// renders neither row.Selector (plaintext selector half of a live token) nor
+// row.TokenHash (sha256 of the secret half). Emitting either would let a dashboard
+// reader reconstruct or correlate usable playback tokens. Safe columns only.
+templ PlaybackSessionsTable(rows []queries.PlaybackSession) {
+	if len(rows) == 0 {
+		<p>No playback sessions.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Echo user</th><th>Emby server</th><th>State</th><th>Failure</th><th>Prefer</th><th>Created</th><th>Expires</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ row.ID }</td>
+						<td>{ row.EchoUserID }</td>
+						<td>{ row.EmbyServerID }</td>
+						<td>{ row.State }</td>
+						<td>{ nullStr(row.FailureReason) }</td>
+						<td>{ nullStr(row.PreferProvider) }</td>
+						<td>{ strconv.FormatInt(row.CreatedAt, 10) }</td>
+						<td>{ strconv.FormatInt(row.ExpiresAt, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// PlaybackEventsTable renders the READ-ONLY playback-events fragment: the recent
+// PlaybackInfo rewrite / stream results with safe failure reason, the copy-fallback
+// provider/account summary, and bytes sent. No tokens or signed URLs are emitted.
+templ PlaybackEventsTable(rows []queries.PlaybackEvent) {
+	if len(rows) == 0 {
+		<p>No playback events.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Echo user</th><th>Operation</th><th>Status</th><th>Provider</th><th>Account</th><th>Bytes sent</th><th>Failure</th><th>Started</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ nullStr(row.EchoUserID) }</td>
+						<td>{ row.Operation }</td>
+						<td>{ row.Status }</td>
+						<td>{ nullStr(row.Provider) }</td>
+						<td>{ nullStr(row.AccountID) }</td>
+						<td>{ strconv.FormatInt(row.BytesSent, 10) }</td>
+						<td>{ nullStr(row.FailureKind) }</td>
+						<td>{ strconv.FormatInt(row.StartedAt, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// QuotaUsage renders the READ-ONLY quota-usage overview. There is no all-users usage
+// query, so this shows the cluster active-session count plus the quota-policy overview
+// (the per-policy limits that bound usage). Secret-free and form-free by design.
+templ QuotaUsage(activeSessions int64, policies []queries.QuotaPolicy) {
+	<p>Active playback sessions: { strconv.FormatInt(activeSessions, 10) }</p>
+	if len(policies) == 0 {
+		<p>No quota policies configured.</p>
+	} else {
+		<table>
+			<thead><tr><th>Policy ID</th><th>Name</th><th>Period</th><th>Max bytes</th><th>Max streams</th><th>Max sessions</th></tr></thead>
+			<tbody>
+				for _, row := range policies {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Name }</td>
+						<td>{ row.Period }</td>
+						<td>{ nullInt(row.MaxBytes) }</td>
+						<td>{ nullInt(row.MaxStreams) }</td>
+						<td>{ nullInt(row.MaxPlaybackSessions) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// nullStr renders a sql.NullString as its value or "" when unset, for read-only cells.
+func nullStr(v sql.NullString) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.String
+}
+
+// nullInt renders a sql.NullInt64 as its decimal value or "" when unset.
+func nullInt(v sql.NullInt64) string {
+	if !v.Valid {
+		return ""
+	}
+	return strconv.FormatInt(v.Int64, 10)
 }

@@ -29,26 +29,53 @@ type Sidecar interface {
 	Stream(ctx context.Context, req sidecarclient.StreamRequest) (*sidecarclient.StreamResult, error)
 }
 
+// streamMetrics is the NARROW, nil-safe slice of *metrics.Metrics the stream path
+// touches. Following the local-interface pattern used for Sidecar above, it keeps
+// embyproxy depending only on a tiny contract (not the concrete metrics type) so the
+// handler stays testable with a nil/omitted metrics handle. *metrics.Metrics
+// satisfies it; passing nil is a safe no-op (StreamHandler swaps a nil in for a
+// noopStreamMetrics so call sites never dereference a nil interface).
+type streamMetrics interface {
+	PlaybackSessionStarted()
+	PlaybackSessionEnded()
+	PlaybackStreamBytes(provider, result string, n int64)
+}
+
+// noopStreamMetrics is the do-nothing streamMetrics used when StreamHandler is wired
+// without a metrics handle (tests, unmetered builds). It avoids the nil-interface
+// method-call panic that a bare nil streamMetrics would cause.
+type noopStreamMetrics struct{}
+
+func (noopStreamMetrics) PlaybackSessionStarted()                   {}
+func (noopStreamMetrics) PlaybackSessionEnded()                     {}
+func (noopStreamMetrics) PlaybackStreamBytes(string, string, int64) {}
+
 // StreamHandler serves Echo's reserved /stream/{token} route. The token alone
 // authorizes the stream: there is NO upstream Emby cookie, admin bearer, or upstream
 // token on this path. GET re-authorizes the bearer of the token against the resolver,
 // enforces quota, then proxies the sidecar byte stream across the resolved copies with
 // fallback BEFORE any header is written. HEAD answers metadata only and never touches
 // the sidecar byte path.
-func StreamHandler(mgr *SessionManager, resolver *playback.Resolver, quota *playback.Quota, sidecar Sidecar, failures *playback.FailureRecorder, logger *slog.Logger) http.Handler {
+//
+// m may be nil (unwired tests); a nil m is replaced with a no-op so the byte path
+// never dereferences a nil interface.
+func StreamHandler(mgr *SessionManager, resolver *playback.Resolver, quota *playback.Quota, sidecar Sidecar, failures *playback.FailureRecorder, m streamMetrics, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if m == nil {
+		m = noopStreamMetrics{}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			handleStreamHead(w, r, mgr, quota, logger)
 			return
 		}
-		handleStreamGet(w, r, mgr, resolver, quota, sidecar, failures, logger)
+		handleStreamGet(w, r, mgr, resolver, quota, sidecar, failures, m, logger)
 	})
 }
 
-func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager, resolver *playback.Resolver, quota *playback.Quota, sidecar Sidecar, failures *playback.FailureRecorder, logger *slog.Logger) {
+func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager, resolver *playback.Resolver, quota *playback.Quota, sidecar Sidecar, failures *playback.FailureRecorder, m streamMetrics, logger *slog.Logger) {
 	ctx := r.Context()
 	reqID := chimw.GetReqID(ctx)
 	token := chi.URLParam(r, "token")
@@ -103,6 +130,12 @@ func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager
 		logger.Error("emby stream: start stream event", "request_id", reqID, "err", err)
 	}
 
+	// The stream lease is accepted (quota passed, StartStream attempted): mark it on
+	// the active-sessions gauge and release it on every GET exit (success, mid-stream
+	// break, or all-copies-failed). HEAD never reaches here. m is nil-safe.
+	m.PlaybackSessionStarted()
+	defer m.PlaybackSessionEnded()
+
 	// Try each copy. Headers are written ONLY on the first success; once written we
 	// never fall back (the Go ResponseWriter contract forbids changing the status).
 	for i := range copies {
@@ -133,11 +166,13 @@ func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager
 		dst.Set("Referrer-Policy", "no-referrer")
 		w.WriteHeader(res.StatusCode)
 		cw := &countingWriter{w: w}
+		streamResult := "ok"
 		if res.Body != nil {
 			_, copyErr := io.Copy(cw, res.Body)
 			_ = res.Body.Close()
 			if copyErr != nil {
 				// Mid-stream break: headers already sent, so just record and stop.
+				streamResult = "interrupted"
 				logger.Warn("emby stream: copy interrupted", "request_id", reqID, "copy_id", row.ID, "err", copyErr)
 			}
 		}
@@ -147,6 +182,9 @@ func handleStreamGet(w http.ResponseWriter, r *http.Request, mgr *SessionManager
 			HTTPStatus: int64(res.StatusCode),
 			FinishedAt: time.Now().Unix(),
 		}, logger, reqID)
+		// Record bytes streamed by provider + safe outcome enum. n<=0 is a no-op,
+		// so a zero-byte success simply does not increment the byte counter.
+		m.PlaybackStreamBytes(row.Provider, streamResult, cw.n)
 		return
 	}
 

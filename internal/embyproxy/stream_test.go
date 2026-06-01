@@ -92,7 +92,7 @@ func newStreamHandlerTestDeps(t *testing.T) streamHandlerTestDeps {
 
 	deps := &Deps{
 		ProxyPrefix: "/emby",
-		Stream:      StreamHandler(mgr, resolver, quota, sidecar, failures, discardStreamLogger()),
+		Stream:      StreamHandler(mgr, resolver, quota, sidecar, failures, nil, discardStreamLogger()),
 		Error:       ErrorHandler(mgr),
 	}
 	r := chi.NewRouter()

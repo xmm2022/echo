@@ -13,6 +13,22 @@ type fakePinger struct{ err error }
 
 func (f fakePinger) PingContext(context.Context) error { return f.err }
 
+// fakePing is the v0.2 readiness DB probe fake (ok-flag form, distinct from the
+// legacy fakePinger error form).
+type fakePing struct{ ok bool }
+
+func (f fakePing) PingContext(context.Context) error {
+	if f.ok {
+		return nil
+	}
+	return errors.New("db down")
+}
+
+// fakeProbe is the v0.2 readiness dependency probe fake: it reports a fixed status.
+type fakeProbe struct{ status string }
+
+func (f fakeProbe) Check(context.Context) ProbeResult { return ProbeResult{Status: f.status} }
+
 type fakeSidecarHealth struct {
 	pingErr error
 	version string
@@ -133,5 +149,29 @@ func TestReadyzRouteUsesCheckerWhenWired(t *testing.T) {
 	HandlerWithDeps(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/readyz with healthy checker = %d, want 200", rec.Code)
+	}
+}
+
+func TestV02ReadinessSoftAndHardDependencies(t *testing.T) {
+	rc := NewReadyChecker(ReadyDeps{
+		DB:              fakePing{ok: true},
+		SidecarContract: fakeProbe{status: "unknown"},
+		Emby:            fakeProbe{status: "unreachable"},
+		Config:          ReadyConfig{},
+	})
+	rec, body := serveReady(t, rc)
+	if rec.Code != http.StatusOK || body.Status != "degraded" {
+		t.Fatalf("soft readiness status=%d body=%+v, want 200 degraded", rec.Code, body)
+	}
+
+	rc = NewReadyChecker(ReadyDeps{
+		DB:              fakePing{ok: true},
+		SidecarContract: fakeProbe{status: "unknown"},
+		Emby:            fakeProbe{status: "unreachable"},
+		Config:          ReadyConfig{RequireSidecarContract: true, RequireEmbyConnectivity: true},
+	})
+	rec, body = serveReady(t, rc)
+	if rec.Code != http.StatusServiceUnavailable || body.Status != "not_ready" {
+		t.Fatalf("hard readiness status=%d body=%+v, want 503 not_ready", rec.Code, body)
 	}
 }

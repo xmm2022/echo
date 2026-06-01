@@ -433,7 +433,7 @@ func newFullEmbyProxyHarness(t *testing.T, embyURL string, sidecar Sidecar) http
 
 	deps := &Deps{
 		ProxyPrefix:  "/emby",
-		Stream:       StreamHandler(mgr, resolver, quota, sidecar, failures, discardStreamLogger()),
+		Stream:       StreamHandler(mgr, resolver, quota, sidecar, failures, nil, discardStreamLogger()),
 		Error:        ErrorHandler(mgr),
 		PlaybackInfo: playbackInfo,
 		Upstream:     NewReverseProxy(ProxyConfig{UpstreamBase: upstreamBase, PublicBase: publicBase, ProxyPrefix: "/emby"}, http.DefaultClient, discardProxyLogger()),

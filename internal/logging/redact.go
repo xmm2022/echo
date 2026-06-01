@@ -14,22 +14,33 @@ import (
 const redactedValue = "<redacted>"
 
 // sensitiveKeys is the exact (case-insensitive) set of attribute keys whose
-// values are always replaced (spec §8).
+// values are always replaced (spec §8). v0.2 adds the Emby reverse-proxy /
+// playback-token secret keys (api_key, x_emby_token, playback_token, selector,
+// secret) on top of the v0.1 set.
 var sensitiveKeys = map[string]struct{}{
-	"cookie":        {},
-	"token":         {},
-	"authorization": {},
-	"sign":          {},
-	"signature":     {},
-	"password":      {},
+	"cookie":         {},
+	"token":          {},
+	"authorization":  {},
+	"sign":           {},
+	"signature":      {},
+	"password":       {},
+	"api_key":        {},
+	"x_emby_token":   {},
+	"playback_token": {},
+	"selector":       {},
+	"secret":         {},
 }
 
 // signedParamMarkers flag a URL carrying a signed query parameter. Both the
-// leading ("?") and subsequent ("&") query separators are covered.
+// leading ("?") and subsequent ("&") query separators are covered. The
+// X-Emby-Token marker is stored lowercase because containsSignedParam lowercases
+// the value before matching.
 var signedParamMarkers = []string{
 	"?sign=", "&sign=",
 	"?signature=", "&signature=",
 	"?token=", "&token=",
+	"?api_key=", "&api_key=",
+	"x-emby-token=",
 }
 
 // RedactHandler wraps another slog.Handler, redacting sensitive attributes before

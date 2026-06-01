@@ -5,6 +5,7 @@
 package web
 
 import (
+	"database/sql"
 	"embed"
 	"io/fs"
 	"log/slog"
@@ -23,6 +24,10 @@ var staticFS embed.FS
 const (
 	dashboardJobLimit      = 50
 	dashboardConflictLimit = 100
+	// v0.2 management fragment limits mirror the JSON API defaults: small, bounded
+	// reads of the same sqlc queries.
+	dashboardManagementLimit = 100
+	dashboardPlaybackLimit   = 200
 )
 
 // Deps wires the dashboard handlers to the store.
@@ -48,9 +53,25 @@ func (d Deps) Index(w http.ResponseWriter, r *http.Request) {
 
 // MountUI registers the authenticated HTML fragment routes. Callers mount it
 // inside the authed group alongside the API.
+//
+// SECURITY NOTE / follow-up: the /ui tree is currently AUTHENTICATION-gated, not
+// admin-gated. AuthFunc admits any valid token and these fragment handlers do not check
+// the admin scope (unlike the JSON API's requireAdmin / requestedUserOrSelf). Several
+// fragments below surface cross-user playback data and admin-only config, so before any
+// non-admin (role='user') API-token path ships, gate the whole /ui tree on the admin
+// scope (mirror handlers.requireAdmin). Today this is not reachable: the only
+// token-minting path (bootstrap) issues admin-scope tokens only.
 func (d Deps) MountUI(r chi.Router) {
 	r.Get("/ui/jobs", d.UIJobs)
 	r.Get("/ui/conflicts", d.UIConflicts)
+	r.Get("/ui/emby/servers", d.UIEmbyServers)
+	r.Get("/ui/emby/user-links", d.UIEmbyUserLinks)
+	r.Get("/ui/emby/library-mappings", d.UIEmbyLibraryMappings)
+	r.Get("/ui/account-pools", d.UIAccountPools)
+	r.Get("/ui/quota/policies", d.UIQuotaPolicies)
+	r.Get("/ui/quota/usage", d.UIQuotaUsage)
+	r.Get("/ui/playback/sessions", d.UIPlaybackSessions)
+	r.Get("/ui/playback/events", d.UIPlaybackEvents)
 }
 
 // UIJobs serves GET /ui/jobs — the recent-jobs HTML fragment.
@@ -78,6 +99,146 @@ func (d Deps) UIConflicts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.ConflictsTable(conflicts).Render(r.Context(), w); err != nil {
 		d.logger().Error("web: render conflicts", "err", err)
+	}
+}
+
+// UIEmbyServers serves GET /ui/emby/servers — the Emby servers management fragment.
+// It uses ListEmbyServers (whose row type omits api_key_ref) so no secret reference
+// can reach the dashboard.
+func (d Deps) UIEmbyServers(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListEmbyServers(r.Context(), queries.ListEmbyServersParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list emby servers", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.EmbyServersTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render emby servers", "err", err)
+	}
+}
+
+// UIEmbyUserLinks serves GET /ui/emby/user-links — the Emby user-link management fragment.
+func (d Deps) UIEmbyUserLinks(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListEmbyUserLinks(r.Context(), queries.ListEmbyUserLinksParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list emby user links", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.EmbyUserLinksTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render emby user links", "err", err)
+	}
+}
+
+// UIEmbyLibraryMappings serves GET /ui/emby/library-mappings — the library-mapping
+// management fragment.
+func (d Deps) UIEmbyLibraryMappings(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListEmbyLibraryMappings(r.Context(), queries.ListEmbyLibraryMappingsParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list emby library mappings", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.EmbyLibraryMappingsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render emby library mappings", "err", err)
+	}
+}
+
+// UIAccountPools serves GET /ui/account-pools — the account-pool-assignment management
+// fragment. It lists every user's assignments (empty echo_user_id filter) because /ui is
+// the admin management dashboard (see the MountUI security note on admin-gating).
+func (d Deps) UIAccountPools(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListAccountPoolAssignments(r.Context(), queries.ListAccountPoolAssignmentsParams{
+		Column1:    "",
+		EchoUserID: "",
+		Limit:      dashboardManagementLimit,
+		Offset:     0,
+	})
+	if err != nil {
+		d.logger().Error("web: list account pool assignments", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.AccountPoolsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render account pool assignments", "err", err)
+	}
+}
+
+// UIQuotaPolicies serves GET /ui/quota/policies — the quota-policy management fragment.
+func (d Deps) UIQuotaPolicies(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListQuotaPolicies(r.Context(), queries.ListQuotaPoliciesParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list quota policies", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.QuotaPoliciesTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render quota policies", "err", err)
+	}
+}
+
+// UIQuotaUsage serves GET /ui/quota/usage — a read-only usage overview. There is no
+// all-users usage query, so it shows the cluster active-session count plus the
+// quota-policy overview (the limits that bound usage). Secret-free by design.
+func (d Deps) UIQuotaUsage(w http.ResponseWriter, r *http.Request) {
+	active, err := d.Store.CountActivePlaybackSessions(r.Context())
+	if err != nil {
+		d.logger().Error("web: count active sessions", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	policies, err := d.Store.ListQuotaPolicies(r.Context(), queries.ListQuotaPoliciesParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list quota policies for usage", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.QuotaUsage(active, policies).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render quota usage", "err", err)
+	}
+}
+
+// UIPlaybackSessions serves GET /ui/playback/sessions — a READ-ONLY fragment of recent
+// playback sessions. ListPlaybackSessionsForAdmin returns rows that include the live-token
+// selector and token_hash; the PlaybackSessionsTable template renders neither, matching
+// the redaction in the JSON API.
+func (d Deps) UIPlaybackSessions(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListPlaybackSessionsForAdmin(r.Context(), queries.ListPlaybackSessionsForAdminParams{Limit: dashboardPlaybackLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list playback sessions", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.PlaybackSessionsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render playback sessions", "err", err)
+	}
+}
+
+// UIPlaybackEvents serves GET /ui/playback/events — a READ-ONLY fragment of recent
+// playback events across all users (empty echo_user_id filter; /ui is the admin management
+// dashboard — see the MountUI security note on admin-gating).
+func (d Deps) UIPlaybackEvents(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Store.ListPlaybackEventsForAdmin(r.Context(), queries.ListPlaybackEventsForAdminParams{
+		Column1:    "",
+		EchoUserID: sql.NullString{},
+		Limit:      dashboardPlaybackLimit,
+		Offset:     0,
+	})
+	if err != nil {
+		d.logger().Error("web: list playback events", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.PlaybackEventsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render playback events", "err", err)
 	}
 }
 

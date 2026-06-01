@@ -1,6 +1,6 @@
 # Example two-service deployment: Echo control plane + OpenList CAS sidecar.
 # Quickstart:
-#   cp .env.example .env   # then edit ECHO_ADMIN_TOKEN / ECHO_SIDECAR_TOKEN
+#   cp .env.example .env   # then edit ECHO_BOOTSTRAP_ADMIN_TOKEN / ECHO_SIDECAR_TOKEN / EMBY_API_KEY
 #   make docker            # builds the local echo:dev image (docker/Dockerfile)
 #   docker compose -f docker-compose.example.yml up
 #
@@ -25,9 +25,12 @@ services:
       - sidecar
     ports:
       - "8080:8080"
+    # Point Emby clients at the proxy prefix, e.g. http://localhost:8080/emby
+    # for local testing (https://echo.example.com/emby behind nginx in prod).
     environment:
-      ECHO_ADMIN_TOKEN: ${ECHO_ADMIN_TOKEN}     # required: Echo refuses to start without it
+      ECHO_BOOTSTRAP_ADMIN_TOKEN: ${ECHO_BOOTSTRAP_ADMIN_TOKEN}  # required: Echo refuses to start without it
       ECHO_SIDECAR_TOKEN: ${ECHO_SIDECAR_TOKEN}  # until set, /readyz reports 503 (sidecar unauthorized)
+      EMBY_API_KEY: ${EMBY_API_KEY}             # referenced by emby_proxy.upstream.api_key_ref
     volumes:
       - ./config.example.yaml:/etc/echo/config.yaml:ro
       - ./data:/data

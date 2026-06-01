@@ -144,6 +144,16 @@ func runServe(args []string) error {
 		return fmt.Errorf("reconcile playback streams: %w", err)
 	}
 
+	// Correct the active-sessions gauge to the authoritative DB count after the
+	// reconcile reclaims crash-orphaned leases. The stream handler keeps it fresh
+	// thereafter via inc/dec; this startup Set is the source of truth across restarts
+	// (the gauge is push-style, never sampled by the pull collector — registered once).
+	if active, err := st.Queries.CountActivePlaybackSessions(ctx); err != nil {
+		logger.Warn("count active playback sessions for gauge", "err", err)
+	} else {
+		m.PlaybackSessionsActive(active)
+	}
+
 	if err := runner.Start(ctx); err != nil {
 		return fmt.Errorf("start job runner: %w", err)
 	}
@@ -154,11 +164,18 @@ func runServe(args []string) error {
 	cache := restore.NewLinkCache(nil)
 	authenticator := &auth.Authenticator{Store: st}
 
+	// Seed the configured Emby upstream + library mappings into the DB before the proxy
+	// reads them; config_sync governs seed-if-missing vs overwrite-on-startup. No-op when
+	// emby_proxy is disabled. Must run before buildEmbyDeps, which reads GetEnabledEmbyServer.
+	if err := embyproxy.SeedFromConfig(ctx, st.Queries, cfg.EmbyProxy, time.Now()); err != nil {
+		return fmt.Errorf("seed emby proxy config: %w", err)
+	}
+
 	// Emby reverse proxy. The proxy is mounted only when a single enabled Emby server is
 	// configured; on a fresh DB (no enabled server) we still mount a fully fail-closed Deps
 	// so every /emby/* answers a controlled 503 rather than nil-handler-panicking or
 	// silently proxying an untokenized upstream source.
-	embyDeps, err := buildEmbyDeps(ctx, st, sidecar, playbackQuota, logger)
+	embyDeps, err := buildEmbyDeps(ctx, st, sidecar, playbackQuota, m, cfg.EmbyProxy, logger)
 	if err != nil {
 		return err
 	}
@@ -178,13 +195,9 @@ func runServe(args []string) error {
 		},
 		Bootstrap: &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
 		Web:       &web.Deps{Store: st, Logger: logger},
-		Ready: &httpserver.ReadyChecker{
-			DB:      st.DB,
-			Sidecar: rawSidecar,
-			Version: version,
-		},
-		Registry: registry,
-		Emby:     embyDeps,
+		Ready:     buildReadyChecker(cfg, st.DB, rawSidecar, version),
+		Registry:  registry,
+		Emby:      embyDeps,
 	}
 
 	srv := httpserver.New(cfg, deps)
@@ -217,7 +230,7 @@ func runServe(args []string) error {
 // enabled server exists, it wires the full proxy: tokenized stream/error routes, the
 // mapping-aware PlaybackInfo rewriter, and the transparent upstream fallback for everything
 // else. playbackQuota is reused (never rebuilt) so all playback paths share one lease registry.
-func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.Sidecar, playbackQuota *playback.Quota, logger *slog.Logger) (*embyproxy.Deps, error) {
+func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.Sidecar, playbackQuota *playback.Quota, m *metrics.Metrics, embyCfg config.EmbyProxyConfig, logger *slog.Logger) (*embyproxy.Deps, error) {
 	embyServer, err := st.Queries.GetEnabledEmbyServer(ctx, queries.GetEnabledEmbyServerParams{ID: "default"})
 	if errors.Is(err, sql.ErrNoRows) {
 		embyDisabled := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -251,11 +264,13 @@ func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.S
 		prefix = "/emby"
 	}
 
-	mgr := embyproxy.NewSessionManager(st.Queries, embyproxy.SessionConfig{}, nil)
+	mgr := embyproxy.NewSessionManager(st.Queries, embyproxy.SessionConfig{TTL: embyCfg.Playback.SessionTTL.Duration}, nil)
 	embyResolver := playback.NewResolver(st.Queries, nil)
 	embyFailures := playback.NewFailureRecorder(st.Queries, nil)
 	mapper := embyproxy.NewDBSourceMapper(st.Queries, nil)
 	rewriter := embyproxy.NewRewriter(mapper, mgr, playbackQuota, embyResolver)
+	// RedactMappedPath defaults to true in NewRewriter; honor the operator's config toggle.
+	rewriter.RedactMappedPath = embyCfg.Playback.RedactMappedPath
 
 	playbackInfo := embyproxy.PlaybackInfoHandler(embyproxy.PlaybackInfoConfig{
 		PublicBaseURL: embyServer.PublicBaseUrl,
@@ -263,6 +278,7 @@ func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.S
 		EmbyServerID:  embyServer.ID,
 		UpstreamBase:  upstreamBase,
 		Querier:       st.Queries,
+		Metrics:       m,
 	}, rewriter, http.DefaultTransport, logger)
 
 	// guardLookup upgrades the transparent fallback's playback guard to the mapping-aware
@@ -292,7 +308,7 @@ func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.S
 
 	return &embyproxy.Deps{
 		ProxyPrefix:  prefix,
-		Stream:       embyproxy.StreamHandler(mgr, embyResolver, playbackQuota, sidecar, embyFailures, logger),
+		Stream:       embyproxy.StreamHandler(mgr, embyResolver, playbackQuota, sidecar, embyFailures, m, logger),
 		Error:        embyproxy.ErrorHandler(mgr),
 		PlaybackInfo: playbackInfo,
 		Upstream: embyproxy.NewReverseProxy(embyproxy.ProxyConfig{
@@ -407,4 +423,73 @@ func parseLogLevel(value string) (slog.Level, error) {
 	default:
 		return slog.LevelInfo, fmt.Errorf("log.level must be debug, info, warn, or error, got %q", value)
 	}
+}
+
+// readyProbeTimeout bounds each v0.2 readiness probe (sidecar contract, Emby
+// connectivity) so /readyz cannot hang on a slow upstream.
+const readyProbeTimeout = 3 * time.Second
+
+// buildReadyChecker selects the /readyz mode. With the Emby proxy enabled it uses the
+// v0.2 config-driven checker (sidecar-contract + Emby probes, soft/hard rules from
+// config). Otherwise it keeps the v0.1 legacy checker (DB + sidecar ping/version, all
+// hard) so single-plane deployments retain their original /readyz semantics.
+func buildReadyChecker(cfg *config.Config, db httpserver.Pinger, sidecar httpserver.SidecarHealth, version string) *httpserver.ReadyChecker {
+	if !cfg.EmbyProxy.Enabled {
+		return &httpserver.ReadyChecker{DB: db, Sidecar: sidecar, Version: version}
+	}
+	rc := httpserver.NewReadyChecker(httpserver.ReadyDeps{
+		DB:              db,
+		SidecarContract: sidecarContractProbe{sidecar: sidecar},
+		Emby:            embyProbe{base: cfg.EmbyProxy.Upstream.BaseURL, client: &http.Client{Timeout: readyProbeTimeout}},
+		Config: httpserver.ReadyConfig{
+			RequireSidecarContract:     cfg.Readiness.RequireSidecarContract,
+			RequireSidecarConnectivity: cfg.Readiness.RequireSidecarConnectivity,
+			RequireEmbyConnectivity:    cfg.Readiness.RequireEmbyConnectivity,
+			MappedOnlyPlayback:         cfg.EmbyProxy.Playback.MappedOnly,
+		},
+	})
+	rc.Version = version
+	return rc
+}
+
+// sidecarContractProbe adapts the sidecar health surface (Ping + Version) to the v0.2
+// readiness Probe: unreachable when Ping fails, incompatible on a version-gate mismatch,
+// unknown on any other Version error, ok otherwise.
+type sidecarContractProbe struct{ sidecar httpserver.SidecarHealth }
+
+func (p sidecarContractProbe) Check(ctx context.Context) httpserver.ProbeResult {
+	if err := p.sidecar.Ping(ctx); err != nil {
+		return httpserver.ProbeResult{Status: "unreachable", Detail: err.Error()}
+	}
+	if _, err := p.sidecar.Version(ctx); err != nil {
+		if errors.Is(err, sidecarclient.ErrSidecarVersionTooOld) {
+			return httpserver.ProbeResult{Status: "incompatible", Detail: err.Error()}
+		}
+		return httpserver.ProbeResult{Status: "unknown", Detail: err.Error()}
+	}
+	return httpserver.ProbeResult{Status: "ok"}
+}
+
+// embyProbe checks upstream Emby reachability via its unauthenticated public-info
+// endpoint. Any HTTP response (including 401/404) proves the server is up, so only a
+// transport error or a 5xx counts as unreachable.
+type embyProbe struct {
+	base   string
+	client *http.Client
+}
+
+func (p embyProbe) Check(ctx context.Context) httpserver.ProbeResult {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.base, "/")+"/System/Info/Public", nil)
+	if err != nil {
+		return httpserver.ProbeResult{Status: "unreachable", Detail: err.Error()}
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return httpserver.ProbeResult{Status: "unreachable", Detail: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return httpserver.ProbeResult{Status: "unreachable", Detail: fmt.Sprintf("upstream status %d", resp.StatusCode)}
+	}
+	return httpserver.ProbeResult{Status: "ok"}
 }

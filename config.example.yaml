@@ -61,3 +61,31 @@ echo_output_defaults:
 log:
   level: info
   format: json
+
+readiness:
+  require_sidecar_contract: false
+  require_sidecar_connectivity: false
+  require_emby_connectivity: false
+
+secrets_root: "/data/secrets"
+
+emby_proxy:
+  enabled: true
+  config_sync: "seed_if_missing"
+  public_base_url: "https://echo.example.com"
+  proxy_prefix: "/emby"
+  upstream:
+    id: "default"
+    name: "main-emby"
+    base_url: "http://emby:8096"
+    api_key_ref: "env:EMBY_API_KEY"
+  playback:
+    session_ttl: "12h"
+    max_candidate_copies: 5
+    redact_mapped_path: true
+    mapped_only: false
+  path_mappings:
+    - library_id: 1
+      emby_path_prefix: "/media/movies"
+      echo_rel_prefix: "movies"
+      case_sensitive: true

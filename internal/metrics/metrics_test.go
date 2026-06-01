@@ -57,6 +57,56 @@ func TestNilMetricsHelpersAreNoops(t *testing.T) {
 	m.ObserveSidecarCall("default", "link", "ok", 0.02)
 	m.IncProducerRun("115share2cas", "success")
 	m.SetBuildInfo("v", "s")
+	// v0.2 helpers must also be nil-safe no-ops.
+	m.EmbyProxyRequest("/emby/Items/{id}/PlaybackInfo", "rewritten")
+	m.PlaybackInfoRewrite("error_url")
+	m.PlaybackSessionsActive(2)
+	m.PlaybackSessionStarted()
+	m.PlaybackSessionEnded()
+	m.PlaybackStreamBytes("115", "ok", 1024)
+	m.CopyFailure("object_missing", "confirmed", "115")
+	m.AccountCooldown("115", "auth_or_account")
+	m.QuotaDenied("bytes")
+}
+
+// TestV02MetricsInventoryAndLowCardinalityLabels asserts the v0.2 series register
+// and that no label value carries high-cardinality / sensitive material.
+func TestV02MetricsInventoryAndLowCardinalityLabels(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	m.EmbyProxyRequest("/emby/Items/{id}/PlaybackInfo", "rewritten")
+	m.EmbyProxyRequest("/emby/stream/{token}", "ok")
+	m.PlaybackInfoRewrite("error_url")
+	m.PlaybackSessionsActive(2)
+	m.PlaybackStreamBytes("115", "ok", 1024)
+	m.CopyFailure("object_missing", "confirmed", "115")
+	m.AccountCooldown("115", "auth_or_account")
+	m.QuotaDenied("bytes")
+
+	families := gather(t, reg)
+	for _, name := range []string{
+		"echo_emby_proxy_requests_total",
+		"echo_playbackinfo_rewrite_total",
+		"echo_playback_sessions_active",
+		"echo_playback_stream_bytes_total",
+		"echo_copy_failures_total",
+		"echo_account_cooldown",
+		"echo_quota_denied_total",
+	} {
+		if families[name] == nil {
+			t.Fatalf("metric %s missing", name)
+		}
+	}
+	for name, family := range families {
+		for _, metric := range family.Metric {
+			for _, label := range metric.Label {
+				value := label.GetValue()
+				if strings.Contains(value, "selector.") || strings.Contains(value, "item1") || strings.Contains(value, "/movie") {
+					t.Fatalf("metric %s has high-cardinality/sensitive label %q", name, value)
+				}
+			}
+		}
+	}
 }
 
 // TestStateCollectorGauges verifies the pull-based gauges sample db + store state

@@ -85,6 +85,8 @@ func (d APIDeps) Mount(r chi.Router) {
 
 	r.Get("/api/conflicts", d.ListConflicts)
 	r.Post("/api/conflicts/{id}/dismiss", d.DismissConflict)
+
+	d.MountV02Management(r)
 }
 
 func (d APIDeps) now() time.Time {

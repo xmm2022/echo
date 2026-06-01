@@ -508,16 +508,26 @@ type PlaybackInfoQuerier interface {
 	ListItemMappingsByItem(ctx context.Context, arg queries.ListItemMappingsByItemParams) ([]queries.EmbyItemMapping, error)
 }
 
+// playbackInfoMetrics is the NARROW, nil-safe metrics surface the PlaybackInfo
+// handler records its rewrite outcome through. Following the local-interface pattern
+// used for streamMetrics, it keeps embyproxy from a hard dependency on the concrete
+// metrics type and lets tests omit it (nil = no-op). *metrics.Metrics satisfies it.
+type playbackInfoMetrics interface {
+	PlaybackInfoRewrite(result string)
+}
+
 // PlaybackInfoConfig carries the addressing, identity scope, and DB access the
 // PlaybackInfoHandler needs. PublicBaseURL/ProxyPrefix are the Echo origin+prefix written
 // into rewritten URLs; UpstreamBase is the Emby origin requests are forwarded to;
-// EmbyServerID scopes the user-link and item-mapping lookups.
+// EmbyServerID scopes the user-link and item-mapping lookups. Metrics is optional
+// (nil = unmetered).
 type PlaybackInfoConfig struct {
 	PublicBaseURL string
 	ProxyPrefix   string
 	EmbyServerID  string
 	UpstreamBase  *url.URL
 	Querier       PlaybackInfoQuerier
+	Metrics       playbackInfoMetrics
 }
 
 // PlaybackInfoHandler proxies a PlaybackInfo request to upstream Emby and rewrites the JSON
@@ -555,6 +565,16 @@ func PlaybackInfoHandler(cfg PlaybackInfoConfig, rw *Rewriter, upstream http.Rou
 	publicBase, _ := url.Parse(cfg.PublicBaseURL)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// rewriteResult is the safe outcome enum recorded for echo_playbackinfo_rewrite_total
+		// on every exit. It defaults to fail_closed (the safe outcome of every early return)
+		// and is overwritten on the success / passthrough paths. The metric is nil-safe.
+		rewriteResult := "fail_closed"
+		defer func() {
+			if cfg.Metrics != nil {
+				cfg.Metrics.PlaybackInfoRewrite(rewriteResult)
+			}
+		}()
+
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			w.Header().Set("Allow", "GET, POST")
 			writeFailClosed(w)
@@ -605,7 +625,7 @@ func PlaybackInfoHandler(cfg PlaybackInfoConfig, rw *Rewriter, upstream http.Rou
 				return
 			}
 
-			out, _, err := rw.Rewrite(body, RewriteContext{
+			out, rwResult, err := rw.Rewrite(body, RewriteContext{
 				PublicBaseURL: cfg.PublicBaseURL,
 				ProxyPrefix:   prefix,
 				ItemID:        itemID,
@@ -620,6 +640,18 @@ func PlaybackInfoHandler(cfg PlaybackInfoConfig, rw *Rewriter, upstream http.Rou
 				logger.Error("emby playbackinfo: rewrite failed", "item", itemID, "err", err)
 				writeFailClosed(w)
 				return
+			}
+
+			// Record the safe rewrite outcome: error_url when any source became an error
+			// token, rewritten when at least one session was minted, else passthrough (no
+			// mapped sources to rewrite).
+			switch {
+			case rwResult.ErrorTokensCreated > 0:
+				rewriteResult = "error_url"
+			case rwResult.SessionsCreated > 0:
+				rewriteResult = "rewritten"
+			default:
+				rewriteResult = "passthrough"
 			}
 
 			// Success: never echo the upstream Content-Encoding/Content-Length; the body has
@@ -665,6 +697,7 @@ func PlaybackInfoHandler(cfg PlaybackInfoConfig, rw *Rewriter, upstream http.Rou
 
 		// Genuinely unmapped + non-playable: transparently relay the upstream response,
 		// rewriting Location/Set-Cookie back through Echo via the shared header helper.
+		rewriteResult = "passthrough"
 		rewritten := RewriteResponseHeaders(resp.Header, HeaderConfig{
 			UpstreamBase: cfg.UpstreamBase,
 			PublicBase:   publicBase,

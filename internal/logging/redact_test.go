@@ -2,6 +2,7 @@ package logging_test
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -11,6 +12,16 @@ import (
 
 func newLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(logging.NewRedactHandler(slog.NewJSONHandler(buf, nil)))
+}
+
+// captureRedactedLog renders attrs through the redaction handler into a buffer and
+// returns the emitted log line as a string.
+func captureRedactedLog(t *testing.T, attrs []slog.Attr) string {
+	t.Helper()
+	var buf bytes.Buffer
+	logger := slog.New(logging.NewRedactHandler(slog.NewJSONHandler(&buf, nil)))
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "event", attrs...)
+	return buf.String()
 }
 
 func TestRedactsSensitiveKeys(t *testing.T) {
@@ -96,5 +107,26 @@ func TestRedactsWithGroup(t *testing.T) {
 	logger.WithGroup("auth").Info("event", "cookie", "yummy")
 	if strings.Contains(buf.String(), "yummy") {
 		t.Errorf("WithGroup attr leaked: %s", buf.String())
+	}
+}
+
+func TestRedactsV02Secrets(t *testing.T) {
+	got := captureRedactedLog(t, []slog.Attr{
+		slog.String("playback_token", "sel.secret"),
+		slog.String("selector", "sel"),
+		slog.String("secret", "secret"),
+		slog.String("api_key", "emby-key"),
+		slog.String("x_emby_token", "emby-token"),
+		slog.String("authorization", "MediaBrowser Token=emby-token"),
+		slog.String("cookie", "EmbyAuth=abc"),
+		slog.String("safe_reason", "quota_exceeded"),
+	})
+	for _, forbidden := range []string{"sel.secret", "emby-key", "emby-token", "EmbyAuth=abc"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("log leaked %q in %s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "quota_exceeded") {
+		t.Fatalf("safe enum missing from log: %s", got)
 	}
 }
