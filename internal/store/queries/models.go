@@ -89,6 +89,29 @@ type CopyFailure struct {
 	RequestID     sql.NullString `json:"request_id"`
 }
 
+type EmbyServer struct {
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	BaseUrl       string         `json:"base_url"`
+	ApiKeyRef     sql.NullString `json:"api_key_ref"`
+	PublicBaseUrl string         `json:"public_base_url"`
+	ProxyPrefix   string         `json:"proxy_prefix"`
+	Enabled       int64          `json:"enabled"`
+	CreatedAt     int64          `json:"created_at"`
+	UpdatedAt     int64          `json:"updated_at"`
+}
+
+type EmbyUserLink struct {
+	ID           int64          `json:"id"`
+	EmbyServerID string         `json:"emby_server_id"`
+	EmbyUserID   string         `json:"emby_user_id"`
+	EmbyUsername sql.NullString `json:"emby_username"`
+	EchoUserID   string         `json:"echo_user_id"`
+	Enabled      int64          `json:"enabled"`
+	CreatedAt    int64          `json:"created_at"`
+	UpdatedAt    int64          `json:"updated_at"`
+}
+
 type FileCopy struct {
 	ID                    int64          `json:"id"`
 	BlobID                int64          `json:"blob_id"`
@@ -168,6 +191,22 @@ type LibraryGrant struct {
 	UpdatedAt  int64          `json:"updated_at"`
 }
 
+type PlaybackErrorToken struct {
+	ID            string         `json:"id"`
+	Selector      string         `json:"selector"`
+	TokenHash     string         `json:"token_hash"`
+	EchoUserID    sql.NullString `json:"echo_user_id"`
+	EmbyServerID  sql.NullString `json:"emby_server_id"`
+	EmbyUserID    sql.NullString `json:"emby_user_id"`
+	DeviceID      sql.NullString `json:"device_id"`
+	ItemID        sql.NullString `json:"item_id"`
+	MediaSourceID sql.NullString `json:"media_source_id"`
+	Reason        string         `json:"reason"`
+	HttpStatus    int64          `json:"http_status"`
+	CreatedAt     int64          `json:"created_at"`
+	ExpiresAt     int64          `json:"expires_at"`
+}
+
 type PlaybackEvent struct {
 	ID             int64          `json:"id"`
 	RequestID      string         `json:"request_id"`
@@ -188,6 +227,27 @@ type PlaybackEvent struct {
 	FailureMessage sql.NullString `json:"failure_message"`
 	StartedAt      int64          `json:"started_at"`
 	FinishedAt     sql.NullInt64  `json:"finished_at"`
+}
+
+type PlaybackSession struct {
+	ID                string         `json:"id"`
+	Selector          string         `json:"selector"`
+	TokenHash         string         `json:"token_hash"`
+	EchoUserID        string         `json:"echo_user_id"`
+	EmbyServerID      string         `json:"emby_server_id"`
+	EmbyUserID        string         `json:"emby_user_id"`
+	DeviceID          sql.NullString `json:"device_id"`
+	ItemID            string         `json:"item_id"`
+	MediaSourceID     string         `json:"media_source_id"`
+	EmbyPlaySessionID sql.NullString `json:"emby_play_session_id"`
+	LibraryEntryID    sql.NullInt64  `json:"library_entry_id"`
+	BlobID            sql.NullInt64  `json:"blob_id"`
+	PreferProvider    sql.NullString `json:"prefer_provider"`
+	State             string         `json:"state"`
+	FailureReason     sql.NullString `json:"failure_reason"`
+	CreatedAt         int64          `json:"created_at"`
+	LastSeenAt        int64          `json:"last_seen_at"`
+	ExpiresAt         int64          `json:"expires_at"`
 }
 
 type ProducerRun struct {

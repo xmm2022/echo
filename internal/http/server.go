@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/xmm2022/echo/internal/config"
+	"github.com/xmm2022/echo/internal/embyproxy"
 	"github.com/xmm2022/echo/internal/http/handlers"
 	authmw "github.com/xmm2022/echo/internal/http/middleware"
 	"github.com/xmm2022/echo/internal/web"
@@ -46,6 +47,12 @@ type Deps struct {
 	API        *handlers.APIDeps
 	Bootstrap  *handlers.APIDeps
 	Web        *web.Deps
+	// Emby mounts the Emby reverse-proxy routes (reserved /stream + /error token
+	// endpoints, the fail-closed PlaybackInfo stub, and the transparent upstream
+	// fallback). It is OUTSIDE the admin-token group: Emby paths carry their own
+	// per-request playback-token auth, not the admin bearer. When nil, no Emby route
+	// is mounted.
+	Emby *embyproxy.Deps
 	// Ready backs /readyz with real DB + sidecar probes. When nil, /readyz
 	// reports not_ready (503) — the pre-wiring default used in tests.
 	Ready *ReadyChecker
@@ -95,6 +102,13 @@ func HandlerWithDeps(deps Deps) http.Handler {
 
 	if deps.Bootstrap != nil {
 		deps.Bootstrap.MountBootstrap(r)
+	}
+
+	// Emby reverse proxy: mounted OUTSIDE the authenticated group because its
+	// /stream and /error routes authenticate with their own per-request playback
+	// tokens (selector.secret), not the admin bearer.
+	if deps.Emby != nil {
+		deps.Emby.Mount(r)
 	}
 
 	// Authenticated routes.

@@ -24,6 +24,7 @@ import (
 	"github.com/xmm2022/echo/internal/job"
 	"github.com/xmm2022/echo/internal/logging"
 	"github.com/xmm2022/echo/internal/metrics"
+	"github.com/xmm2022/echo/internal/playback"
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
@@ -35,6 +36,11 @@ import (
 var version = "v0.1.0-dev"
 
 const shutdownTimeout = 30 * time.Second
+
+// playbackStreamTimeout bounds how far back an unfinished playback_events stream is
+// still treated as active before reconciliation reclaims it as 'interrupted'. It
+// mirrors playback's defaultStreamTimeout (6h); a later task wires it to config.
+const playbackStreamTimeout = 6 * time.Hour
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -124,6 +130,14 @@ func runServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Reclaim playback streams left unfinished by a previous crash so their leases do
+	// not count against users' concurrency quota forever. The full Emby proxy wiring
+	// (Upstream + config) lands in a later task; this reconcile is safe to run alone.
+	playbackQuota := playback.NewQuota(st.Queries, nil, playbackStreamTimeout)
+	if err := playbackQuota.ReconcileInterruptedStreams(ctx); err != nil {
+		return fmt.Errorf("reconcile playback streams: %w", err)
+	}
 
 	if err := runner.Start(ctx); err != nil {
 		return fmt.Errorf("start job runner: %w", err)

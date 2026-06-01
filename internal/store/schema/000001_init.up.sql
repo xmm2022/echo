@@ -274,3 +274,81 @@ CREATE TABLE producer_runs (
 );
 
 CREATE INDEX idx_producer_runs_job ON producer_runs(job_id);
+
+CREATE TABLE emby_servers (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  base_url        TEXT NOT NULL,
+  api_key_ref     TEXT,
+  public_base_url TEXT NOT NULL,
+  proxy_prefix    TEXT NOT NULL DEFAULT '/emby',
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE emby_user_links (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  emby_server_id  TEXT NOT NULL REFERENCES emby_servers(id) ON DELETE CASCADE,
+  emby_user_id    TEXT NOT NULL,
+  emby_username   TEXT,
+  echo_user_id    TEXT NOT NULL REFERENCES users(id),
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  UNIQUE (emby_server_id, emby_user_id)
+);
+
+CREATE TABLE playback_sessions (
+  id                   TEXT PRIMARY KEY,
+  selector             TEXT NOT NULL UNIQUE,
+  token_hash           TEXT NOT NULL,
+  echo_user_id          TEXT NOT NULL REFERENCES users(id),
+  emby_server_id        TEXT NOT NULL REFERENCES emby_servers(id),
+  emby_user_id          TEXT NOT NULL,
+  device_id             TEXT,
+  item_id               TEXT NOT NULL,
+  media_source_id       TEXT NOT NULL,
+  emby_play_session_id  TEXT,
+  library_entry_id      INTEGER REFERENCES library_entries(id),
+  blob_id               INTEGER REFERENCES blobs(id),
+  prefer_provider       TEXT,
+  state                 TEXT NOT NULL CHECK (state IN ('active','expired','revoked','failed')),
+  failure_reason        TEXT,
+  created_at            INTEGER NOT NULL,
+  last_seen_at          INTEGER NOT NULL,
+  expires_at            INTEGER NOT NULL,
+  CHECK (
+    (state = 'active' AND library_entry_id IS NOT NULL AND blob_id IS NOT NULL)
+    OR state IN ('expired','revoked','failed')
+  )
+);
+
+CREATE TABLE playback_error_tokens (
+  id                   TEXT PRIMARY KEY,
+  selector             TEXT NOT NULL UNIQUE,
+  token_hash           TEXT NOT NULL,
+  echo_user_id          TEXT REFERENCES users(id),
+  emby_server_id        TEXT REFERENCES emby_servers(id),
+  emby_user_id          TEXT,
+  device_id             TEXT,
+  item_id               TEXT,
+  media_source_id       TEXT,
+  reason                TEXT NOT NULL CHECK (reason IN (
+    'unauthorized',
+    'quota_exceeded',
+    'account_unavailable',
+    'temporary_unavailable',
+    'no_live_copy',
+    'rewrite_failed',
+    'unsupported_transcode',
+    'unknown_playable_url'
+  )),
+  http_status           INTEGER NOT NULL,
+  created_at            INTEGER NOT NULL,
+  expires_at            INTEGER NOT NULL
+);
+
+CREATE INDEX idx_playback_sessions_token ON playback_sessions(selector, state, expires_at);
+CREATE INDEX idx_playback_error_tokens_token ON playback_error_tokens(selector, expires_at);
+CREATE INDEX idx_emby_user_links_lookup ON emby_user_links(emby_server_id, emby_user_id, enabled);

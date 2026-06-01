@@ -1,3 +1,11 @@
+DROP INDEX IF EXISTS idx_emby_user_links_lookup;
+DROP INDEX IF EXISTS idx_playback_error_tokens_token;
+DROP INDEX IF EXISTS idx_playback_sessions_token;
+DROP TABLE IF EXISTS playback_error_tokens;
+DROP TABLE IF EXISTS playback_sessions;
+DROP TABLE IF EXISTS emby_user_links;
+DROP TABLE IF EXISTS emby_servers;
+
 DROP INDEX IF EXISTS idx_producer_runs_job;
 DROP TABLE IF EXISTS producer_runs;
 

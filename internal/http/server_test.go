@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/xmm2022/echo/internal/embyproxy"
 	"github.com/xmm2022/echo/internal/http/handlers"
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/store"
@@ -153,6 +154,82 @@ func TestPublicRoutesAreOpen(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != want {
 			t.Fatalf("%s = %d, want %d (public, no auth)", path, rec.Code, want)
+		}
+	}
+}
+
+func TestEmbyReservedRoutesDoNotFallThroughToProxy(t *testing.T) {
+	deps := Deps{
+		Logger: discardLogger(),
+		Emby: &embyproxy.Deps{
+			ProxyPrefix: "/emby",
+			Stream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Test-Route", "stream")
+				w.WriteHeader(http.StatusTeapot)
+			}),
+			Error: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Test-Route", "error")
+				w.WriteHeader(http.StatusTooManyRequests)
+			}),
+			Upstream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatalf("reserved route fell through to upstream: %s", r.URL.Path)
+			}),
+		},
+	}
+	h := HandlerWithDeps(deps)
+
+	for path, wantRoute := range map[string]string{
+		"/emby/stream/selector.secret": "stream",
+		"/emby/error/selector.secret":  "error",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Header().Get("X-Test-Route") != wantRoute {
+			t.Fatalf("%s route = %q, want %q", path, rec.Header().Get("X-Test-Route"), wantRoute)
+		}
+	}
+}
+
+func TestEmbyReservedMalformedRoutesDoNotFallThroughToProxy(t *testing.T) {
+	deps := Deps{
+		Logger: discardLogger(),
+		Emby: &embyproxy.Deps{
+			ProxyPrefix: "/emby",
+			Upstream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatalf("malformed reserved route fell through to upstream: %s", r.URL.Path)
+			}),
+		},
+	}
+	h := HandlerWithDeps(deps)
+
+	for _, path := range []string{"/emby/stream", "/emby/error", "/emby/stream/foo/bar", "/emby/error/foo/bar"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound && rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400 or 404 from Echo reserved handler", path, rec.Code)
+		}
+	}
+}
+
+func TestPhase3PlaybackInfoFailsClosedBeforeRewrite(t *testing.T) {
+	deps := Deps{
+		Logger: discardLogger(),
+		Emby: &embyproxy.Deps{
+			ProxyPrefix: "/emby",
+			Upstream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatalf("PlaybackInfo fell through to upstream before rewrite: %s", r.URL.Path)
+			}),
+		},
+	}
+	h := HandlerWithDeps(deps)
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, "/emby/Items/item1/PlaybackInfo?UserId=u1", nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s PlaybackInfo status = %d, want 503 fail closed", method, rec.Code)
+		}
+		if got := rec.Header().Get("X-Echo-Reason"); got != "temporary_unavailable" {
+			t.Fatalf("X-Echo-Reason = %q, want temporary_unavailable", got)
 		}
 	}
 }

@@ -95,6 +95,7 @@ func TestMigrationUpDownClean(t *testing.T) {
 		"users", "api_tokens", "quota_policies", "library_grants", "account_pool_assignments",
 		"quota_usage", "playback_events", "accounts", "libraries", "blobs", "library_entries",
 		"blob_hashes", "file_copies", "hash_conflicts", "jobs", "producer_runs",
+		"emby_servers", "emby_user_links", "playback_sessions", "playback_error_tokens",
 	} {
 		if tableExists(t, db, name) {
 			t.Fatalf("%s table still exists after migrate down", name)
@@ -135,6 +136,61 @@ func TestPhase2PlaybackEventsHaveNullableSessionSnapshots(t *testing.T) {
 		Status: "ok", BytesSent: 123, StartedAt: 1000,
 	}); err != nil {
 		t.Fatalf("insert playback event without session table parent: %v", err)
+	}
+}
+
+func TestPhase3PlaybackSessionAndErrorTokenSchema(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := int64(1000)
+
+	// Seed FK parents for playback_sessions.blob_id / library_entry_id (= 1).
+	// The test DSN enables foreign_keys(1), and createBlob/createLibrary use
+	// AUTOINCREMENT PKs, so the first rows created get id 1.
+	blob := createBlob(t, ctx, st.Queries, 1024)
+	library := createLibrary(t, ctx, st.Queries)
+	entry, err := st.UpsertLibraryEntry(ctx, queries.UpsertLibraryEntryParams{
+		LibraryID:   library.ID,
+		RelPath:     "season/episode.mkv",
+		Name:        "episode.mkv",
+		BlobID:      blob.ID,
+		EchoWritten: 0,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("seed library entry: %v", err)
+	}
+
+	if err := st.CreateEmbyServer(ctx, queries.CreateEmbyServerParams{
+		ID: "default", Name: "main-emby", BaseUrl: "http://emby:8096",
+		PublicBaseUrl: "https://echo.example.com", ProxyPrefix: "/emby",
+		Enabled: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create emby server: %v", err)
+	}
+	if err := st.CreateEmbyUserLink(ctx, queries.CreateEmbyUserLinkParams{
+		EmbyServerID: "default", EmbyUserID: "emby-u1", EmbyUsername: sql.NullString{String: "alice", Valid: true},
+		EchoUserID: "admin", Enabled: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create emby user link: %v", err)
+	}
+	if err := st.CreatePlaybackSession(ctx, queries.CreatePlaybackSessionParams{
+		ID: "sess1", Selector: "sel1", TokenHash: "sha256:abc", EchoUserID: "admin",
+		EmbyServerID: "default", EmbyUserID: "emby-u1", DeviceID: sql.NullString{String: "dev1", Valid: true},
+		ItemID: "item1", MediaSourceID: "ms1", EmbyPlaySessionID: sql.NullString{String: "play1", Valid: true},
+		LibraryEntryID: sql.NullInt64{Int64: entry.ID, Valid: true}, BlobID: sql.NullInt64{Int64: blob.ID, Valid: true},
+		State: "active", CreatedAt: now, LastSeenAt: now, ExpiresAt: now + 3600,
+	}); err != nil {
+		t.Fatalf("create playback session: %v", err)
+	}
+	if err := st.CreatePlaybackErrorToken(ctx, queries.CreatePlaybackErrorTokenParams{
+		ID: "err1", Selector: "errsel", TokenHash: "sha256:def", EchoUserID: sql.NullString{String: "admin", Valid: true},
+		EmbyServerID: sql.NullString{String: "default", Valid: true}, EmbyUserID: sql.NullString{String: "emby-u1", Valid: true},
+		ItemID: sql.NullString{String: "item1", Valid: true}, MediaSourceID: sql.NullString{String: "ms1", Valid: true},
+		Reason: "quota_exceeded", HttpStatus: 429, CreatedAt: now, ExpiresAt: now + 300,
+	}); err != nil {
+		t.Fatalf("create playback error token: %v", err)
 	}
 }
 
