@@ -59,3 +59,8 @@ WHERE le.library_id = sqlc.arg(library_id)
 GROUP BY le.id
 ORDER BY le.rel_path
 LIMIT sqlc.arg(limit);
+
+-- name: UpdateLibraryEntryBlobForTest :exec
+UPDATE library_entries
+SET blob_id = ?, updated_at = ?
+WHERE id = ?;

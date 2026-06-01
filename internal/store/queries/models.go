@@ -89,6 +89,39 @@ type CopyFailure struct {
 	RequestID     sql.NullString `json:"request_id"`
 }
 
+type EmbyItemMapping struct {
+	ID                    int64          `json:"id"`
+	EmbyServerID          string         `json:"emby_server_id"`
+	EmbyItemID            string         `json:"emby_item_id"`
+	MediaSourceID         string         `json:"media_source_id"`
+	MappingID             int64          `json:"mapping_id"`
+	MediaSourcePathRaw    string         `json:"media_source_path_raw"`
+	MediaSourcePathNorm   string         `json:"media_source_path_norm"`
+	PathNormVersion       int64          `json:"path_norm_version"`
+	LibraryID             int64          `json:"library_id"`
+	RelPath               string         `json:"rel_path"`
+	LibraryEntryID        int64          `json:"library_entry_id"`
+	BlobID                int64          `json:"blob_id"`
+	LibraryEntryUpdatedAt int64          `json:"library_entry_updated_at"`
+	EmbyItemEtag          sql.NullString `json:"emby_item_etag"`
+	LastSeenAt            int64          `json:"last_seen_at"`
+	CreatedAt             int64          `json:"created_at"`
+	UpdatedAt             int64          `json:"updated_at"`
+}
+
+type EmbyLibraryMapping struct {
+	ID                 int64  `json:"id"`
+	EmbyServerID       string `json:"emby_server_id"`
+	LibraryID          int64  `json:"library_id"`
+	EmbyPathPrefix     string `json:"emby_path_prefix"`
+	EmbyPathPrefixNorm string `json:"emby_path_prefix_norm"`
+	EchoRelPrefix      string `json:"echo_rel_prefix"`
+	CaseSensitive      int64  `json:"case_sensitive"`
+	Enabled            int64  `json:"enabled"`
+	CreatedAt          int64  `json:"created_at"`
+	UpdatedAt          int64  `json:"updated_at"`
+}
+
 type EmbyServer struct {
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`

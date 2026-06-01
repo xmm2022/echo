@@ -1,3 +1,8 @@
+DROP INDEX IF EXISTS idx_emby_item_mappings_lookup;
+DROP INDEX IF EXISTS idx_emby_library_mappings_lookup;
+DROP TABLE IF EXISTS emby_item_mappings;
+DROP TABLE IF EXISTS emby_library_mappings;
+
 DROP INDEX IF EXISTS idx_emby_user_links_lookup;
 DROP INDEX IF EXISTS idx_playback_error_tokens_token;
 DROP INDEX IF EXISTS idx_playback_sessions_token;

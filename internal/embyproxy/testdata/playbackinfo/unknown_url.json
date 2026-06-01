@@ -1,0 +1,9 @@
+{
+  "MediaSources": [
+    {
+      "Id": "ms1",
+      "Path": "/media/movies/Film.mkv",
+      "FooUrl": "http://emby:8096/leak?api_key=secret"
+    }
+  ]
+}

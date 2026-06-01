@@ -1,13 +1,23 @@
 package embyproxy
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/xmm2022/echo/internal/playback"
+	"github.com/xmm2022/echo/internal/sidecarclient"
 )
 
 func discardProxyLogger() *slog.Logger {
@@ -279,4 +289,174 @@ func TestReverseProxyGuardDeniesStreamBeforeUpstream(t *testing.T) {
 	if upstreamHits != 1 {
 		t.Fatalf("upstream hits = %d after ordinary request, want 1", upstreamHits)
 	}
+}
+
+// TestPlaybackInfoToStreamEndToEndWithFakes is the Phase-4 e2e golden gate: a PlaybackInfo
+// request flows through the mounted PlaybackInfoHandler (which forwards to a fake upstream
+// Emby returning single_source.json), gets rewritten so the source's playable URL becomes a
+// real Echo /emby/stream/{token} URL backed by a freshly minted playback session, and that
+// stream URL — routed back through the SAME mounted router and the SAME store — serves real
+// 206 partial bytes from a Range-honoring fake sidecar. It proves the session minted during
+// rewrite is visible to the StreamHandler lookup and the byte path is wired end to end.
+func TestPlaybackInfoToStreamEndToEndWithFakes(t *testing.T) {
+	fakeEmby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items/item1/PlaybackInfo" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(readFixture(t, "single_source.json"))
+	}))
+	defer fakeEmby.Close()
+
+	fakeSidecar := newFakeStreamingSidecar(t, []byte("0123456789abcdef"))
+	echo := newFullEmbyProxyHarness(t, fakeEmby.URL, fakeSidecar)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/emby/Items/item1/PlaybackInfo?UserId=emby-u1&DeviceId=dev1", nil)
+	echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PlaybackInfo status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	streamURL := extractFirstEchoStreamURL(t, rec.Body.Bytes())
+	if strings.Contains(streamURL, "/api/stream") || !strings.Contains(streamURL, "/emby/stream/") {
+		t.Fatalf("stream URL = %q", streamURL)
+	}
+
+	streamReq := httptest.NewRequest(http.MethodGet, streamURL, nil)
+	streamReq.Header.Set("Range", "bytes=0-3")
+	streamRec := httptest.NewRecorder()
+	echo.ServeHTTP(streamRec, streamReq)
+	if streamRec.Code != http.StatusPartialContent {
+		t.Fatalf("stream status=%d body=%q", streamRec.Code, streamRec.Body.String())
+	}
+	if streamRec.Body.String() != "0123" {
+		t.Fatalf("stream body=%q, want 0123", streamRec.Body.String())
+	}
+}
+
+// streamingSidecar satisfies the local Sidecar interface and honors a closed-range
+// Range header (bytes=A-B) by returning a 206 with the inclusive byte slice; any request
+// without a parseable closed range falls back to a 200 with the full data.
+type streamingSidecar struct {
+	data []byte
+}
+
+func (s *streamingSidecar) Stream(ctx context.Context, req sidecarclient.StreamRequest) (*sidecarclient.StreamResult, error) {
+	if start, end, ok := parseClosedRange(req.Headers.Get("Range"), len(s.data)); ok {
+		return &sidecarclient.StreamResult{
+			StatusCode: http.StatusPartialContent,
+			Header: http.Header{
+				"Content-Range": []string{"bytes " + strconv.Itoa(start) + "-" + strconv.Itoa(end) + "/" + strconv.Itoa(len(s.data))},
+				"Accept-Ranges": []string{"bytes"},
+			},
+			Body: io.NopCloser(bytes.NewReader(s.data[start : end+1])),
+		}, nil
+	}
+	return &sidecarclient.StreamResult{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Accept-Ranges": []string{"bytes"}},
+		Body:       io.NopCloser(bytes.NewReader(s.data)),
+	}, nil
+}
+
+// parseClosedRange parses the closed "bytes=A-B" form (the only form the e2e test uses),
+// returning the inclusive [start, end] bounds clamped to the data length. It reports ok
+// only for a well-formed closed range; anything else (no header, suffix/open ranges,
+// garbage) returns ok=false so the caller can fall back to a full 200 response.
+func parseClosedRange(header string, length int) (start, end int, ok bool) {
+	const prefix = "bytes="
+	if !strings.HasPrefix(header, prefix) {
+		return 0, 0, false
+	}
+	spec := strings.TrimPrefix(header, prefix)
+	dash := strings.IndexByte(spec, '-')
+	if dash <= 0 || dash == len(spec)-1 {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(spec[:dash])
+	if err != nil {
+		return 0, 0, false
+	}
+	end, err = strconv.Atoi(spec[dash+1:])
+	if err != nil {
+		return 0, 0, false
+	}
+	if start < 0 || end < start || start >= length {
+		return 0, 0, false
+	}
+	if end >= length {
+		end = length - 1
+	}
+	return start, end, true
+}
+
+// newFakeStreamingSidecar returns a Sidecar whose Stream honors a closed Range header,
+// serving 206 partial content for "bytes=A-B" (e.g. bytes=0-3 over "0123456789abcdef"
+// yields "0123") and a full 200 otherwise.
+func newFakeStreamingSidecar(t *testing.T, data []byte) Sidecar {
+	t.Helper()
+	return &streamingSidecar{data: data}
+}
+
+// newFullEmbyProxyHarness seeds a real store EXACTLY like newRewriteHarness (so
+// /media/movies/Film.mkv maps to the admin-owned entry movies/Film.mkv with a live file
+// copy via an enabled pool) and mounts the FULL Deps router — Stream, Error, PlaybackInfo,
+// and the upstream fallback — over collaborators that all share the SAME store and clock.
+// Sharing st is the crux: the playback session minted while rewriting PlaybackInfo must be
+// visible to the StreamHandler lookup on the subsequent stream request.
+func newFullEmbyProxyHarness(t *testing.T, embyURL string, sidecar Sidecar) http.Handler {
+	t.Helper()
+	st := newEmbyProxyTestStore(t)
+	seedRewriteHarnessStore(t, st)
+
+	now := nowFunc(time.Unix(1000, 0))
+	mgr := NewSessionManager(st.Queries, SessionConfig{TTL: time.Hour, ErrorTTL: 5 * time.Minute}, now)
+	resolver := playback.NewResolver(st.Queries, now)
+	quota := playback.NewQuota(st.Queries, now, time.Hour)
+	failures := playback.NewFailureRecorder(st.Queries, now)
+	mapper := NewDBSourceMapper(st.Queries, now)
+	rewriter := NewRewriter(mapper, mgr, quota, resolver)
+
+	upstreamBase, err := url.Parse(embyURL)
+	if err != nil {
+		t.Fatalf("parse emby url: %v", err)
+	}
+	publicBase, _ := url.Parse("https://echo.example.com")
+
+	playbackInfo := PlaybackInfoHandler(PlaybackInfoConfig{
+		PublicBaseURL: "https://echo.example.com",
+		ProxyPrefix:   "/emby",
+		EmbyServerID:  "default",
+		UpstreamBase:  upstreamBase,
+		Querier:       st.Queries,
+	}, rewriter, http.DefaultTransport, discardStreamLogger())
+
+	deps := &Deps{
+		ProxyPrefix:  "/emby",
+		Stream:       StreamHandler(mgr, resolver, quota, sidecar, failures, discardStreamLogger()),
+		Error:        ErrorHandler(mgr),
+		PlaybackInfo: playbackInfo,
+		Upstream:     NewReverseProxy(ProxyConfig{UpstreamBase: upstreamBase, PublicBase: publicBase, ProxyPrefix: "/emby"}, http.DefaultClient, discardProxyLogger()),
+	}
+	r := chi.NewRouter()
+	deps.Mount(r)
+	return r
+}
+
+// extractFirstEchoStreamURL unmarshals a (rewritten) PlaybackInfo body and returns
+// MediaSources[0].DirectStreamUrl — the Echo /emby/stream/{token} URL.
+func extractFirstEchoStreamURL(t *testing.T, body []byte) string {
+	t.Helper()
+	var decoded struct {
+		MediaSources []struct {
+			DirectStreamUrl string `json:"DirectStreamUrl"`
+		} `json:"MediaSources"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal playbackinfo body: %v", err)
+	}
+	if len(decoded.MediaSources) == 0 {
+		t.Fatalf("no MediaSources in body: %s", body)
+	}
+	return decoded.MediaSources[0].DirectStreamUrl
 }

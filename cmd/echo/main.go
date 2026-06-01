@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -18,6 +21,7 @@ import (
 
 	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/config"
+	"github.com/xmm2022/echo/internal/embyproxy"
 	httpserver "github.com/xmm2022/echo/internal/http"
 	"github.com/xmm2022/echo/internal/http/handlers"
 	"github.com/xmm2022/echo/internal/ingest"
@@ -28,6 +32,7 @@ import (
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
+	"github.com/xmm2022/echo/internal/store/queries"
 	"github.com/xmm2022/echo/internal/web"
 )
 
@@ -149,6 +154,15 @@ func runServe(args []string) error {
 	cache := restore.NewLinkCache(nil)
 	authenticator := &auth.Authenticator{Store: st}
 
+	// Emby reverse proxy. The proxy is mounted only when a single enabled Emby server is
+	// configured; on a fresh DB (no enabled server) we still mount a fully fail-closed Deps
+	// so every /emby/* answers a controlled 503 rather than nil-handler-panicking or
+	// silently proxying an untokenized upstream source.
+	embyDeps, err := buildEmbyDeps(ctx, st, sidecar, playbackQuota, logger)
+	if err != nil {
+		return err
+	}
+
 	deps := httpserver.Deps{
 		Logger:     logger,
 		AdminToken: cfg.Auth.AdminToken,
@@ -170,6 +184,7 @@ func runServe(args []string) error {
 			Version: version,
 		},
 		Registry: registry,
+		Emby:     embyDeps,
 	}
 
 	srv := httpserver.New(cfg, deps)
@@ -193,6 +208,114 @@ func runServe(args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// buildEmbyDeps constructs the Emby reverse-proxy Deps. When no enabled Emby server is
+// configured (the fresh-DB case), it returns a fully fail-closed Deps so every /emby/*
+// answers a controlled 503 — it deliberately does NOT mount a transparent upstream fallback,
+// because without a configured server there is no upstream to safely proxy to. When a single
+// enabled server exists, it wires the full proxy: tokenized stream/error routes, the
+// mapping-aware PlaybackInfo rewriter, and the transparent upstream fallback for everything
+// else. playbackQuota is reused (never rebuilt) so all playback paths share one lease registry.
+func buildEmbyDeps(ctx context.Context, st *store.Store, sidecar sidecarclient.Sidecar, playbackQuota *playback.Quota, logger *slog.Logger) (*embyproxy.Deps, error) {
+	embyServer, err := st.Queries.GetEnabledEmbyServer(ctx, queries.GetEnabledEmbyServerParams{ID: "default"})
+	if errors.Is(err, sql.ErrNoRows) {
+		embyDisabled := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Echo-Reason", "temporary_unavailable")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "temporary_unavailable"})
+		})
+		return &embyproxy.Deps{
+			ProxyPrefix:  "/emby",
+			Stream:       embyDisabled,
+			Error:        embyDisabled,
+			PlaybackInfo: embyproxy.PlaybackInfoFailClosedHandler(),
+			Upstream:     embyDisabled,
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load emby server: %w", err)
+	}
+
+	upstreamBase, err := url.Parse(embyServer.BaseUrl)
+	if err != nil {
+		return nil, fmt.Errorf("parse emby base_url: %w", err)
+	}
+	publicBase, err := url.Parse(embyServer.PublicBaseUrl)
+	if err != nil {
+		return nil, fmt.Errorf("parse emby public_base_url: %w", err)
+	}
+	prefix := embyServer.ProxyPrefix
+	if prefix == "" {
+		prefix = "/emby"
+	}
+
+	mgr := embyproxy.NewSessionManager(st.Queries, embyproxy.SessionConfig{}, nil)
+	embyResolver := playback.NewResolver(st.Queries, nil)
+	embyFailures := playback.NewFailureRecorder(st.Queries, nil)
+	mapper := embyproxy.NewDBSourceMapper(st.Queries, nil)
+	rewriter := embyproxy.NewRewriter(mapper, mgr, playbackQuota, embyResolver)
+
+	playbackInfo := embyproxy.PlaybackInfoHandler(embyproxy.PlaybackInfoConfig{
+		PublicBaseURL: embyServer.PublicBaseUrl,
+		ProxyPrefix:   prefix,
+		EmbyServerID:  embyServer.ID,
+		UpstreamBase:  upstreamBase,
+		Querier:       st.Queries,
+	}, rewriter, http.DefaultTransport, logger)
+
+	// guardLookup upgrades the transparent fallback's playback guard to the mapping-aware
+	// Phase-4 posture: a suspicious stream/download request whose Emby item is (or was)
+	// Echo-managed must be played via an Echo stream token, never proxied untokenized to
+	// upstream. We fail closed when we cannot identify the item or cannot read the mapping
+	// table; only a request for a genuinely unmapped item is allowed through.
+	guardLookup := func(r *http.Request) (embyproxy.GuardDecision, error) {
+		itemID := embyItemIDFromPath(r.URL.Path, prefix)
+		if itemID == "" {
+			// A suspicious playback endpoint whose item we cannot identify must not bypass
+			// Echo: conservatively treat it as mapped (fail closed).
+			return embyproxy.GuardDecision{Mapped: true, Reason: "unidentified_playback_target"}, nil
+		}
+		rows, err := st.Queries.ListItemMappingsByItem(r.Context(), queries.ListItemMappingsByItemParams{
+			EmbyServerID: embyServer.ID,
+			EmbyItemID:   itemID,
+		})
+		if err != nil {
+			return embyproxy.GuardDecision{}, err // fail closed
+		}
+		if len(rows) > 0 {
+			return embyproxy.GuardDecision{Mapped: true, HistoricalEvidence: true, Reason: "mapped_source_requires_echo_stream"}, nil
+		}
+		return embyproxy.GuardDecision{Mapped: false}, nil
+	}
+
+	return &embyproxy.Deps{
+		ProxyPrefix:  prefix,
+		Stream:       embyproxy.StreamHandler(mgr, embyResolver, playbackQuota, sidecar, embyFailures, logger),
+		Error:        embyproxy.ErrorHandler(mgr),
+		PlaybackInfo: playbackInfo,
+		Upstream: embyproxy.NewReverseProxy(embyproxy.ProxyConfig{
+			UpstreamBase: upstreamBase,
+			PublicBase:   publicBase,
+			ProxyPrefix:  prefix,
+			GuardLookup:  guardLookup,
+		}, http.DefaultClient, logger),
+	}, nil
+}
+
+// embyItemIDFromPath pulls the Emby item id out of a playback path like
+// /emby/Videos/{id}/stream, /emby/Items/{id}/Download, or /emby/Audio/{id}/stream.
+func embyItemIDFromPath(path, prefix string) string {
+	p := strings.TrimPrefix(path, strings.TrimRight(prefix, "/"))
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	for i := 0; i+1 < len(segs); i++ {
+		switch strings.ToLower(segs[i]) {
+		case "videos", "items", "audio":
+			return segs[i+1]
+		}
+	}
+	return ""
 }
 
 // ingestConfig adapts the loaded config to the ingest pipeline's config.

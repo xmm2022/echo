@@ -352,3 +352,40 @@ CREATE TABLE playback_error_tokens (
 CREATE INDEX idx_playback_sessions_token ON playback_sessions(selector, state, expires_at);
 CREATE INDEX idx_playback_error_tokens_token ON playback_error_tokens(selector, expires_at);
 CREATE INDEX idx_emby_user_links_lookup ON emby_user_links(emby_server_id, emby_user_id, enabled);
+
+CREATE TABLE emby_library_mappings (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  emby_server_id        TEXT NOT NULL REFERENCES emby_servers(id) ON DELETE CASCADE,
+  library_id            INTEGER NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  emby_path_prefix      TEXT NOT NULL,
+  emby_path_prefix_norm TEXT NOT NULL,
+  echo_rel_prefix       TEXT NOT NULL DEFAULT '',
+  case_sensitive        INTEGER NOT NULL DEFAULT 1,
+  enabled               INTEGER NOT NULL DEFAULT 1,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL
+);
+
+CREATE TABLE emby_item_mappings (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+  emby_server_id             TEXT NOT NULL REFERENCES emby_servers(id) ON DELETE CASCADE,
+  emby_item_id               TEXT NOT NULL,
+  media_source_id            TEXT NOT NULL,
+  mapping_id                 INTEGER NOT NULL REFERENCES emby_library_mappings(id),
+  media_source_path_raw      TEXT NOT NULL,
+  media_source_path_norm     TEXT NOT NULL,
+  path_norm_version          INTEGER NOT NULL,
+  library_id                 INTEGER NOT NULL REFERENCES libraries(id),
+  rel_path                   TEXT NOT NULL,
+  library_entry_id           INTEGER NOT NULL REFERENCES library_entries(id) ON DELETE CASCADE,
+  blob_id                    INTEGER NOT NULL REFERENCES blobs(id),
+  library_entry_updated_at   INTEGER NOT NULL,
+  emby_item_etag             TEXT,
+  last_seen_at               INTEGER NOT NULL,
+  created_at                 INTEGER NOT NULL,
+  updated_at                 INTEGER NOT NULL,
+  UNIQUE (emby_server_id, emby_item_id, media_source_id, media_source_path_norm)
+);
+
+CREATE INDEX idx_emby_library_mappings_lookup ON emby_library_mappings(emby_server_id, enabled, emby_path_prefix_norm);
+CREATE INDEX idx_emby_item_mappings_lookup ON emby_item_mappings(emby_server_id, emby_item_id, media_source_id);

@@ -96,6 +96,7 @@ func TestMigrationUpDownClean(t *testing.T) {
 		"quota_usage", "playback_events", "accounts", "libraries", "blobs", "library_entries",
 		"blob_hashes", "file_copies", "hash_conflicts", "jobs", "producer_runs",
 		"emby_servers", "emby_user_links", "playback_sessions", "playback_error_tokens",
+		"emby_library_mappings", "emby_item_mappings",
 	} {
 		if tableExists(t, db, name) {
 			t.Fatalf("%s table still exists after migrate down", name)
@@ -191,6 +192,92 @@ func TestPhase3PlaybackSessionAndErrorTokenSchema(t *testing.T) {
 		Reason: "quota_exceeded", HttpStatus: 429, CreatedAt: now, ExpiresAt: now + 300,
 	}); err != nil {
 		t.Fatalf("create playback error token: %v", err)
+	}
+}
+
+func TestPhase4EmbyMappingSchema(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := int64(1000)
+
+	if err := st.CreateEmbyServer(ctx, queries.CreateEmbyServerParams{
+		ID: "default", Name: "main-emby", BaseUrl: "http://emby:8096",
+		PublicBaseUrl: "https://echo.example.com", ProxyPrefix: "/emby",
+		Enabled: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	library := createLibrary(t, ctx, st.Queries)
+	blob := createBlob(t, ctx, st.Queries, 1024)
+	entry, err := st.UpsertLibraryEntry(ctx, queries.UpsertLibraryEntryParams{
+		LibraryID: library.ID, RelPath: "movies/Film.mkv", Name: "Film.mkv",
+		BlobID: blob.ID, EchoWritten: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := st.CreateEmbyLibraryMapping(ctx, queries.CreateEmbyLibraryMappingParams{
+		EmbyServerID: "default", LibraryID: library.ID,
+		EmbyPathPrefix: "/media", EmbyPathPrefixNorm: "/media",
+		EchoRelPrefix: "movies", CaseSensitive: 1, Enabled: 1,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create mapping: %v", err)
+	}
+	if err := st.UpsertEmbyItemMapping(ctx, queries.UpsertEmbyItemMappingParams{
+		EmbyServerID: "default", EmbyItemID: "item1", MediaSourceID: "ms1",
+		MappingID: mapping.ID, MediaSourcePathRaw: "/media/Film.mkv",
+		MediaSourcePathNorm: "/media/Film.mkv", PathNormVersion: 1,
+		LibraryID: library.ID, RelPath: "movies/Film.mkv",
+		LibraryEntryID: entry.ID, BlobID: blob.ID,
+		LibraryEntryUpdatedAt: entry.UpdatedAt, LastSeenAt: now,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert item mapping: %v", err)
+	}
+}
+
+func TestPhase4ItemMappingCacheInvalidatesOnEntryOrMappingChange(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	seed := seedPhase4MappingCache(t, ctx, st)
+
+	if _, err := st.GetValidEmbyItemMapping(ctx, queries.GetValidEmbyItemMappingParams{
+		EmbyServerID: "default", EmbyItemID: "item1", MediaSourceID: "ms1",
+		MediaSourcePathNorm: "/media/Film.mkv", PathNormVersion: 1,
+	}); err != nil {
+		t.Fatalf("valid cache lookup: %v", err)
+	}
+	if _, err := st.GetValidEmbyItemMapping(ctx, queries.GetValidEmbyItemMappingParams{
+		EmbyServerID: "default", EmbyItemID: "item1", MediaSourceID: "ms1",
+		MediaSourcePathNorm: "/media/Film.mkv", PathNormVersion: 2,
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("path_norm_version mismatch error = %v, want sql.ErrNoRows", err)
+	}
+
+	if err := st.UpdateLibraryEntryBlobForTest(ctx, queries.UpdateLibraryEntryBlobForTestParams{
+		BlobID: seed.OtherBlobID, UpdatedAt: seed.EntryUpdatedAt + 1, ID: seed.EntryID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetValidEmbyItemMapping(ctx, queries.GetValidEmbyItemMappingParams{
+		EmbyServerID: "default", EmbyItemID: "item1", MediaSourceID: "ms1",
+		MediaSourcePathNorm: "/media/Film.mkv", PathNormVersion: 1,
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale blob/updated_at cache error = %v, want sql.ErrNoRows", err)
+	}
+
+	if err := st.SetEmbyLibraryMappingEnabled(ctx, queries.SetEmbyLibraryMappingEnabledParams{
+		Enabled: 0, UpdatedAt: seed.EntryUpdatedAt + 2, ID: seed.MappingID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetValidEmbyItemMapping(ctx, queries.GetValidEmbyItemMappingParams{
+		EmbyServerID: "default", EmbyItemID: "item1", MediaSourceID: "ms1",
+		MediaSourcePathNorm: "/media/Film.mkv", PathNormVersion: 1,
+	}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("disabled mapping cache error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -824,6 +911,63 @@ func createLibrary(t *testing.T, ctx context.Context, q *queries.Queries) querie
 		t.Fatalf("create library: %v", err)
 	}
 	return library
+}
+
+type phase4MappingSeed struct {
+	OtherBlobID    int64
+	EntryUpdatedAt int64
+	EntryID        int64
+	MappingID      int64
+}
+
+func seedPhase4MappingCache(t *testing.T, ctx context.Context, st *Store) phase4MappingSeed {
+	t.Helper()
+	now := int64(1000)
+
+	if err := st.CreateEmbyServer(ctx, queries.CreateEmbyServerParams{
+		ID: "default", Name: "main-emby", BaseUrl: "http://emby:8096",
+		PublicBaseUrl: "https://echo.example.com", ProxyPrefix: "/emby",
+		Enabled: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed emby server: %v", err)
+	}
+	library := createLibrary(t, ctx, st.Queries)
+	blob := createBlob(t, ctx, st.Queries, 1024)
+	otherBlob := createBlob(t, ctx, st.Queries, 2048)
+	entry, err := st.UpsertLibraryEntry(ctx, queries.UpsertLibraryEntryParams{
+		LibraryID: library.ID, RelPath: "movies/Film.mkv", Name: "Film.mkv",
+		BlobID: blob.ID, EchoWritten: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("seed library entry: %v", err)
+	}
+	mapping, err := st.CreateEmbyLibraryMapping(ctx, queries.CreateEmbyLibraryMappingParams{
+		EmbyServerID: "default", LibraryID: library.ID,
+		EmbyPathPrefix: "/media", EmbyPathPrefixNorm: "/media",
+		EchoRelPrefix: "movies", CaseSensitive: 1, Enabled: 1,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("seed library mapping: %v", err)
+	}
+	if err := st.UpsertEmbyItemMapping(ctx, queries.UpsertEmbyItemMappingParams{
+		EmbyServerID: "default", EmbyItemID: "item1", MediaSourceID: "ms1",
+		MappingID: mapping.ID, MediaSourcePathRaw: "/media/Film.mkv",
+		MediaSourcePathNorm: "/media/Film.mkv", PathNormVersion: 1,
+		LibraryID: library.ID, RelPath: "movies/Film.mkv",
+		LibraryEntryID: entry.ID, BlobID: blob.ID,
+		LibraryEntryUpdatedAt: entry.UpdatedAt, LastSeenAt: now,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed item mapping: %v", err)
+	}
+
+	return phase4MappingSeed{
+		OtherBlobID:    otherBlob.ID,
+		EntryUpdatedAt: entry.UpdatedAt,
+		EntryID:        entry.ID,
+		MappingID:      mapping.ID,
+	}
 }
 
 func fileCopyParams(blobID int64, lastSeen int64) queries.InsertFileCopyParams {

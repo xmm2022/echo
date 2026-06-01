@@ -1,0 +1,20 @@
+{
+  "PlaySessionId": "play1",
+  "MediaSources": [
+    {
+      "Id": "ms1",
+      "Path": "/media/movies/Film.mkv",
+      "DirectStreamUrl": "http://emby:8096/Videos/item1/stream?api_key=secret",
+      "StreamUrl": "/Videos/item1/stream?Static=true",
+      "TranscodingUrl": "/Videos/item1/master.m3u8?api_key=secret",
+      "RequiredHttpHeaders": {
+        "Authorization": "MediaBrowser token",
+        "Cookie": "a=b",
+        "X-Emby-Token": "secret"
+      },
+      "MediaStreams": [{"Type": "Video"}],
+      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true
+    }
+  ]
+}

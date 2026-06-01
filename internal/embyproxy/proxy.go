@@ -54,11 +54,16 @@ func (d *Deps) Mount(r chi.Router) {
 }
 
 // ProxyConfig carries the origins and mount prefix for the transparent reverse-proxy
-// fallback that forwards every non-reserved Emby path to the upstream server.
+// fallback that forwards every non-reserved Emby path to the upstream server. An optional
+// GuardLookup upgrades the fallback's playback guard to the mapping-aware Phase-4 posture:
+// when set, only mapped (or historically mapped) playback targets fail closed and genuinely
+// upstream content is allowed through. When nil, the guard keeps the Phase-3 deny-all
+// posture for every suspicious request.
 type ProxyConfig struct {
 	UpstreamBase *url.URL
 	PublicBase   *url.URL
 	ProxyPrefix  string
+	GuardLookup  GuardLookup
 }
 
 // NewReverseProxy builds the transparent upstream fallback handler. It strips ProxyPrefix
@@ -120,12 +125,17 @@ func NewReverseProxy(cfg ProxyConfig, client *http.Client, logger *slog.Logger) 
 		},
 	}
 
-	// Fail-closed playback guard runs BEFORE the upstream proxy on the fallback path. Echo's
-	// reserved stream/error/PlaybackInfo routes never reach here (Mount's route precedence
-	// claims them first), but the guard still defends the fallback so a media stream/download
-	// request is never transparently proxied to upstream Emby untokenized. Phase 4 replaces
-	// this Phase-3 guard with a mapping-aware one.
-	guard := NewPlaybackGuard(GuardConfig{Phase: 3})
+	// Playback guard runs BEFORE the upstream proxy on the fallback path. Echo's reserved
+	// stream/error/PlaybackInfo routes never reach here (Mount's route precedence claims them
+	// first), but the guard still defends the fallback so a media stream/download request is
+	// never transparently proxied to upstream Emby untokenized. With a GuardLookup we use the
+	// mapping-aware Phase-4 guard (deny mapped sources, allow genuinely upstream content);
+	// without one we keep the fail-closed Phase-3 deny-all-suspicious posture.
+	guardCfg := GuardConfig{Phase: 3}
+	if cfg.GuardLookup != nil {
+		guardCfg = GuardConfig{Phase: 4, Lookup: cfg.GuardLookup}
+	}
+	guard := NewPlaybackGuard(guardCfg)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !guard.Allow(r, w) {
 			// guard.Allow already wrote the controlled 503.

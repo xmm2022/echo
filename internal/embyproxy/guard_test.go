@@ -3,6 +3,7 @@ package embyproxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -35,5 +36,48 @@ func TestPlaybackGuardAllowsOrdinaryEmbyAPI(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if !guard.Allow(req, rec) {
 		t.Fatalf("ordinary API denied: status=%d", rec.Code)
+	}
+}
+
+func TestPlaybackGuardPhase4AllowsUnmappedButDeniesMappedFallback(t *testing.T) {
+	mappedIDs := map[string]bool{
+		"mapped":                true,
+		"item-mapped-no-source": true,
+	}
+	guard := NewPlaybackGuard(GuardConfig{
+		Phase: 4,
+		Lookup: func(r *http.Request) (GuardDecision, error) {
+			if mappedIDs[r.URL.Query().Get("mediaSourceId")] || strings.Contains(r.URL.Path, "item-mapped-no-source") || r.URL.Query().Get("PlaySessionId") == "mapped-play-session" {
+				return GuardDecision{Mapped: true, HistoricalEvidence: true, Reason: "mapped_source_requires_echo_stream"}, nil
+			}
+			return GuardDecision{Mapped: false}, nil
+		},
+	})
+
+	mappedPaths := []string{
+		"/emby/Videos/item1/stream?mediaSourceId=mapped",
+		"/emby/Videos/item1/original?mediaSourceId=mapped",
+		"/emby/Items/item1/Download?mediaSourceId=mapped",
+		"/emby/videos/item1/hls/master.m3u8?mediaSourceId=mapped",
+		"/emby/Audio/item1/stream.mp3?mediaSourceId=mapped",
+		"/emby/Videos/item1/stream?Static=true&PlaySessionId=mapped-play-session",
+		"/emby/Videos/item-mapped-no-source/stream?Static=true",
+		"/emby/Videos/item-mapped-no-source/stream",
+	}
+	for _, path := range mappedPaths {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		if guard.Allow(req, rec) {
+			t.Fatalf("%s allowed, want mapped fallback fail closed", path)
+		}
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status = %d, want 503", path, rec.Code)
+		}
+	}
+
+	unmapped := httptest.NewRequest(http.MethodGet, "/emby/Videos/item1/stream?mediaSourceId=unmapped", nil)
+	rec := httptest.NewRecorder()
+	if !guard.Allow(unmapped, rec) {
+		t.Fatalf("unmapped status = %d, want allowed", rec.Code)
 	}
 }

@@ -9,11 +9,27 @@ import (
 // GuardConfig configures the playback guard. Phase selects the guard's posture: Phase 3
 // (and any later phase wired with this Phase-3 value) is fail-closed for playback/stream
 // endpoints, because the PlaybackInfo rewrite that would mint Echo stream tokens does not
-// exist yet. Phase 4 replaces this guard wholesale with a mapping-aware one, so the switch
-// here is intentionally minimal.
+// exist yet. Phase 4 replaces this guard with a mapping-aware one: when Lookup is set the
+// guard consults it for every suspicious request and only fails closed when the target is
+// (or was) an Echo-managed source.
 type GuardConfig struct {
-	Phase int
+	Phase  int
+	Lookup GuardLookup
 }
+
+// GuardDecision is the result of a Phase-4 guard Lookup for a suspicious endpoint.
+// Mapped means the target is (or was) an Echo-managed source that must be played via an
+// Echo stream token, never the transparent upstream fallback. HistoricalEvidence means the
+// decision rests on a prior emby_item_mappings record (a fail-closed signal only — it never
+// authorizes playback). Reason is a safe, non-sensitive label for logging.
+type GuardDecision struct {
+	Mapped             bool
+	HistoricalEvidence bool
+	Reason             string
+}
+
+// GuardLookup classifies a suspicious request as mapped (must not fall through) or not.
+type GuardLookup func(*http.Request) (GuardDecision, error)
 
 // PlaybackGuard inspects a request bound for the transparent upstream fallback and decides
 // whether it may proceed. Before the Phase 4 mapping guard exists, any request that looks
@@ -31,14 +47,41 @@ func NewPlaybackGuard(cfg GuardConfig) *PlaybackGuard {
 // Allow reports whether the request may proceed to the upstream fallback. When it denies,
 // it has already written the controlled 503 response and returns false. When it allows, it
 // returns true WITHOUT writing anything.
+//
+// Ordinary (non-suspicious) requests are always allowed regardless of phase. For a
+// suspicious request:
+//   - Phase 4 with a Lookup consults it: a Lookup error fails closed (we cannot prove the
+//     target is unmapped), a Mapped/HistoricalEvidence decision fails closed (a mapped
+//     source must reach upstream only via an Echo stream token), and only a clean unmapped
+//     decision is allowed through as genuinely upstream content Echo does not manage.
+//   - Otherwise (Phase 3, or Phase 4 without a Lookup) the guard keeps the fail-closed
+//     deny-all-suspicious posture.
 func (g *PlaybackGuard) Allow(r *http.Request, w http.ResponseWriter) bool {
-	// Phase < 3 has no fail-closed posture defined; treat it as a pass-through. Phase 3+
-	// (the only wiring we ship) is fail-closed for playback/stream-like requests.
-	if g.cfg.Phase >= 3 && g.suspicious(r) {
-		g.deny(w)
-		return false
+	// Ordinary API is never blocked, regardless of phase.
+	if !g.suspicious(r) {
+		return true
 	}
-	return true
+
+	// Phase 4 with a mapping-aware Lookup: deny only mapped (or historically mapped)
+	// targets; allow genuinely unmapped upstream content through.
+	if g.cfg.Phase >= 4 && g.cfg.Lookup != nil {
+		decision, err := g.cfg.Lookup(r)
+		if err != nil {
+			// Cannot prove the target is unmapped: fail closed.
+			g.deny(w)
+			return false
+		}
+		if decision.Mapped || decision.HistoricalEvidence {
+			// A mapped source must never reach upstream untokenized via the fallback.
+			g.deny(w)
+			return false
+		}
+		return true
+	}
+
+	// Phase 3 (or Phase 4 without a Lookup): fail closed for every suspicious request.
+	g.deny(w)
+	return false
 }
 
 // suspicious reports whether the request targets a media stream / download endpoint that

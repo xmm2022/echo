@@ -258,6 +258,23 @@ func (q *Queries) MarkLibraryEntryEchoWritten(ctx context.Context, arg MarkLibra
 	return err
 }
 
+const updateLibraryEntryBlobForTest = `-- name: UpdateLibraryEntryBlobForTest :exec
+UPDATE library_entries
+SET blob_id = ?, updated_at = ?
+WHERE id = ?
+`
+
+type UpdateLibraryEntryBlobForTestParams struct {
+	BlobID    int64 `json:"blob_id"`
+	UpdatedAt int64 `json:"updated_at"`
+	ID        int64 `json:"id"`
+}
+
+func (q *Queries) UpdateLibraryEntryBlobForTest(ctx context.Context, arg UpdateLibraryEntryBlobForTestParams) error {
+	_, err := q.db.ExecContext(ctx, updateLibraryEntryBlobForTest, arg.BlobID, arg.UpdatedAt, arg.ID)
+	return err
+}
+
 const upsertLibraryEntry = `-- name: UpsertLibraryEntry :one
 INSERT INTO library_entries (
   library_id, rel_path, name, blob_id, echo_written, created_at, updated_at
