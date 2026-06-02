@@ -47,6 +47,32 @@ UPDATE subscription_matches
 SET decision = ?, dispatch_state = ?, queued_job_id = ?, updated_at = ?
 WHERE id = ?;
 
+-- name: AdminAcceptSubscriptionMatch :one
+UPDATE subscription_matches
+SET decision = 'accept', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+WHERE id = ?
+  AND dispatch_state = 'none'
+  AND decision IN ('review','accept','queue')
+RETURNING *;
+
+-- name: AdminRejectSubscriptionMatch :one
+UPDATE subscription_matches
+SET decision = 'reject', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+WHERE id = ?
+  AND dispatch_state = 'none'
+  AND decision IN ('review','accept','queue','reject')
+RETURNING *;
+
+-- name: AdminRetrySubscriptionMatch :one
+UPDATE subscription_matches
+SET decision = 'queue', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+WHERE id = ?
+  AND (
+    dispatch_state = 'failed'
+    OR (dispatch_state = 'none' AND decision IN ('accept','queue'))
+  )
+RETURNING *;
+
 -- name: UpdateSubscriptionMatchResult :exec
 UPDATE subscription_matches
 SET decision = ?, dispatch_state = ?, result_library_entry_id = ?, result_blob_id = ?,

@@ -10,6 +10,146 @@ import (
 	"database/sql"
 )
 
+const adminAcceptSubscriptionMatch = `-- name: AdminAcceptSubscriptionMatch :one
+UPDATE subscription_matches
+SET decision = 'accept', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+WHERE id = ?
+  AND dispatch_state = 'none'
+  AND decision IN ('review','accept','queue')
+RETURNING id, subscription_id, resource_id, rule_profile_id, rule_profile_version, season_number, episode_start, episode_end, score_json, previous_score_json, decision, reason, dispatch_state, idempotency_key, queued_job_id, result_library_entry_id, result_blob_id, result_copy_id, failure_kind, failure_message, created_at, updated_at, decided_at, finished_at
+`
+
+type AdminAcceptSubscriptionMatchParams struct {
+	UpdatedAt int64 `json:"updated_at"`
+	ID        int64 `json:"id"`
+}
+
+func (q *Queries) AdminAcceptSubscriptionMatch(ctx context.Context, arg AdminAcceptSubscriptionMatchParams) (SubscriptionMatch, error) {
+	row := q.db.QueryRowContext(ctx, adminAcceptSubscriptionMatch, arg.UpdatedAt, arg.ID)
+	var i SubscriptionMatch
+	err := row.Scan(
+		&i.ID,
+		&i.SubscriptionID,
+		&i.ResourceID,
+		&i.RuleProfileID,
+		&i.RuleProfileVersion,
+		&i.SeasonNumber,
+		&i.EpisodeStart,
+		&i.EpisodeEnd,
+		&i.ScoreJson,
+		&i.PreviousScoreJson,
+		&i.Decision,
+		&i.Reason,
+		&i.DispatchState,
+		&i.IdempotencyKey,
+		&i.QueuedJobID,
+		&i.ResultLibraryEntryID,
+		&i.ResultBlobID,
+		&i.ResultCopyID,
+		&i.FailureKind,
+		&i.FailureMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DecidedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const adminRejectSubscriptionMatch = `-- name: AdminRejectSubscriptionMatch :one
+UPDATE subscription_matches
+SET decision = 'reject', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+WHERE id = ?
+  AND dispatch_state = 'none'
+  AND decision IN ('review','accept','queue','reject')
+RETURNING id, subscription_id, resource_id, rule_profile_id, rule_profile_version, season_number, episode_start, episode_end, score_json, previous_score_json, decision, reason, dispatch_state, idempotency_key, queued_job_id, result_library_entry_id, result_blob_id, result_copy_id, failure_kind, failure_message, created_at, updated_at, decided_at, finished_at
+`
+
+type AdminRejectSubscriptionMatchParams struct {
+	UpdatedAt int64 `json:"updated_at"`
+	ID        int64 `json:"id"`
+}
+
+func (q *Queries) AdminRejectSubscriptionMatch(ctx context.Context, arg AdminRejectSubscriptionMatchParams) (SubscriptionMatch, error) {
+	row := q.db.QueryRowContext(ctx, adminRejectSubscriptionMatch, arg.UpdatedAt, arg.ID)
+	var i SubscriptionMatch
+	err := row.Scan(
+		&i.ID,
+		&i.SubscriptionID,
+		&i.ResourceID,
+		&i.RuleProfileID,
+		&i.RuleProfileVersion,
+		&i.SeasonNumber,
+		&i.EpisodeStart,
+		&i.EpisodeEnd,
+		&i.ScoreJson,
+		&i.PreviousScoreJson,
+		&i.Decision,
+		&i.Reason,
+		&i.DispatchState,
+		&i.IdempotencyKey,
+		&i.QueuedJobID,
+		&i.ResultLibraryEntryID,
+		&i.ResultBlobID,
+		&i.ResultCopyID,
+		&i.FailureKind,
+		&i.FailureMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DecidedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const adminRetrySubscriptionMatch = `-- name: AdminRetrySubscriptionMatch :one
+UPDATE subscription_matches
+SET decision = 'queue', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+WHERE id = ?
+  AND (
+    dispatch_state = 'failed'
+    OR (dispatch_state = 'none' AND decision IN ('accept','queue'))
+  )
+RETURNING id, subscription_id, resource_id, rule_profile_id, rule_profile_version, season_number, episode_start, episode_end, score_json, previous_score_json, decision, reason, dispatch_state, idempotency_key, queued_job_id, result_library_entry_id, result_blob_id, result_copy_id, failure_kind, failure_message, created_at, updated_at, decided_at, finished_at
+`
+
+type AdminRetrySubscriptionMatchParams struct {
+	UpdatedAt int64 `json:"updated_at"`
+	ID        int64 `json:"id"`
+}
+
+func (q *Queries) AdminRetrySubscriptionMatch(ctx context.Context, arg AdminRetrySubscriptionMatchParams) (SubscriptionMatch, error) {
+	row := q.db.QueryRowContext(ctx, adminRetrySubscriptionMatch, arg.UpdatedAt, arg.ID)
+	var i SubscriptionMatch
+	err := row.Scan(
+		&i.ID,
+		&i.SubscriptionID,
+		&i.ResourceID,
+		&i.RuleProfileID,
+		&i.RuleProfileVersion,
+		&i.SeasonNumber,
+		&i.EpisodeStart,
+		&i.EpisodeEnd,
+		&i.ScoreJson,
+		&i.PreviousScoreJson,
+		&i.Decision,
+		&i.Reason,
+		&i.DispatchState,
+		&i.IdempotencyKey,
+		&i.QueuedJobID,
+		&i.ResultLibraryEntryID,
+		&i.ResultBlobID,
+		&i.ResultCopyID,
+		&i.FailureKind,
+		&i.FailureMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DecidedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const createSubscriptionMatch = `-- name: CreateSubscriptionMatch :one
 INSERT INTO subscription_matches (
   subscription_id, resource_id, rule_profile_id, rule_profile_version,
