@@ -1,0 +1,195 @@
+package templates
+
+import (
+	"strconv"
+
+	"github.com/xmm2022/echo/internal/store/queries"
+)
+
+templ DiscoveryPanels() {
+	<section>
+		<h2>Discovery subscriptions</h2>
+		<div data-reload="true" hx-get="/ui/discovery/subscriptions" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+	<section>
+		<h2>Discovery sources</h2>
+		<div data-reload="true" hx-get="/ui/discovery/sources" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+	<section>
+		<h2>Producer profiles</h2>
+		<div data-reload="true" hx-get="/ui/discovery/producer-profiles" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+	<section>
+		<h2>Rule profiles</h2>
+		<div data-reload="true" hx-get="/ui/discovery/rule-profiles" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+	<section>
+		<h2>Discovery candidates</h2>
+		<div data-reload="true" hx-get="/ui/discovery/candidates" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+	<section>
+		<h2>Discovery matches</h2>
+		<div data-reload="true" hx-get="/ui/discovery/matches" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+	<section>
+		<h2>Discovery runs</h2>
+		<div data-reload="true" hx-get="/ui/discovery/runs" hx-trigger="load, reload" hx-target="this">Loading</div>
+	</section>
+}
+
+templ DiscoverySubscriptionsTable(rows []queries.DiscoverySubscription) {
+	if len(rows) == 0 {
+		<p>No discovery subscriptions.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Owner</th><th>Title</th><th>TMDB</th><th>Media</th><th>Status</th><th>Next check</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.OwnerID }</td>
+						<td>{ row.TitleSnapshot }</td>
+						<td>{ row.TmdbID }</td>
+						<td>{ row.MediaType }</td>
+						<td>{ row.Status }</td>
+						<td>{ nullInt(row.NextCheckAt) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ DiscoverySourcesTable(rows []queries.DiscoverySource) {
+	if len(rows) == 0 {
+		<p>No discovery sources.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Kind</th><th>Name</th><th>Enabled</th><th>State</th><th>Next run</th><th>Last error</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Kind }</td>
+						<td>{ row.Name }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+						<td>{ row.SchedulerState }</td>
+						<td>{ nullInt(row.NextRunAt) }</td>
+						<td>{ nullStr(row.LastErrorKind) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ DiscoveryProducerProfilesTable(rows []queries.DiscoveryProducerProfile) {
+	if len(rows) == 0 {
+		<p>No producer profiles.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Name</th><th>Provider</th><th>Tool</th><th>Target account</th><th>Enabled</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Name }</td>
+						<td>{ row.Provider }</td>
+						<td>{ row.Tool }</td>
+						<td>{ row.TargetAccount }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ DiscoveryRuleProfilesTable(rows []queries.RuleProfile) {
+	if len(rows) == 0 {
+		<p>No rule profiles.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Name</th><th>Version</th><th>Enabled</th><th>Updated</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Name }</td>
+						<td>{ strconv.FormatInt(row.Version, 10) }</td>
+						<td>{ strconv.FormatInt(row.Enabled, 10) }</td>
+						<td>{ strconv.FormatInt(row.UpdatedAt, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ DiscoveryCandidatesTable(rows []queries.ListDiscoveredResourcesRedactedRow) {
+	if len(rows) == 0 {
+		<p>No discovery candidates.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Source</th><th>Provider</th><th>Title</th><th>TMDB</th><th>Status</th><th>Last seen</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ strconv.FormatInt(row.SourceID, 10) }</td>
+						<td>{ row.Provider }</td>
+						<td>{ nullStr(row.Title) }</td>
+						<td>{ nullStr(row.TmdbID) }</td>
+						<td>{ row.Status }</td>
+						<td>{ strconv.FormatInt(row.LastSeenAt, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ DiscoveryMatchesTable(rows []queries.SubscriptionMatch) {
+	if len(rows) == 0 {
+		<p>No discovery matches.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Subscription</th><th>Resource</th><th>Decision</th><th>Dispatch</th><th>Updated</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ strconv.FormatInt(row.SubscriptionID, 10) }</td>
+						<td>{ strconv.FormatInt(row.ResourceID, 10) }</td>
+						<td>{ row.Decision }</td>
+						<td>{ row.DispatchState }</td>
+						<td>{ strconv.FormatInt(row.UpdatedAt, 10) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ DiscoveryRunsTable(rows []queries.DiscoveryRun) {
+	if len(rows) == 0 {
+		<p>No discovery runs.</p>
+	} else {
+		<table>
+			<thead><tr><th>ID</th><th>Kind</th><th>Status</th><th>Source</th><th>Subscription</th><th>Created</th><th>Error</th></tr></thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Kind }</td>
+						<td>{ row.Status }</td>
+						<td>{ nullInt(row.SourceID) }</td>
+						<td>{ nullInt(row.SubscriptionID) }</td>
+						<td>{ strconv.FormatInt(row.CreatedAt, 10) }</td>
+						<td>{ nullStr(row.ErrorKind) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}

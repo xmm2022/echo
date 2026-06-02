@@ -68,6 +68,13 @@ func (d Deps) MountUI(r chi.Router) {
 		r.Get("/ui/quota/usage", d.UIQuotaUsage)
 		r.Get("/ui/playback/sessions", d.UIPlaybackSessions)
 		r.Get("/ui/playback/events", d.UIPlaybackEvents)
+		r.Get("/ui/discovery/subscriptions", d.UIDiscoverySubscriptions)
+		r.Get("/ui/discovery/sources", d.UIDiscoverySources)
+		r.Get("/ui/discovery/producer-profiles", d.UIDiscoveryProducerProfiles)
+		r.Get("/ui/discovery/rule-profiles", d.UIDiscoveryRuleProfiles)
+		r.Get("/ui/discovery/candidates", d.UIDiscoveryCandidates)
+		r.Get("/ui/discovery/matches", d.UIDiscoveryMatches)
+		r.Get("/ui/discovery/runs", d.UIDiscoveryRuns)
 	})
 }
 
@@ -79,6 +86,15 @@ func requireAdmin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func requireAdminFragment(w http.ResponseWriter, r *http.Request) bool {
+	user := auth.FromContext(r.Context())
+	if !user.HasScope("admin") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // UIJobs serves GET /ui/jobs — the recent-jobs HTML fragment.
@@ -246,6 +262,118 @@ func (d Deps) UIPlaybackEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.PlaybackEventsTable(rows).Render(r.Context(), w); err != nil {
 		d.logger().Error("web: render playback events", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoverySubscriptions(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListDiscoverySubscriptions(r.Context(), queries.ListDiscoverySubscriptionsParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery subscriptions", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoverySubscriptionsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery subscriptions", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoverySources(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListDiscoverySources(r.Context(), queries.ListDiscoverySourcesParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery sources", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoverySourcesTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery sources", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoveryProducerProfiles(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListDiscoveryProducerProfiles(r.Context(), queries.ListDiscoveryProducerProfilesParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery producer profiles", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoveryProducerProfilesTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery producer profiles", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoveryRuleProfiles(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListRuleProfiles(r.Context(), queries.ListRuleProfilesParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery rule profiles", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoveryRuleProfilesTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery rule profiles", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoveryCandidates(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListDiscoveredResourcesRedacted(r.Context(), queries.ListDiscoveredResourcesRedactedParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery candidates", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoveryCandidatesTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery candidates", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoveryMatches(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListSubscriptionMatchesForAdmin(r.Context(), queries.ListSubscriptionMatchesForAdminParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery matches", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoveryMatchesTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery matches", "err", err)
+	}
+}
+
+func (d Deps) UIDiscoveryRuns(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminFragment(w, r) {
+		return
+	}
+	rows, err := d.Store.ListDiscoveryRuns(r.Context(), queries.ListDiscoveryRunsParams{Limit: dashboardManagementLimit, Offset: 0})
+	if err != nil {
+		d.logger().Error("web: list discovery runs", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.DiscoveryRunsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render discovery runs", "err", err)
 	}
 }
 
