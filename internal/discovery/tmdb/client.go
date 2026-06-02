@@ -110,11 +110,19 @@ func NewClient(cfg Config, cache Cache) *Client {
 }
 
 func (c *Client) MovieDetails(ctx context.Context, tmdbID string) (Media, error) {
-	return c.details(ctx, mediaTypeMovie, tmdbID)
+	return c.details(ctx, mediaTypeMovie, tmdbID, true, true)
 }
 
 func (c *Client) TVDetails(ctx context.Context, tmdbID string) (Media, error) {
-	return c.details(ctx, mediaTypeTV, tmdbID)
+	return c.details(ctx, mediaTypeTV, tmdbID, true, true)
+}
+
+func (c *Client) MovieDetailsFresh(ctx context.Context, tmdbID string) (Media, error) {
+	return c.details(ctx, mediaTypeMovie, tmdbID, false, false)
+}
+
+func (c *Client) TVDetailsFresh(ctx context.Context, tmdbID string) (Media, error) {
+	return c.details(ctx, mediaTypeTV, tmdbID, false, false)
 }
 
 func (c *Client) Search(ctx context.Context, query, mediaType string) ([]Media, error) {
@@ -148,7 +156,7 @@ func (c *Client) Search(ctx context.Context, query, mediaType string) ([]Media, 
 	return results, nil
 }
 
-func (c *Client) details(ctx context.Context, mediaType, tmdbID string) (Media, error) {
+func (c *Client) details(ctx context.Context, mediaType, tmdbID string, readFreshCache bool, allowStaleFallback bool) (Media, error) {
 	tmdbID = strings.TrimSpace(tmdbID)
 	if tmdbID == "" {
 		return Media{}, errors.New("tmdb id is required")
@@ -159,7 +167,7 @@ func (c *Client) details(ctx context.Context, mediaType, tmdbID string) (Media, 
 	now := time.Now()
 	baseKey := cacheKey(mediaType, tmdbID)
 	key := cacheKeyForLanguage(c.cfg.Language, mediaType, tmdbID)
-	if c.cache != nil {
+	if readFreshCache && c.cache != nil {
 		media, ok, err := c.cache.Get(ctx, key, now)
 		if err != nil {
 			return Media{}, fmt.Errorf("get tmdb cache %s: %w", key, err)
@@ -170,7 +178,7 @@ func (c *Client) details(ctx context.Context, mediaType, tmdbID string) (Media, 
 	}
 	body, err := c.get(ctx, fmt.Sprintf("/%s/%s", mediaType, url.PathEscape(tmdbID)), nil)
 	if err != nil {
-		if isRetryableKind(ErrorKindOf(err)) {
+		if allowStaleFallback && isRetryableKind(ErrorKindOf(err)) {
 			if stale, ok, staleErr := c.getStale(ctx, key); staleErr != nil {
 				return Media{}, fmt.Errorf("get stale tmdb cache %s: %w", key, staleErr)
 			} else if ok {

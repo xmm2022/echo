@@ -70,7 +70,7 @@ func (a *Adapter) CrawlURL(ctx context.Context, rawURL string) ([]Resource, erro
 
 func (a *Adapter) Crawl(ctx context.Context, source discovery.Source) (discovery.SourceCrawlResult, error) {
 	var cfg crawlConfig
-	if err := json.Unmarshal([]byte(source.ConfigJson), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(source.ConfigText()), &cfg); err != nil {
 		return discovery.SourceCrawlResult{}, fmt.Errorf("poster crawl: parse source config: %w", err)
 	}
 	out := discovery.SourceCrawlResult{}

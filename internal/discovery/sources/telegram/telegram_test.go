@@ -87,6 +87,24 @@ func TestCrawlConvertsConfigAndRedactsParsedJSON(t *testing.T) {
 	}
 }
 
+func TestCrawlReturnsTelegramCursorUpdates(t *testing.T) {
+	client := &FakeClient{Messages: []Message{{ID: 10, Date: 100, Text: "Movie https://115.com/s/abc?password=pass"}}}
+	source := discovery.Source{
+		ConfigJSON: `{"channels":[{"ref":"@test","session_ref":"ref:session.json","last_message_id":9,"last_message_date":90}]}`,
+	}
+	result, err := NewAdapter(client).Crawl(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.TelegramCursors) != 1 {
+		t.Fatalf("telegram cursors = %#v, want one update", result.TelegramCursors)
+	}
+	got := result.TelegramCursors[0]
+	if got.ChannelRef != "@test" || got.LastMessageID != 10 || got.LastMessageDate != 100 {
+		t.Fatalf("telegram cursor = %#v, want @test id=10 date=100", got)
+	}
+}
+
 func TestExternalKeyUsesLinkIndexWithoutShareCode(t *testing.T) {
 	client := &FakeClient{Messages: []Message{{ID: 10, Text: "Links https://115.com/s/abc?pwd=one https://115.com/s/def?pwd=two"}}}
 	items, _, err := NewAdapter(client).CrawlChannel(context.Background(), Channel{Ref: "test", SessionRef: "ref:session.json"})

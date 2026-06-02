@@ -112,13 +112,13 @@ func (a *Adapter) CrawlChannel(ctx context.Context, ch Channel) ([]Resource, Cur
 
 func (a *Adapter) Crawl(ctx context.Context, source discovery.Source) (discovery.SourceCrawlResult, error) {
 	var cfg crawlConfig
-	if err := json.Unmarshal([]byte(source.ConfigJson), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(source.ConfigText()), &cfg); err != nil {
 		return discovery.SourceCrawlResult{}, fmt.Errorf("telegram crawl: parse source config: %w", err)
 	}
 
 	out := discovery.SourceCrawlResult{}
 	for _, configured := range cfg.Channels {
-		resources, _, err := a.CrawlChannel(ctx, Channel{
+		resources, next, err := a.CrawlChannel(ctx, Channel{
 			Ref:        configured.Ref,
 			SessionRef: configured.SessionRef,
 			Cursor: Cursor{
@@ -132,6 +132,11 @@ func (a *Adapter) Crawl(ctx context.Context, source discovery.Source) (discovery
 		for _, resource := range resources {
 			out.Items = append(out.Items, toParsedResource(resource, configured.Ref))
 		}
+		out.TelegramCursors = append(out.TelegramCursors, discovery.TelegramCursorUpdate{
+			ChannelRef:      configured.Ref,
+			LastMessageID:   next.LastMessageID,
+			LastMessageDate: next.LastMessageDate,
+		})
 	}
 	return out, nil
 }

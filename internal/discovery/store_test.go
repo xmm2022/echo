@@ -98,3 +98,17 @@ func TestAcceptMatchRejectsLifecycleStatesFacadeCannotCreate(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateTelegramCursorMissingChannelReturnsError(t *testing.T) {
+	st := openDiscoveryTestStore(t)
+	ds := NewStore(st)
+	sourceID := seedDiscoverySource(t, st, string(SourceTelegramMTProto))
+	err := ds.UpdateTelegramCursor(context.Background(), sourceID, TelegramCursorUpdate{
+		ChannelRef:      "missing",
+		LastMessageID:   10,
+		LastMessageDate: 100,
+	}, time.Unix(100, 0))
+	if err == nil {
+		t.Fatal("expected missing channel cursor error")
+	}
+}
