@@ -89,6 +89,113 @@ type CopyFailure struct {
 	RequestID     sql.NullString `json:"request_id"`
 }
 
+type DiscoveredResource struct {
+	ID               int64          `json:"id"`
+	SourceID         int64          `json:"source_id"`
+	Provider         string         `json:"provider"`
+	LinkKind         string         `json:"link_kind"`
+	ExternalKey      string         `json:"external_key"`
+	TmdbID           sql.NullString `json:"tmdb_id"`
+	MediaType        sql.NullString `json:"media_type"`
+	Title            sql.NullString `json:"title"`
+	SeasonNumber     sql.NullInt64  `json:"season_number"`
+	EpisodeStart     sql.NullInt64  `json:"episode_start"`
+	EpisodeEnd       sql.NullInt64  `json:"episode_end"`
+	ShareCode        sql.NullString `json:"share_code"`
+	ReceiveCode      sql.NullString `json:"receive_code"`
+	ShareUrlRedacted sql.NullString `json:"share_url_redacted"`
+	RawTextRedacted  sql.NullString `json:"raw_text_redacted"`
+	RawTextRef       sql.NullString `json:"raw_text_ref"`
+	ParsedJson       string         `json:"parsed_json"`
+	FeatureJson      string         `json:"feature_json"`
+	Status           string         `json:"status"`
+	FirstSeenAt      int64          `json:"first_seen_at"`
+	LastSeenAt       int64          `json:"last_seen_at"`
+}
+
+type DiscoveryProducerProfile struct {
+	ID                     int64  `json:"id"`
+	Name                   string `json:"name"`
+	Provider               string `json:"provider"`
+	Tool                   string `json:"tool"`
+	TargetAccount          string `json:"target_account"`
+	TargetSubdirTemplate   string `json:"target_subdir_template"`
+	LibraryRelPathTemplate string `json:"library_rel_path_template"`
+	DefaultArgsJson        string `json:"default_args_json"`
+	Enabled                int64  `json:"enabled"`
+	CreatedAt              int64  `json:"created_at"`
+	UpdatedAt              int64  `json:"updated_at"`
+}
+
+type DiscoveryRawAccessEvent struct {
+	ID            int64          `json:"id"`
+	ResourceID    int64          `json:"resource_id"`
+	ActorUserID   string         `json:"actor_user_id"`
+	RequestID     sql.NullString `json:"request_id"`
+	ResponseBytes int64          `json:"response_bytes"`
+	Redacted      int64          `json:"redacted"`
+	AccessedAt    int64          `json:"accessed_at"`
+}
+
+type DiscoveryRun struct {
+	ID             int64          `json:"id"`
+	Kind           string         `json:"kind"`
+	SourceID       sql.NullInt64  `json:"source_id"`
+	SubscriptionID sql.NullInt64  `json:"subscription_id"`
+	JobID          sql.NullInt64  `json:"job_id"`
+	Status         string         `json:"status"`
+	CountersJson   string         `json:"counters_json"`
+	ErrorKind      sql.NullString `json:"error_kind"`
+	ErrorMessage   sql.NullString `json:"error_message"`
+	StartedAt      sql.NullInt64  `json:"started_at"`
+	FinishedAt     sql.NullInt64  `json:"finished_at"`
+	CreatedAt      int64          `json:"created_at"`
+}
+
+type DiscoverySource struct {
+	ID               int64          `json:"id"`
+	Kind             string         `json:"kind"`
+	Name             string         `json:"name"`
+	Enabled          int64          `json:"enabled"`
+	ConfigJson       string         `json:"config_json"`
+	SecretRef        sql.NullString `json:"secret_ref"`
+	RateLimitJson    sql.NullString `json:"rate_limit_json"`
+	SchedulerState   string         `json:"scheduler_state"`
+	NextRunAt        sql.NullInt64  `json:"next_run_at"`
+	LockedUntil      sql.NullInt64  `json:"locked_until"`
+	BackoffUntil     sql.NullInt64  `json:"backoff_until"`
+	FailureCount     int64          `json:"failure_count"`
+	LastSuccessAt    sql.NullInt64  `json:"last_success_at"`
+	LastErrorKind    sql.NullString `json:"last_error_kind"`
+	LastErrorMessage sql.NullString `json:"last_error_message"`
+	CreatedAt        int64          `json:"created_at"`
+	UpdatedAt        int64          `json:"updated_at"`
+}
+
+type DiscoverySubscription struct {
+	ID                   int64          `json:"id"`
+	OwnerID              string         `json:"owner_id"`
+	TmdbID               string         `json:"tmdb_id"`
+	MediaType            string         `json:"media_type"`
+	TmdbLanguage         string         `json:"tmdb_language"`
+	TitleSnapshot        string         `json:"title_snapshot"`
+	LibraryID            int64          `json:"library_id"`
+	ProducerProfileID    int64          `json:"producer_profile_id"`
+	RuleProfileID        int64          `json:"rule_profile_id"`
+	Status               string         `json:"status"`
+	SeasonFilterJson     sql.NullString `json:"season_filter_json"`
+	CurrentBestMatchID   sql.NullInt64  `json:"current_best_match_id"`
+	CurrentBestScoreJson sql.NullString `json:"current_best_score_json"`
+	NextCheckAt          sql.NullInt64  `json:"next_check_at"`
+	LockedUntil          sql.NullInt64  `json:"locked_until"`
+	LastCheckedAt        sql.NullInt64  `json:"last_checked_at"`
+	FailureCount         int64          `json:"failure_count"`
+	LastErrorKind        sql.NullString `json:"last_error_kind"`
+	LastErrorMessage     sql.NullString `json:"last_error_message"`
+	CreatedAt            int64          `json:"created_at"`
+	UpdatedAt            int64          `json:"updated_at"`
+}
+
 type EmbyItemMapping struct {
 	ID                    int64          `json:"id"`
 	EmbyServerID          string         `json:"emby_server_id"`
@@ -320,6 +427,81 @@ type QuotaUsage struct {
 	BytesUsed     int64  `json:"bytes_used"`
 	StreamCount   int64  `json:"stream_count"`
 	UpdatedAt     int64  `json:"updated_at"`
+}
+
+type RuleProfile struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Version   int64  `json:"version"`
+	RulesJson string `json:"rules_json"`
+	Enabled   int64  `json:"enabled"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+type SubscriptionMatch struct {
+	ID                   int64          `json:"id"`
+	SubscriptionID       int64          `json:"subscription_id"`
+	ResourceID           int64          `json:"resource_id"`
+	RuleProfileID        int64          `json:"rule_profile_id"`
+	RuleProfileVersion   int64          `json:"rule_profile_version"`
+	SeasonNumber         sql.NullInt64  `json:"season_number"`
+	EpisodeStart         sql.NullInt64  `json:"episode_start"`
+	EpisodeEnd           sql.NullInt64  `json:"episode_end"`
+	ScoreJson            string         `json:"score_json"`
+	PreviousScoreJson    sql.NullString `json:"previous_score_json"`
+	Decision             string         `json:"decision"`
+	Reason               string         `json:"reason"`
+	DispatchState        string         `json:"dispatch_state"`
+	IdempotencyKey       string         `json:"idempotency_key"`
+	QueuedJobID          sql.NullInt64  `json:"queued_job_id"`
+	ResultLibraryEntryID sql.NullInt64  `json:"result_library_entry_id"`
+	ResultBlobID         sql.NullInt64  `json:"result_blob_id"`
+	ResultCopyID         sql.NullInt64  `json:"result_copy_id"`
+	FailureKind          sql.NullString `json:"failure_kind"`
+	FailureMessage       sql.NullString `json:"failure_message"`
+	CreatedAt            int64          `json:"created_at"`
+	UpdatedAt            int64          `json:"updated_at"`
+	DecidedAt            sql.NullInt64  `json:"decided_at"`
+	FinishedAt           sql.NullInt64  `json:"finished_at"`
+}
+
+type TelegramChannel struct {
+	ID               int64          `json:"id"`
+	SourceID         int64          `json:"source_id"`
+	ChannelRef       string         `json:"channel_ref"`
+	StablePeerID     sql.NullString `json:"stable_peer_id"`
+	UsernameSnapshot sql.NullString `json:"username_snapshot"`
+	TitleSnapshot    sql.NullString `json:"title_snapshot"`
+	LevelFlags       int64          `json:"level_flags"`
+	Enabled          int64          `json:"enabled"`
+	LastMessageID    sql.NullInt64  `json:"last_message_id"`
+	LastMessageDate  sql.NullInt64  `json:"last_message_date"`
+	NextRunAt        sql.NullInt64  `json:"next_run_at"`
+	LockedUntil      sql.NullInt64  `json:"locked_until"`
+	BackoffUntil     sql.NullInt64  `json:"backoff_until"`
+	FailureCount     int64          `json:"failure_count"`
+	LastErrorKind    sql.NullString `json:"last_error_kind"`
+	LastErrorMessage sql.NullString `json:"last_error_message"`
+	CreatedAt        int64          `json:"created_at"`
+	UpdatedAt        int64          `json:"updated_at"`
+}
+
+type TmdbMedium struct {
+	ID               int64          `json:"id"`
+	TmdbID           string         `json:"tmdb_id"`
+	MediaType        string         `json:"media_type"`
+	Language         string         `json:"language"`
+	Title            string         `json:"title"`
+	OriginalTitle    sql.NullString `json:"original_title"`
+	ReleaseYear      sql.NullInt64  `json:"release_year"`
+	PosterPath       sql.NullString `json:"poster_path"`
+	Status           sql.NullString `json:"status"`
+	RawJson          string         `json:"raw_json"`
+	FetchedAt        int64          `json:"fetched_at"`
+	NextRefreshAt    int64          `json:"next_refresh_at"`
+	LastErrorKind    sql.NullString `json:"last_error_kind"`
+	LastErrorMessage sql.NullString `json:"last_error_message"`
 }
 
 type User struct {

@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS discovery_raw_access_events;
+DROP TABLE IF EXISTS discovery_runs;
+DROP TABLE IF EXISTS subscription_matches;
+DROP TABLE IF EXISTS discovered_resources;
+DROP TABLE IF EXISTS discovery_subscriptions;
+DROP TABLE IF EXISTS rule_profiles;
+DROP TABLE IF EXISTS discovery_producer_profiles;
+DROP INDEX IF EXISTS idx_accounts_id_provider;
+DROP TABLE IF EXISTS telegram_channels;
+DROP TABLE IF EXISTS discovery_sources;
+DROP TABLE IF EXISTS tmdb_media;
