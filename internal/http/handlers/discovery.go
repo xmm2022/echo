@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -82,8 +81,8 @@ func (d APIDeps) CreateDiscoverySubscription(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	req.normalize(user.UserID)
-	if req.TMDBID == "" || !validDiscoveryMediaType(req.MediaType) {
-		writeAPIError(w, http.StatusBadRequest, "invalid tmdb subscription")
+	if err := validateDiscoverySubscriptionRequest(req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if d.DiscoveryTMDB == nil {
@@ -138,8 +137,13 @@ func (d APIDeps) UpdateDiscoverySubscription(w http.ResponseWriter, r *http.Requ
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.Status = strings.TrimSpace(req.Status)
 	if req.Status == "" {
 		req.Status = "active"
+	}
+	if err := validateDiscoverySubscriptionUpdateRequest(req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	row, err := d.Store.UpdateDiscoverySubscription(r.Context(), queries.UpdateDiscoverySubscriptionParams{
 		LibraryID:         req.LibraryID,
@@ -209,6 +213,10 @@ func (d APIDeps) CreateDiscoverySource(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if err := validateDiscoverySourceRequest(req, true); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	now := d.now().Unix()
 	row, err := d.Store.CreateDiscoverySource(r.Context(), queries.CreateDiscoverySourceParams{
 		Kind:          strings.TrimSpace(req.Kind),
@@ -238,6 +246,10 @@ func (d APIDeps) UpdateDiscoverySource(w http.ResponseWriter, r *http.Request) {
 	}
 	var req discoverySourceRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := validateDiscoverySourceRequest(req, false); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	row, err := d.Store.UpdateDiscoverySource(r.Context(), queries.UpdateDiscoverySourceParams{
@@ -285,6 +297,10 @@ func (d APIDeps) CreateDiscoveryProducerProfile(w http.ResponseWriter, r *http.R
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if err := validateDiscoveryProducerProfileRequest(req, true); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	now := d.now().Unix()
 	row, err := d.Store.CreateDiscoveryProducerProfile(r.Context(), queries.CreateDiscoveryProducerProfileParams{
 		Name:                   strings.TrimSpace(req.Name),
@@ -315,6 +331,10 @@ func (d APIDeps) UpdateDiscoveryProducerProfile(w http.ResponseWriter, r *http.R
 	}
 	var req producerProfileRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := validateDiscoveryProducerProfileRequest(req, false); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	row, err := d.Store.UpdateDiscoveryProducerProfile(r.Context(), queries.UpdateDiscoveryProducerProfileParams{
@@ -487,14 +507,7 @@ func (d APIDeps) AcceptDiscoveryMatch(w http.ResponseWriter, r *http.Request) {
 	if !ok || !d.requireDiscoveryStore(w) || !d.requireDiscoveryJobs(w) {
 		return
 	}
-	now := d.now().Unix()
-	if err := d.Store.UpdateSubscriptionMatchDispatch(r.Context(), queries.UpdateSubscriptionMatchDispatchParams{
-		Decision:      "accept",
-		DispatchState: "none",
-		QueuedJobID:   sql.NullInt64{},
-		UpdatedAt:     now,
-		ID:            id,
-	}); err != nil {
+	if err := discovery.NewStore(d.Store).AdminAcceptMatch(r.Context(), id, d.now()); err != nil {
 		d.writeDiscoveryError(w, "accept discovery match", err)
 		return
 	}
@@ -514,24 +527,8 @@ func (d APIDeps) RejectDiscoveryMatch(w http.ResponseWriter, r *http.Request) {
 	if !ok || !d.requireDiscoveryStore(w) {
 		return
 	}
-	match, err := d.Store.GetSubscriptionMatch(r.Context(), queries.GetSubscriptionMatchParams{ID: id})
-	if err != nil {
-		d.writeDiscoveryError(w, "get discovery match", err)
-		return
-	}
-	now := d.now().Unix()
-	if err := d.Store.UpdateSubscriptionMatchDispatch(r.Context(), queries.UpdateSubscriptionMatchDispatchParams{
-		Decision:      "reject",
-		DispatchState: "none",
-		QueuedJobID:   sql.NullInt64{},
-		UpdatedAt:     now,
-		ID:            id,
-	}); err != nil {
+	if err := discovery.NewStore(d.Store).AdminRejectMatch(r.Context(), id, d.now()); err != nil {
 		d.writeDiscoveryError(w, "reject discovery match", err)
-		return
-	}
-	if err := discovery.NewStore(d.Store).MarkDiscoveredResourceStatus(r.Context(), match.ResourceID, "rejected", d.now()); err != nil {
-		d.writeDiscoveryError(w, "reject discovery resource", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -545,13 +542,7 @@ func (d APIDeps) RetryDiscoveryMatch(w http.ResponseWriter, r *http.Request) {
 	if !ok || !d.requireDiscoveryStore(w) || !d.requireDiscoveryJobs(w) {
 		return
 	}
-	if err := d.Store.UpdateSubscriptionMatchDispatch(r.Context(), queries.UpdateSubscriptionMatchDispatchParams{
-		Decision:      "queue",
-		DispatchState: "none",
-		QueuedJobID:   sql.NullInt64{},
-		UpdatedAt:     d.now().Unix(),
-		ID:            id,
-	}); err != nil {
+	if err := discovery.NewStore(d.Store).AdminRetryMatch(r.Context(), id, d.now()); err != nil {
 		d.writeDiscoveryError(w, "retry discovery match", err)
 		return
 	}
@@ -629,7 +620,7 @@ func (d APIDeps) GetDiscoveryRawResource(w http.ResponseWriter, r *http.Request)
 		d.writeDiscoveryError(w, "load discovery raw resource", err)
 		return
 	}
-	redacted := capDiscoveryString(redactDiscoveryRawBody(string(body)), maxBytes)
+	redacted := discovery.RedactRawTextForDebug(string(body), maxBytes)
 	if err := d.Store.CreateDiscoveryRawAccessEvent(r.Context(), queries.CreateDiscoveryRawAccessEventParams{
 		ResourceID:    id,
 		ActorUserID:   user.UserID,
@@ -794,12 +785,129 @@ func (d APIDeps) writeDiscoveryError(w http.ResponseWriter, label string, err er
 		writeAPIError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if errors.Is(err, discovery.ErrAdminMatchNotFound) {
+		writeAPIError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if errors.Is(err, discovery.ErrInvalidAdminMatchTransition) {
+		writeAPIError(w, http.StatusConflict, "invalid match transition")
+		return
+	}
+	if isDiscoveryValidationError(err) {
+		writeAPIError(w, http.StatusBadRequest, "invalid discovery input")
+		return
+	}
 	d.logger().Error("discovery api: "+label, "err", err)
 	writeAPIError(w, http.StatusInternalServerError, "internal error")
 }
 
 func validDiscoveryMediaType(value string) bool {
 	return value == "movie" || value == "tv"
+}
+
+func validateDiscoverySubscriptionRequest(req discoverySubscriptionRequest) error {
+	if req.TMDBID == "" || !validDiscoveryMediaType(req.MediaType) {
+		return errors.New("invalid tmdb subscription")
+	}
+	if !validDiscoverySubscriptionStatus(req.Status) {
+		return errors.New("invalid subscription status")
+	}
+	if req.LibraryID <= 0 || req.ProducerProfileID <= 0 || req.RuleProfileID <= 0 {
+		return errors.New("invalid subscription references")
+	}
+	if err := validateOptionalJSONObject(req.SeasonFilterJSON, "season_filter_json"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDiscoverySubscriptionUpdateRequest(req discoverySubscriptionUpdateRequest) error {
+	if !validDiscoverySubscriptionStatus(req.Status) {
+		return errors.New("invalid subscription status")
+	}
+	if req.LibraryID <= 0 || req.ProducerProfileID <= 0 || req.RuleProfileID <= 0 {
+		return errors.New("invalid subscription references")
+	}
+	if err := validateOptionalJSONObject(req.SeasonFilterJSON, "season_filter_json"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDiscoverySourceRequest(req discoverySourceRequest, create bool) error {
+	if create && !validDiscoverySourceKind(strings.TrimSpace(req.Kind)) {
+		return errors.New("invalid source kind")
+	}
+	if !create && strings.TrimSpace(req.Kind) != "" && !validDiscoverySourceKind(strings.TrimSpace(req.Kind)) {
+		return errors.New("invalid source kind")
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return errors.New("source name is required")
+	}
+	if err := validateJSONObject(defaultJSON(req.ConfigJSON), "config_json"); err != nil {
+		return err
+	}
+	if err := validateOptionalJSONObject(req.RateLimitJSON, "rate_limit_json"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDiscoveryProducerProfileRequest(req producerProfileRequest, create bool) error {
+	if strings.TrimSpace(req.Name) == "" {
+		return errors.New("producer profile name is required")
+	}
+	if create && strings.TrimSpace(req.Provider) != "115" {
+		return errors.New("invalid producer provider")
+	}
+	if create && strings.TrimSpace(req.Tool) != "115share2cas" {
+		return errors.New("invalid producer tool")
+	}
+	if strings.TrimSpace(req.TargetAccount) == "" {
+		return errors.New("target_account is required")
+	}
+	return validateJSONObject(defaultJSON(req.DefaultArgsJSON), "default_args_json")
+}
+
+func validDiscoverySourceKind(value string) bool {
+	switch value {
+	case "telegram_mtproto", "poster_http", "manual":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiscoverySubscriptionStatus(value string) bool {
+	switch value {
+	case "active", "paused", "completed", "disabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateOptionalJSONObject(value, field string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return validateJSONObject(value, field)
+}
+
+func validateJSONObject(value, field string) error {
+	var decoded any
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return errors.New("invalid " + field)
+	}
+	if _, ok := decoded.(map[string]any); !ok {
+		return errors.New("invalid " + field)
+	}
+	return nil
+}
+
+func isDiscoveryValidationError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "constraint failed") || strings.Contains(msg, "constraint violation")
 }
 
 func defaultJSON(value string) string {
@@ -831,86 +939,4 @@ func nullDiscoveryInt64FromInt(value int) sql.NullInt64 {
 
 func strconvInt(value int) string {
 	return strconv.FormatInt(int64(value), 10)
-}
-
-func redactDiscoveryRawBody(value string) string {
-	var decoded any
-	if err := json.Unmarshal([]byte(value), &decoded); err == nil {
-		body, err := json.Marshal(redactDiscoveryRawJSON(decoded))
-		if err == nil {
-			return string(body)
-		}
-	}
-	out := value
-	for _, key := range []string{"receive_code", "receiveCode", "share_code", "shareCode", "password", "pwd", "api_key", "apiKey", "api_hash", "apiHash", "tmdb_key", "tmdbKey"} {
-		out = redactDiscoveryKey(out, key)
-	}
-	return out
-}
-
-func redactDiscoveryRawJSON(value any) any {
-	switch v := value.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for key, child := range v {
-			if discoverySensitiveKey(key) {
-				out[key] = "[REDACTED]"
-				continue
-			}
-			out[key] = redactDiscoveryRawJSON(child)
-		}
-		return out
-	case []any:
-		out := make([]any, 0, len(v))
-		for _, child := range v {
-			out = append(out, redactDiscoveryRawJSON(child))
-		}
-		return out
-	default:
-		return value
-	}
-}
-
-func discoverySensitiveKey(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "receive_code", "receivecode", "share_code", "sharecode", "share_password", "sharepassword", "password", "pwd", "api_key", "apikey", "api_hash", "apihash", "tmdb_key", "tmdbkey", "session_ref", "sessionref", "session_path", "sessionpath":
-		return true
-	default:
-		return false
-	}
-}
-
-func redactDiscoveryKey(value, key string) string {
-	idx := strings.Index(strings.ToLower(value), strings.ToLower(key))
-	for idx >= 0 {
-		start := idx + len(key)
-		for start < len(value) && (value[start] == ' ' || value[start] == ':' || value[start] == '=' || value[start] == '"' || value[start] == '\'') {
-			start++
-		}
-		end := start
-		for end < len(value) && value[end] != '\n' && value[end] != '\r' && value[end] != ',' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
-			end++
-		}
-		if end > start {
-			value = value[:start] + "[REDACTED]" + value[end:]
-		}
-		nextBase := start + len("[REDACTED]")
-		next := strings.Index(strings.ToLower(value[nextBase:]), strings.ToLower(key))
-		if next < 0 {
-			break
-		}
-		idx = nextBase + next
-	}
-	return value
-}
-
-func capDiscoveryString(value string, maxBytes int) string {
-	if maxBytes <= 0 || len([]byte(value)) <= maxBytes {
-		return value
-	}
-	body := []byte(value)
-	for maxBytes > 0 && !utf8.Valid(body[:maxBytes]) {
-		maxBytes--
-	}
-	return string(body[:maxBytes])
 }

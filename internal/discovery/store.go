@@ -21,6 +21,11 @@ type Store struct {
 
 var errSourceConfig = errors.New("source config error")
 
+var (
+	ErrAdminMatchNotFound          = errors.New("discovery match not found")
+	ErrInvalidAdminMatchTransition = errors.New("invalid discovery match admin transition")
+)
+
 type DiscoveredResourceStore struct {
 	writer *SafeDiscoveredResourceWriter
 }
@@ -525,12 +530,123 @@ func (s *Store) MarkMatchFinished(ctx context.Context, result MatchResult) error
 	})
 }
 
+// AdminAcceptMatch accepts only idle, non-terminal matches. It deliberately
+// refuses queued/running/succeeded matches so an admin action cannot detach an
+// in-flight producer job from its lifecycle.
+func (s *Store) AdminAcceptMatch(ctx context.Context, matchID int64, now time.Time) error {
+	match, err := s.store.GetSubscriptionMatch(ctx, storeq.GetSubscriptionMatchParams{ID: matchID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAdminMatchNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !canAdminAcceptMatch(match) {
+		return fmt.Errorf("%w: accept match %d from decision=%s dispatch_state=%s", ErrInvalidAdminMatchTransition, matchID, match.Decision, match.DispatchState)
+	}
+	updatedAt := unixOrNow(now)
+	if err := s.store.UpdateSubscriptionMatchDispatch(ctx, storeq.UpdateSubscriptionMatchDispatchParams{
+		Decision:      "accept",
+		DispatchState: "none",
+		QueuedJobID:   sql.NullInt64{},
+		UpdatedAt:     updatedAt,
+		ID:            matchID,
+	}); err != nil {
+		return err
+	}
+	return s.MarkDiscoveredResourceStatus(ctx, match.ResourceID, "accepted", now)
+}
+
+// AdminRejectMatch rejects only idle, non-terminal matches. In-flight or finished
+// dispatches must finish through dispatch/reconcile instead of being reset here.
+func (s *Store) AdminRejectMatch(ctx context.Context, matchID int64, now time.Time) error {
+	match, err := s.store.GetSubscriptionMatch(ctx, storeq.GetSubscriptionMatchParams{ID: matchID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAdminMatchNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !canAdminRejectMatch(match) {
+		return fmt.Errorf("%w: reject match %d from decision=%s dispatch_state=%s", ErrInvalidAdminMatchTransition, matchID, match.Decision, match.DispatchState)
+	}
+	updatedAt := unixOrNow(now)
+	if err := s.store.UpdateSubscriptionMatchDispatch(ctx, storeq.UpdateSubscriptionMatchDispatchParams{
+		Decision:      "reject",
+		DispatchState: "none",
+		QueuedJobID:   sql.NullInt64{},
+		UpdatedAt:     updatedAt,
+		ID:            matchID,
+	}); err != nil {
+		return err
+	}
+	return s.MarkDiscoveredResourceStatus(ctx, match.ResourceID, "rejected", now)
+}
+
+// AdminRetryMatch requeues failed dispatches, plus idle accepted/queued matches
+// that have not started. It refuses queued/running/succeeded matches because those
+// are already owned by the dispatcher/reconciler lifecycle.
+func (s *Store) AdminRetryMatch(ctx context.Context, matchID int64, now time.Time) error {
+	match, err := s.store.GetSubscriptionMatch(ctx, storeq.GetSubscriptionMatchParams{ID: matchID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAdminMatchNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !canAdminRetryMatch(match) {
+		return fmt.Errorf("%w: retry match %d from decision=%s dispatch_state=%s", ErrInvalidAdminMatchTransition, matchID, match.Decision, match.DispatchState)
+	}
+	return s.store.UpdateSubscriptionMatchDispatch(ctx, storeq.UpdateSubscriptionMatchDispatchParams{
+		Decision:      "queue",
+		DispatchState: "none",
+		QueuedJobID:   sql.NullInt64{},
+		UpdatedAt:     unixOrNow(now),
+		ID:            matchID,
+	})
+}
+
 func (s *Store) MarkDiscoveredResourceStatus(ctx context.Context, resourceID int64, status string, now time.Time) error {
 	_, err := s.store.DB.ExecContext(ctx, `
 UPDATE discovered_resources
 SET status = ?, last_seen_at = ?
 WHERE id = ?`, status, unixOrNow(now), resourceID)
 	return err
+}
+
+func canAdminAcceptMatch(match storeq.SubscriptionMatch) bool {
+	if match.DispatchState != "none" {
+		return false
+	}
+	switch match.Decision {
+	case "review", "accept", "queue":
+		return true
+	default:
+		return false
+	}
+}
+
+func canAdminRejectMatch(match storeq.SubscriptionMatch) bool {
+	if match.DispatchState != "none" {
+		return false
+	}
+	switch match.Decision {
+	case "review", "accept", "queue", "reject":
+		return true
+	default:
+		return false
+	}
+}
+
+func canAdminRetryMatch(match storeq.SubscriptionMatch) bool {
+	switch match.DispatchState {
+	case "failed":
+		return true
+	case "none":
+		return match.Decision == "accept" || match.Decision == "queue"
+	default:
+		return false
+	}
 }
 
 func (s *Store) UpdateTelegramCursor(ctx context.Context, sourceID int64, update TelegramCursorUpdate, now time.Time) error {

@@ -167,6 +167,12 @@ func (s *RawStore) Get(ctx context.Context, ref string, maxBytes int) ([]byte, e
 	return body, nil
 }
 
+// RedactRawTextForDebug applies the same hardened raw payload redaction used for
+// stored previews, then caps the result for admin debug responses.
+func RedactRawTextForDebug(text string, maxBytes int) string {
+	return capStringBytes(redactRawText(text), maxBytes)
+}
+
 // Prune removes raw payload files older than olderThanUnix.
 func (s *RawStore) Prune(ctx context.Context, olderThanUnix int64) error {
 	if err := ctx.Err(); err != nil {
