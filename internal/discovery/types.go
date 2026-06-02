@@ -46,3 +46,7 @@ type ParsedResource struct {
 	ParsedJSON       string
 	ObservedAt       time.Time
 }
+
+type SourceCrawlResult struct {
+	Items []ParsedResource
+}
