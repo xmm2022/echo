@@ -8,6 +8,7 @@ package logging
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"strings"
 )
 
@@ -25,6 +26,21 @@ var sensitiveKeys = map[string]struct{}{
 	"signature":      {},
 	"password":       {},
 	"api_key":        {},
+	"apikey":         {},
+	"api_hash":       {},
+	"apihash":        {},
+	"receive_code":   {},
+	"receivecode":    {},
+	"share_code":     {},
+	"sharecode":      {},
+	"share_password": {},
+	"sharepassword":  {},
+	"tmdb_key":       {},
+	"tmdbkey":        {},
+	"session_ref":    {},
+	"sessionref":     {},
+	"session_path":   {},
+	"sessionpath":    {},
 	"x_emby_token":   {},
 	"playback_token": {},
 	"selector":       {},
@@ -40,8 +56,14 @@ var signedParamMarkers = []string{
 	"?signature=", "&signature=",
 	"?token=", "&token=",
 	"?api_key=", "&api_key=",
+	"?password=", "&password=",
+	"?pwd=", "&pwd=",
+	"?receive_code=", "&receive_code=",
+	"?receivecode=", "&receivecode=",
 	"x-emby-token=",
 }
+
+var sensitiveStringPattern = regexp.MustCompile(`(?i)"?(password|pwd|receive_code|receiveCode|share_code|shareCode|share_password|sharePassword|api_hash|apiHash|api_key|apiKey|tmdb_key|tmdbKey|session_ref|sessionRef|session_path|sessionPath)"?\s*[:=]`)
 
 // RedactHandler wraps another slog.Handler, redacting sensitive attributes before
 // they are emitted.
@@ -96,7 +118,7 @@ func redactAttr(a slog.Attr) slog.Attr {
 	if isSensitiveKey(a.Key) {
 		return slog.String(a.Key, redactedValue)
 	}
-	if a.Value.Kind() == slog.KindString && containsSignedParam(a.Value.String()) {
+	if shouldRedactValue(a.Value) {
 		return slog.String(a.Key, redactedValue)
 	}
 	return a
@@ -115,4 +137,24 @@ func containsSignedParam(value string) bool {
 		}
 	}
 	return false
+}
+
+func shouldRedactValue(value slog.Value) bool {
+	if value.Kind() == slog.KindString {
+		return containsSensitiveString(value.String())
+	}
+	if value.Kind() == slog.KindAny {
+		if err, ok := value.Any().(error); ok {
+			return containsSensitiveString(err.Error())
+		}
+	}
+	return false
+}
+
+func containsSensitiveString(value string) bool {
+	lower := strings.ToLower(value)
+	return containsSignedParam(value) ||
+		sensitiveStringPattern.MatchString(value) ||
+		strings.Contains(lower, "telegram/session") ||
+		strings.Contains(lower, "session.json")
 }

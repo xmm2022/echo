@@ -3,6 +3,7 @@ package logging_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -128,5 +129,68 @@ func TestRedactsV02Secrets(t *testing.T) {
 	}
 	if !strings.Contains(got, "quota_exceeded") {
 		t.Fatalf("safe enum missing from log: %s", got)
+	}
+}
+
+func TestRedactDiscoverySecrets(t *testing.T) {
+	got := captureRedactedLog(t, []slog.Attr{
+		slog.String("receive_code", "abcd"),
+		slog.String("api_hash", "api-hash-secret"),
+		slog.String("tmdb_key", "tmdb-secret"),
+		slog.String("session_ref", "ref:telegram/session.json"),
+		slog.String("share_url", "https://115.com/s/abc?password=secret"),
+	})
+	for _, forbidden := range []string{"abcd", "api-hash-secret", "tmdb-secret", "ref:telegram/session.json", "password=secret"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("discovery secret leaked %q in %s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "<redacted>") {
+		t.Fatalf("redaction marker missing: %s", got)
+	}
+}
+
+func TestRedactionPreservesSensitiveKeyNames(t *testing.T) {
+	got := captureRedactedLog(t, []slog.Attr{
+		slog.String("api_hash", "api-hash-secret"),
+	})
+	if !strings.Contains(got, `"api_hash":"<redacted>"`) {
+		t.Fatalf("sensitive key name was not preserved: %s", got)
+	}
+}
+
+func TestRedactDiscoveryShareCodeAndSessionPath(t *testing.T) {
+	got := captureRedactedLog(t, []slog.Attr{
+		slog.String("share_code", "share-secret"),
+		slog.String("session_path", "/var/lib/echo/telegram/session.json"),
+	})
+	for _, forbidden := range []string{"share-secret", "/var/lib/echo/telegram/session.json"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("discovery secret leaked %q in %s", forbidden, got)
+		}
+	}
+}
+
+func TestRedactsCamelCaseAPIKey(t *testing.T) {
+	got := captureRedactedLog(t, []slog.Attr{
+		slog.String("apiKey", "api-key-secret"),
+	})
+	if strings.Contains(got, "api-key-secret") {
+		t.Fatalf("camelCase apiKey leaked in %s", got)
+	}
+}
+
+func TestRedactsDiscoveryPayloadAndErrorStrings(t *testing.T) {
+	got := captureRedactedLog(t, []slog.Attr{
+		slog.String("payload", `{"receive_code":"abcd","api_hash":"telegramhash","session_path":"/var/lib/echo/telegram/session.json"}`),
+		slog.Any("err", errors.New("receive_code=efgh session_path=/var/lib/echo/telegram/session.json")),
+	})
+	for _, forbidden := range []string{"abcd", "telegramhash", "efgh", "/var/lib/echo/telegram/session.json"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("discovery payload or error leaked %q in %s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "<redacted>") {
+		t.Fatalf("redaction marker missing: %s", got)
 	}
 }
