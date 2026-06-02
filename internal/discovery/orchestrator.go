@@ -440,6 +440,10 @@ func crawlErrorKind(err error) string {
 	if err == nil {
 		return ""
 	}
+	var authFailed AuthFailedError
+	if errors.As(err, &authFailed) {
+		return "auth_failed"
+	}
 	lower := strings.ToLower(err.Error())
 	if strings.Contains(lower, "flood") ||
 		strings.Contains(lower, "rate limit") ||

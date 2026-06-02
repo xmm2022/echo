@@ -22,6 +22,9 @@ import (
 	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/config"
 	"github.com/xmm2022/echo/internal/discovery"
+	"github.com/xmm2022/echo/internal/discovery/sources/poster"
+	"github.com/xmm2022/echo/internal/discovery/sources/telegram"
+	discoverytmdb "github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/embyproxy"
 	httpserver "github.com/xmm2022/echo/internal/http"
 	"github.com/xmm2022/echo/internal/http/handlers"
@@ -31,6 +34,7 @@ import (
 	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/playback"
 	"github.com/xmm2022/echo/internal/restore"
+	"github.com/xmm2022/echo/internal/secrets"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -116,16 +120,48 @@ func runServe(args []string) error {
 	rawSidecar := sidecarclient.New(sidecarclient.FromEndpointConfig(cfg.Sidecar.Default))
 	sidecar := metrics.InstrumentSidecar(rawSidecar, m, "default")
 
-	// Job runner: drives ingest jobs (manual + producer).
-	runner, err := job.New(job.Config{
-		Store: st,
-		Handlers: job.IngestHandlers(ingest.Deps{
-			Store:   st,
-			Sidecar: sidecar,
-			Config:  ingestConfig(cfg),
-			Metrics: m,
-			Logger:  logger,
-		}),
+	// Job runner: drives ingest jobs and discovery orchestration jobs.
+	var runner *job.Runner
+	enqueue := func(ctx context.Context, kind string, payload any) (int64, error) {
+		return runner.Enqueue(ctx, kind, payload)
+	}
+	ingestCfg := ingestConfig(cfg)
+	jobHandlers := job.IngestHandlers(ingest.Deps{
+		Store:   st,
+		Sidecar: sidecar,
+		Config:  ingestCfg,
+		Metrics: m,
+		Logger:  logger,
+	})
+	discoveryDeps := discovery.Deps{
+		Store:          discovery.NewStore(st),
+		SourceAdapters: discoverySourceAdapters(cfg, logger),
+		Enqueue:        enqueue,
+		NotifyJob: func(jobID int64) {
+			runner.EnqueueExisting(jobID)
+		},
+		ProducerConfig: ingestCfg.Producer,
+		Logger:         logger,
+	}
+	if cfg.Discovery.Enabled {
+		if cfg.Discovery.RawDebug.Enabled {
+			discoveryDeps.RawStore = discovery.NewRawStore(discovery.RawStoreConfig{
+				Root:     cfg.Discovery.RawDebug.StorageRoot,
+				MaxBytes: cfg.Discovery.RawDebug.MaxBytes,
+			})
+		}
+		tmdbClient, err := discoveryTMDBClient(cfg, st)
+		if err != nil {
+			return err
+		}
+		discoveryDeps.TMDB = tmdbClient
+	}
+	for kind, handler := range discovery.JobHandlers(discoveryDeps) {
+		jobHandlers[kind] = handler
+	}
+	runner, err = job.New(job.Config{
+		Store:         st,
+		Handlers:      jobHandlers,
 		MaxConcurrent: cfg.Jobs.MaxConcurrent,
 		Logger:        logger,
 		Metrics:       m,
@@ -360,6 +396,47 @@ func ingestConfig(cfg *config.Config) ingest.Config {
 		WorkerPerJob: cfg.Jobs.WorkerPerJob,
 		Producer:     producerConfig(cfg.Producer),
 	}
+}
+
+func discoverySourceAdapters(cfg *config.Config, logger *slog.Logger) map[discovery.SourceKind]discovery.SourceAdapter {
+	if !cfg.Discovery.Enabled {
+		return nil
+	}
+	return map[discovery.SourceKind]discovery.SourceAdapter{
+		discovery.SourcePosterHTTP: poster.NewAdapter(poster.AdapterConfig{
+			AllowedDomains: cfg.Discovery.Poster.AllowedDomains,
+		}),
+		discovery.SourceTelegramMTProto: telegram.NewAdapter(
+			telegram.NewMTProtoClientFromConfig(cfg.Discovery.Telegram, cfg.SecretsRoot, logger),
+		),
+	}
+}
+
+func discoveryTMDBClient(cfg *config.Config, st *store.Store) (discovery.TMDBClient, error) {
+	apiKey, err := resolveSecretValue(cfg.SecretsRoot, cfg.Discovery.TMDB.APIKeyRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve discovery tmdb api key: %w", err)
+	}
+	return discoverytmdb.NewClient(discoverytmdb.Config{
+		APIKey:   apiKey,
+		Language: cfg.Discovery.TMDB.Language,
+		CacheTTL: cfg.Discovery.TMDB.CacheTTL.Duration,
+	}, discoverytmdb.NewSQLiteCache(st.Queries, cfg.Discovery.TMDB.Language)), nil
+}
+
+func resolveSecretValue(secretsRoot, ref string) (string, error) {
+	if strings.HasPrefix(ref, "env:") {
+		return secrets.ResolveEnv(ref)
+	}
+	path, err := secrets.Resolve(secretsRoot, ref)
+	if err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read secret ref: %w", err)
+	}
+	return strings.TrimSpace(string(body)), nil
 }
 
 func producerConfig(p config.ProducerConfig) ingest.ProducerConfig {

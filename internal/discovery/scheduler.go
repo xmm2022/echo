@@ -9,12 +9,6 @@ import (
 )
 
 const (
-	KindSourceCrawl       = "discovery_source_crawl"
-	KindSubscriptionCheck = "discovery_subscription_check"
-	KindDispatch          = "discovery_dispatch"
-	KindReconcile         = "discovery_reconcile"
-	KindTMDBRefresh       = "discovery_tmdb_refresh"
-
 	defaultSchedulerInterval      = time.Minute
 	defaultSchedulerLeaseDuration = 5 * time.Minute
 	defaultSchedulerBatchLimit    = 50

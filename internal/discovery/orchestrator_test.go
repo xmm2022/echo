@@ -217,6 +217,44 @@ WHERE source_id = ? AND channel_ref = 'channel'`, sourceID).Scan(&backoffUntil, 
 	}
 }
 
+func TestRunSourceCrawlClassifiesAuthFailedError(t *testing.T) {
+	st := openDiscoveryTestStore(t)
+	ds := NewStore(st)
+	sourceID := seedDiscoverySource(t, st, string(SourceTelegramMTProto))
+	seedTelegramChannel(t, st, sourceID, "channel")
+	orch := NewOrchestrator(Deps{
+		Store: ds,
+		SourceAdapters: map[SourceKind]SourceAdapter{
+			SourceTelegramMTProto: fakeSourceAdapter{err: AuthFailedError{Message: "telegram config: resolve api hash failed"}},
+		},
+		Now: func() time.Time { return time.Unix(100, 0) },
+	})
+	if err := orch.RunSourceCrawl(context.Background(), SourceCrawlPayload{SourceID: sourceID}); err == nil {
+		t.Fatal("expected telegram auth setup error")
+	}
+
+	var sourceKind string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COALESCE(last_error_kind, '')
+FROM discovery_sources
+WHERE id = ?`, sourceID).Scan(&sourceKind); err != nil {
+		t.Fatal(err)
+	}
+	if sourceKind != "auth_failed" {
+		t.Fatalf("source error kind = %q, want auth_failed", sourceKind)
+	}
+	var channelKind string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COALESCE(last_error_kind, '')
+FROM telegram_channels
+WHERE source_id = ? AND channel_ref = 'channel'`, sourceID).Scan(&channelKind); err != nil {
+		t.Fatal(err)
+	}
+	if channelKind != "auth_failed" {
+		t.Fatalf("channel error kind = %q, want auth_failed", channelKind)
+	}
+}
+
 func TestRunSourceCrawlUsesStructuredRetryAfterBackoff(t *testing.T) {
 	st := openDiscoveryTestStore(t)
 	ds := NewStore(st)

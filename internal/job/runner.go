@@ -166,6 +166,10 @@ func (r *Runner) Enqueue(ctx context.Context, kind string, payload any) (int64, 
 	return job.ID, nil
 }
 
+func (r *Runner) EnqueueExisting(jobID int64) {
+	r.enqueueID(jobID)
+}
+
 // Cancel cancels a job currently running under this runner. Returns false if
 // the job is not running (unknown, pending, or already finished).
 func (r *Runner) Cancel(jobID int64) bool {
@@ -181,6 +185,12 @@ func (r *Runner) Cancel(jobID int64) bool {
 
 func (r *Runner) enqueueID(jobID int64) {
 	r.queueMu.Lock()
+	for _, queuedID := range r.queue {
+		if queuedID == jobID {
+			r.queueMu.Unlock()
+			return
+		}
+	}
 	r.queue = append(r.queue, jobID)
 	r.queueMu.Unlock()
 	select {
@@ -247,8 +257,6 @@ func (r *Runner) dispatch() {
 func (r *Runner) runJob(jobID int64) {
 	jobCtx, cancel := context.WithCancel(r.ctx)
 	defer cancel()
-	r.registerCancel(jobID, cancel)
-	defer r.unregisterCancel(jobID)
 
 	// Already shutting down before this job started: leave it pending so the
 	// next Start re-enqueues it.
@@ -262,19 +270,20 @@ func (r *Runner) runJob(jobID int64) {
 	// job is recorded as finished rather than left dangling as running.
 	writeCtx := context.WithoutCancel(jobCtx)
 
-	job, err := r.store.GetJob(writeCtx, queries.GetJobParams{ID: jobID})
-	if err != nil {
-		r.logger.Error("job load failed", "job_id", jobID, "error", err)
-		return
-	}
-
-	if err := r.store.MarkJobRunning(writeCtx, queries.MarkJobRunningParams{
+	job, err := r.store.ClaimPendingJob(writeCtx, queries.ClaimPendingJobParams{
 		StartedAt: sql.NullInt64{Int64: r.now().Unix(), Valid: true},
 		ID:        jobID,
-	}); err != nil {
-		r.logger.Error("job mark running failed", "job_id", jobID, "error", err)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
 		return
 	}
+	if err != nil {
+		r.logger.Error("job claim failed", "job_id", jobID, "error", err)
+		return
+	}
+	r.registerCancel(jobID, cancel)
+	defer r.unregisterCancel(jobID)
+
 	if err := r.writeInitialProgress(writeCtx, jobID); err != nil {
 		r.logger.Warn("job initial progress write failed", "job_id", jobID, "error", err)
 	}

@@ -79,8 +79,8 @@ var (
 	querySecretPattern = regexp.MustCompile(`(?i)([?&])(?:password|pwd|receive_code|receiveCode)=[^\s&#]+`)
 	textSecretPattern  = regexp.MustCompile(`(?i)\b(?:password|pwd|receive_code|receiveCode)\s*=\s*[^\s&]+`)
 
-	errResolveSessionRef = errors.New("telegram history: resolve session ref failed")
-	errResolveAPIHash    = errors.New("telegram config: resolve api hash failed")
+	errResolveSessionRef = discovery.AuthFailedError{Message: "telegram history: resolve session ref failed"}
+	errResolveAPIHash    = discovery.AuthFailedError{Message: "telegram config: resolve api hash failed"}
 )
 
 func NewAdapter(client Client) *Adapter {
@@ -181,7 +181,7 @@ func (c *MTProtoClient) History(ctx context.Context, sessionRef string, channelR
 			return convertFloodWait(err)
 		}
 		if !status.Authorized {
-			return errors.New("telegram history: session is not authorized")
+			return discovery.AuthFailedError{Message: "telegram history: session is not authorized"}
 		}
 
 		api := client.API()

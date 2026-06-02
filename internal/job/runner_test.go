@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -111,6 +112,213 @@ func TestEnqueueRunsHandlerAndMarksDone(t *testing.T) {
 	}
 	if !done.FinishedAt.Valid {
 		t.Error("done job missing finished_at")
+	}
+}
+
+func TestEnqueueExistingRunsPreCreatedPendingJob(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	seen := make(chan queries.Job, 1)
+	r, err := New(Config{
+		Store:         st,
+		MaxConcurrent: 1,
+		Now:           fixedNow,
+		Handlers: map[string]Handler{
+			"unit_test": func(_ context.Context, job queries.Job) error {
+				seen <- job
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	job, err := st.CreateJob(ctx, queries.CreateJobParams{
+		Kind:      "unit_test",
+		Status:    statusPending,
+		Payload:   "{}",
+		OwnerID:   defaultOwnerID,
+		CreatedAt: fixedNow().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	r.EnqueueExisting(job.ID)
+
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.Stop()
+
+	select {
+	case got := <-seen:
+		if got.ID != job.ID {
+			t.Errorf("handler job id = %d, want %d", got.ID, job.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked")
+	}
+	select {
+	case extra := <-seen:
+		t.Fatalf("handler ran more than once; extra job id %d", extra.ID)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	waitForJobStatus(t, ctx, st, job.ID, "done")
+}
+
+func TestEnqueueExistingSkipsCompletedJob(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	seen := make(chan queries.Job, 1)
+	r, err := New(Config{
+		Store:         st,
+		MaxConcurrent: 1,
+		Now:           fixedNow,
+		Handlers: map[string]Handler{
+			"unit_test": func(_ context.Context, job queries.Job) error {
+				seen <- job
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.Stop()
+
+	job, err := st.CreateJob(ctx, queries.CreateJobParams{
+		Kind:       "unit_test",
+		Status:     statusDone,
+		Payload:    "{}",
+		OwnerID:    defaultOwnerID,
+		CreatedAt:  fixedNow().Unix() - 10,
+		StartedAt:  sql.NullInt64{Int64: 111, Valid: true},
+		FinishedAt: sql.NullInt64{Int64: 222, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	r.EnqueueExisting(job.ID)
+
+	select {
+	case got := <-seen:
+		t.Fatalf("handler ran for completed job %d", got.ID)
+	case <-time.After(150 * time.Millisecond):
+	}
+	got, err := st.GetJob(ctx, queries.GetJobParams{ID: job.ID})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != statusDone || got.StartedAt != job.StartedAt || got.FinishedAt != job.FinishedAt {
+		t.Fatalf("job mutated: got status=%q started=%v finished=%v, want status=%q started=%v finished=%v",
+			got.Status, got.StartedAt, got.FinishedAt, job.Status, job.StartedAt, job.FinishedAt)
+	}
+}
+
+func TestEnqueueExistingAfterWorkerStartedRunsOnce(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	started := make(chan int64, 2)
+	release := make(chan struct{})
+	r, err := New(Config{
+		Store:         st,
+		MaxConcurrent: 1,
+		Now:           fixedNow,
+		Handlers: map[string]Handler{
+			"unit_test": func(_ context.Context, job queries.Job) error {
+				started <- job.ID
+				<-release
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	job := createJobRow(t, ctx, st, "unit_test", statusPending, fixedNow().Unix())
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.Stop()
+
+	select {
+	case id := <-started:
+		if id != job.ID {
+			t.Fatalf("handler job id = %d, want %d", id, job.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked")
+	}
+
+	r.EnqueueExisting(job.ID)
+	close(release)
+	waitForJobStatus(t, ctx, st, job.ID, statusDone)
+
+	select {
+	case id := <-started:
+		t.Fatalf("handler ran more than once for job %d", id)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestEnqueueExistingDuplicateWorkerPreservesRunningCancel(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	started := make(chan int64, 2)
+	r, err := New(Config{
+		Store:         st,
+		MaxConcurrent: 2,
+		Now:           fixedNow,
+		Handlers: map[string]Handler{
+			"unit_test": func(ctx context.Context, job queries.Job) error {
+				started <- job.ID
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	job := createJobRow(t, ctx, st, "unit_test", statusPending, fixedNow().Unix())
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.Stop()
+
+	select {
+	case id := <-started:
+		if id != job.ID {
+			t.Fatalf("handler job id = %d, want %d", id, job.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked")
+	}
+
+	r.EnqueueExisting(job.ID)
+	time.Sleep(150 * time.Millisecond)
+
+	if !r.Cancel(job.ID) {
+		t.Fatal("Cancel returned false for running job after stale duplicate worker")
+	}
+	waitForJobStatus(t, ctx, st, job.ID, statusFailed)
+
+	select {
+	case id := <-started:
+		t.Fatalf("handler ran more than once for job %d", id)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
 

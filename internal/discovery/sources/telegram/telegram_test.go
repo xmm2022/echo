@@ -134,6 +134,10 @@ func TestHistorySessionResolveErrorIsSanitized(t *testing.T) {
 	if err.Error() != "telegram history: resolve session ref failed" {
 		t.Fatalf("err = %q", err.Error())
 	}
+	var authFailed discovery.AuthFailedError
+	if !errors.As(err, &authFailed) {
+		t.Fatalf("err = %T, want discovery.AuthFailedError", err)
+	}
 }
 
 func TestAPIHashResolveErrorIsSanitized(t *testing.T) {
@@ -153,6 +157,10 @@ func TestAPIHashResolveErrorIsSanitized(t *testing.T) {
 	assertNoSensitiveErrorText(t, err.Error(), root, "missing/hash.txt", "lstat")
 	if err.Error() != "telegram config: resolve api hash failed" {
 		t.Fatalf("err = %q", err.Error())
+	}
+	var authFailed discovery.AuthFailedError
+	if !errors.As(err, &authFailed) {
+		t.Fatalf("err = %T, want discovery.AuthFailedError", err)
 	}
 	assertNoSensitiveErrorText(t, logs.String(), root, "missing/hash.txt", "lstat")
 }

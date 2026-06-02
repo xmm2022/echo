@@ -19,7 +19,15 @@ import (
 
 // jobKinds and jobStatuses enumerate the closed label space for echo_jobs_total.
 var (
-	jobKinds      = []string{"ingest_manual", "ingest_producer"}
+	jobKinds = []string{
+		"ingest_manual",
+		"ingest_producer",
+		"discovery_source_crawl",
+		"discovery_subscription_check",
+		"discovery_dispatch",
+		"discovery_reconcile",
+		"discovery_tmdb_refresh",
+	}
 	jobStatuses   = []string{"done", "failed"}
 	producerTools = []string{"115share2cas"}
 	// producerResults mirrors spec §8: success / exit_failed / timeout / unauthorized.

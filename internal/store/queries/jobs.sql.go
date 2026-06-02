@@ -10,6 +10,37 @@ import (
 	"database/sql"
 )
 
+const claimPendingJob = `-- name: ClaimPendingJob :one
+UPDATE jobs
+SET status = 'running',
+    started_at = ?
+WHERE id = ? AND status = 'pending'
+RETURNING id, kind, status, payload, progress, error, owner_id, created_at, started_at, finished_at
+`
+
+type ClaimPendingJobParams struct {
+	StartedAt sql.NullInt64 `json:"started_at"`
+	ID        int64         `json:"id"`
+}
+
+func (q *Queries) ClaimPendingJob(ctx context.Context, arg ClaimPendingJobParams) (Job, error) {
+	row := q.db.QueryRowContext(ctx, claimPendingJob, arg.StartedAt, arg.ID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Status,
+		&i.Payload,
+		&i.Progress,
+		&i.Error,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
   kind, status, payload, progress, error, owner_id, created_at, started_at, finished_at

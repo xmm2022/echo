@@ -36,6 +36,13 @@ SET status = 'running',
     started_at = ?
 WHERE id = ?;
 
+-- name: ClaimPendingJob :one
+UPDATE jobs
+SET status = 'running',
+    started_at = ?
+WHERE id = ? AND status = 'pending'
+RETURNING *;
+
 -- name: UpdateJobProgress :exec
 UPDATE jobs
 SET progress = ?
