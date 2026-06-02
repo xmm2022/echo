@@ -39,7 +39,7 @@ func (q *Queries) BackoffDiscoverySource(ctx context.Context, arg BackoffDiscove
 
 const clearDiscoverySourceLease = `-- name: ClearDiscoverySourceLease :exec
 UPDATE discovery_sources
-SET locked_until = NULL, backoff_until = NULL, failure_count = 0,
+SET locked_until = NULL, scheduler_state = 'healthy', backoff_until = NULL, failure_count = 0,
     last_success_at = ?, last_error_kind = NULL, last_error_message = NULL,
     next_run_at = ?, updated_at = ?
 WHERE id = ?
