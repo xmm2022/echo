@@ -89,3 +89,22 @@ emby_proxy:
       emby_path_prefix: "/media/movies"
       echo_rel_prefix: "movies"
       case_sensitive: true
+
+discovery:
+  enabled: false
+  max_concurrent: 2
+  raw_debug:
+    enabled: false
+    max_bytes: 65536
+    retention_days: 7
+    storage_root: "/data/echo/discovery-raw"
+  tmdb:
+    api_key_ref: "env:TMDB_API_KEY"
+    language: "zh-CN"
+    cache_ttl: "24h"
+  telegram:
+    session_root: "/data/secrets/telegram"
+    api_id: 0
+    api_hash_ref: "env:TELEGRAM_API_HASH"
+  poster:
+    allowed_domains: []

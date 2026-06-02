@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
@@ -212,6 +213,12 @@ func TestV02ManagementFragmentsExposeMutationForms(t *testing.T) {
 func TestMountUIRegistersRoutes(t *testing.T) {
 	d := Deps{Store: newWebStore(t)}
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := auth.NewContext(req.Context(), auth.UserContext{UserID: "admin", Scopes: []string{"admin"}})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
 	d.MountUI(r)
 	for _, path := range []string{
 		"/ui/jobs", "/ui/conflicts",
@@ -224,5 +231,23 @@ func TestMountUIRegistersRoutes(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s = %d, want 200 (route mounted)", path, rec.Code)
 		}
+	}
+}
+
+func TestMountUIRequiresAdmin(t *testing.T) {
+	d := Deps{Store: newWebStore(t)}
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := auth.NewContext(req.Context(), auth.UserContext{UserID: "u1", Scopes: []string{"read"}})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	d.MountUI(r)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ui/jobs", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 }

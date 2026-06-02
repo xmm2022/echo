@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xmm2022/echo/internal/secrets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,6 +52,39 @@ type Config struct {
 	Readiness          ReadyConfig        `yaml:"readiness"`
 	SecretsRoot        string             `yaml:"secrets_root"`
 	EmbyProxy          EmbyProxyConfig    `yaml:"emby_proxy"`
+	Discovery          DiscoveryConfig    `yaml:"discovery"`
+}
+
+type DiscoveryConfig struct {
+	Enabled       bool           `yaml:"enabled"`
+	RawDebug      RawDebugConfig `yaml:"raw_debug"`
+	TMDB          TMDBConfig     `yaml:"tmdb"`
+	Telegram      TelegramConfig `yaml:"telegram"`
+	Poster        PosterConfig   `yaml:"poster"`
+	MaxConcurrent int            `yaml:"max_concurrent"`
+}
+
+type RawDebugConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	MaxBytes      int    `yaml:"max_bytes"`
+	RetentionDays int    `yaml:"retention_days"`
+	StorageRoot   string `yaml:"storage_root"`
+}
+
+type TMDBConfig struct {
+	APIKeyRef string   `yaml:"api_key_ref"`
+	Language  string   `yaml:"language"`
+	CacheTTL  Duration `yaml:"cache_ttl"`
+}
+
+type TelegramConfig struct {
+	SessionRoot string `yaml:"session_root"`
+	APIID       int    `yaml:"api_id"`
+	APIHashRef  string `yaml:"api_hash_ref"`
+}
+
+type PosterConfig struct {
+	AllowedDomains []string `yaml:"allowed_domains"`
 }
 
 // ReadyConfig gates /readyz on v0.2 dependencies. It is distinct from the
@@ -211,6 +245,10 @@ func (c *Config) expandEnv() {
 	c.EmbyProxy.Upstream.Name = os.ExpandEnv(c.EmbyProxy.Upstream.Name)
 	c.EmbyProxy.Upstream.BaseURL = os.ExpandEnv(c.EmbyProxy.Upstream.BaseURL)
 	c.EmbyProxy.Upstream.APIKeyRef = os.ExpandEnv(c.EmbyProxy.Upstream.APIKeyRef)
+	c.Discovery.TMDB.APIKeyRef = os.ExpandEnv(c.Discovery.TMDB.APIKeyRef)
+	c.Discovery.Telegram.SessionRoot = os.ExpandEnv(c.Discovery.Telegram.SessionRoot)
+	c.Discovery.Telegram.APIHashRef = os.ExpandEnv(c.Discovery.Telegram.APIHashRef)
+	c.Discovery.RawDebug.StorageRoot = os.ExpandEnv(c.Discovery.RawDebug.StorageRoot)
 	for i := range c.EmbyProxy.PathMappings {
 		c.EmbyProxy.PathMappings[i].EmbyPathPrefix = os.ExpandEnv(c.EmbyProxy.PathMappings[i].EmbyPathPrefix)
 		c.EmbyProxy.PathMappings[i].EchoRelPrefix = os.ExpandEnv(c.EmbyProxy.PathMappings[i].EchoRelPrefix)
@@ -254,6 +292,10 @@ func (c *Config) applyEnvOverrides() error {
 	setString("ECHO_OUTPUT_DEFAULTS_BASE_PATH", &c.EchoOutputDefaults.BasePath)
 	setString("ECHO_LOG_LEVEL", &c.Log.Level)
 	setString("ECHO_LOG_FORMAT", &c.Log.Format)
+	setString("ECHO_DISCOVERY_TMDB_API_KEY_REF", &c.Discovery.TMDB.APIKeyRef)
+	setString("ECHO_DISCOVERY_TELEGRAM_SESSION_ROOT", &c.Discovery.Telegram.SessionRoot)
+	setString("ECHO_DISCOVERY_TELEGRAM_API_HASH_REF", &c.Discovery.Telegram.APIHashRef)
+	setString("ECHO_DISCOVERY_RAW_DEBUG_STORAGE_ROOT", &c.Discovery.RawDebug.StorageRoot)
 
 	if roots, ok := os.LookupEnv("ECHO_MANUAL_IMPORT_ROOTS"); ok {
 		if roots == "" {
@@ -377,6 +419,49 @@ func (c *Config) validate() error {
 	}
 	if err := c.validateEmbyProxy(); err != nil {
 		return err
+	}
+	if c.Discovery.RawDebug.MaxBytes == 0 {
+		c.Discovery.RawDebug.MaxBytes = 64 * 1024
+	}
+	if c.Discovery.RawDebug.RetentionDays == 0 {
+		c.Discovery.RawDebug.RetentionDays = 7
+	}
+	if c.Discovery.MaxConcurrent == 0 {
+		c.Discovery.MaxConcurrent = 2
+	}
+	if c.Discovery.RawDebug.MaxBytes <= 0 {
+		return fieldPositiveInt("discovery.raw_debug.max_bytes")
+	}
+	if c.Discovery.RawDebug.RetentionDays <= 0 {
+		return fieldPositiveInt("discovery.raw_debug.retention_days")
+	}
+	if c.Discovery.MaxConcurrent <= 0 {
+		return fieldPositiveInt("discovery.max_concurrent")
+	}
+	if c.Discovery.RawDebug.Enabled && c.Discovery.RawDebug.StorageRoot == "" {
+		return fmt.Errorf("discovery.raw_debug.storage_root is required when raw debug is enabled")
+	}
+	if err := c.validateDiscovery(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Config) validateDiscovery() error {
+	if !c.Discovery.Enabled {
+		return nil
+	}
+	if c.SecretsRoot == "" {
+		return fmt.Errorf("secrets_root is required when discovery is enabled")
+	}
+	if err := secrets.ValidateRef(c.SecretsRoot, c.Discovery.TMDB.APIKeyRef); err != nil {
+		return fmt.Errorf("discovery.tmdb.api_key_ref: %w", err)
+	}
+	if c.Discovery.Telegram.APIID <= 0 {
+		return fmt.Errorf("discovery.telegram.api_id is required")
+	}
+	if err := secrets.ValidateRef(c.SecretsRoot, c.Discovery.Telegram.APIHashRef); err != nil {
+		return fmt.Errorf("discovery.telegram.api_hash_ref: %w", err)
 	}
 	return nil
 }

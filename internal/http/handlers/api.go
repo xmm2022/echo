@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/ingest"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
@@ -35,6 +36,18 @@ type JobController interface {
 	Cancel(jobID int64) bool
 }
 
+type DiscoveryRawDebugAPIConfig struct {
+	Enabled     bool
+	MaxBytes    int
+	StorageRoot string
+}
+
+type DiscoveryTMDBSearcher interface {
+	Search(ctx context.Context, query, mediaType string) ([]tmdb.Media, error)
+	MovieDetails(ctx context.Context, tmdbID string) (tmdb.Media, error)
+	TVDetails(ctx context.Context, tmdbID string) (tmdb.Media, error)
+}
+
 // APIConfig is the config subset the admin API handlers consult. It is built from
 // config.Config in cmd/echo; handlers take only what they need so their tests do
 // not depend on full config validation.
@@ -48,7 +61,8 @@ type APIConfig struct {
 	EchoOutputBasePath string
 	// Producer drives the synchronous producer arg pre-flight in the producer
 	// ingest handler.
-	Producer ingest.ProducerConfig
+	Producer          ingest.ProducerConfig
+	DiscoveryRawDebug DiscoveryRawDebugAPIConfig
 }
 
 // APIDeps wires the admin API handlers (accounts / libraries / ingest / jobs /
@@ -58,6 +72,7 @@ type APIDeps struct {
 	Sidecar             StorageLister
 	Jobs                JobController
 	Config              APIConfig
+	DiscoveryTMDB       DiscoveryTMDBSearcher
 	Logger              *slog.Logger
 	Now                 func() time.Time
 	BootstrapAdminToken string
@@ -87,6 +102,7 @@ func (d APIDeps) Mount(r chi.Router) {
 	r.Post("/api/conflicts/{id}/dismiss", d.DismissConflict)
 
 	d.MountV02Management(r)
+	d.MountDiscovery(r)
 }
 
 func (d APIDeps) now() time.Time {

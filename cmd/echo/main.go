@@ -367,6 +367,11 @@ func apiConfig(cfg *config.Config) handlers.APIConfig {
 		ProducerWorkdirRoot: cfg.Producer.WorkdirRoot,
 		EchoOutputBasePath:  cfg.EchoOutputDefaults.BasePath,
 		Producer:            producerConfig(cfg.Producer),
+		DiscoveryRawDebug: handlers.DiscoveryRawDebugAPIConfig{
+			Enabled:     cfg.Discovery.RawDebug.Enabled,
+			MaxBytes:    cfg.Discovery.RawDebug.MaxBytes,
+			StorageRoot: cfg.Discovery.RawDebug.StorageRoot,
+		},
 	}
 }
 

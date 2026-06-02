@@ -45,6 +45,234 @@ func TestLoadPathAppliesEnvAndValidatesRoots(t *testing.T) {
 	}
 }
 
+func TestLoadPathDefaultsDisabledDiscovery(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfig(t, path, workdir, secrets)
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Discovery.Enabled {
+		t.Fatal("discovery enabled by default, want disabled")
+	}
+	if cfg.Discovery.RawDebug.MaxBytes != 64*1024 {
+		t.Fatalf("raw debug max bytes = %d, want 65536", cfg.Discovery.RawDebug.MaxBytes)
+	}
+	if cfg.Discovery.RawDebug.RetentionDays != 7 {
+		t.Fatalf("raw debug retention days = %d, want 7", cfg.Discovery.RawDebug.RetentionDays)
+	}
+	if cfg.Discovery.MaxConcurrent != 2 {
+		t.Fatalf("discovery max concurrent = %d, want 2", cfg.Discovery.MaxConcurrent)
+	}
+}
+
+func TestLoadPathRejectsInvalidDiscoveryNumbers(t *testing.T) {
+	cases := []struct {
+		name    string
+		suffix  string
+		wantErr string
+	}{
+		{
+			name: "negative raw debug max bytes",
+			suffix: `
+discovery:
+  raw_debug:
+    max_bytes: -1
+`,
+			wantErr: "discovery.raw_debug.max_bytes must be a positive integer",
+		},
+		{
+			name: "negative raw debug retention days",
+			suffix: `
+discovery:
+  raw_debug:
+    retention_days: -1
+`,
+			wantErr: "discovery.raw_debug.retention_days must be a positive integer",
+		},
+		{
+			name: "negative max concurrent",
+			suffix: `
+discovery:
+  max_concurrent: -1
+`,
+			wantErr: "discovery.max_concurrent must be a positive integer",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			workdir := filepath.Join(tmp, "work")
+			secrets := filepath.Join(tmp, "secrets")
+			for _, dir := range []string{workdir, secrets} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+			path := filepath.Join(tmp, "config.yaml")
+			writeConfigWithSuffix(t, path, workdir, secrets, tt.suffix)
+
+			_, err := LoadPath(path)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadPathValidatesEnabledDiscovery(t *testing.T) {
+	cases := []struct {
+		name    string
+		suffix  string
+		wantErr string
+	}{
+		{
+			name: "missing secrets root",
+			suffix: `
+discovery:
+  enabled: true
+  tmdb:
+    api_key_ref: "env:TMDB_API_KEY"
+  telegram:
+    api_id: 1
+    api_hash_ref: "env:TELEGRAM_API_HASH"
+`,
+			wantErr: "secrets_root is required when discovery is enabled",
+		},
+		{
+			name: "bad tmdb ref",
+			suffix: `
+secrets_root: "/data/secrets"
+discovery:
+  enabled: true
+  tmdb:
+    api_key_ref: "not-a-ref"
+  telegram:
+    api_id: 1
+    api_hash_ref: "env:TELEGRAM_API_HASH"
+`,
+			wantErr: "discovery.tmdb.api_key_ref",
+		},
+		{
+			name: "missing telegram api id",
+			suffix: `
+secrets_root: "/data/secrets"
+discovery:
+  enabled: true
+  tmdb:
+    api_key_ref: "env:TMDB_API_KEY"
+  telegram:
+    api_id: 0
+    api_hash_ref: "env:TELEGRAM_API_HASH"
+`,
+			wantErr: "discovery.telegram.api_id is required",
+		},
+		{
+			name: "bad telegram hash ref",
+			suffix: `
+secrets_root: "/data/secrets"
+discovery:
+  enabled: true
+  tmdb:
+    api_key_ref: "env:TMDB_API_KEY"
+  telegram:
+    api_id: 1
+    api_hash_ref: "not-a-ref"
+`,
+			wantErr: "discovery.telegram.api_hash_ref",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			workdir := filepath.Join(tmp, "work")
+			secrets := filepath.Join(tmp, "secrets")
+			for _, dir := range []string{workdir, secrets} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+			path := filepath.Join(tmp, "config.yaml")
+			writeConfigWithSuffix(t, path, workdir, secrets, tt.suffix)
+
+			_, err := LoadPath(path)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadPathAppliesDiscoveryEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+	t.Setenv("ECHO_DISCOVERY_TMDB_API_KEY_REF", "env:OVERRIDE_TMDB")
+	t.Setenv("ECHO_DISCOVERY_TELEGRAM_SESSION_ROOT", "/override/telegram")
+	t.Setenv("ECHO_DISCOVERY_TELEGRAM_API_HASH_REF", "env:OVERRIDE_HASH")
+	t.Setenv("ECHO_DISCOVERY_RAW_DEBUG_STORAGE_ROOT", "/override/raw")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfigWithSuffix(t, path, workdir, secrets, `
+discovery:
+  raw_debug:
+    storage_root: "/data/raw"
+  tmdb:
+    api_key_ref: "env:TMDB_API_KEY"
+  telegram:
+    session_root: "/data/telegram"
+    api_hash_ref: "env:TELEGRAM_API_HASH"
+`)
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Discovery.TMDB.APIKeyRef != "env:OVERRIDE_TMDB" {
+		t.Fatalf("tmdb api key ref = %q", cfg.Discovery.TMDB.APIKeyRef)
+	}
+	if cfg.Discovery.Telegram.SessionRoot != "/override/telegram" {
+		t.Fatalf("telegram session root = %q", cfg.Discovery.Telegram.SessionRoot)
+	}
+	if cfg.Discovery.Telegram.APIHashRef != "env:OVERRIDE_HASH" {
+		t.Fatalf("telegram api hash ref = %q", cfg.Discovery.Telegram.APIHashRef)
+	}
+	if cfg.Discovery.RawDebug.StorageRoot != "/override/raw" {
+		t.Fatalf("raw debug storage root = %q", cfg.Discovery.RawDebug.StorageRoot)
+	}
+}
+
 func TestLoadPathRejectsRelativeManualImportRoot(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "work")
@@ -225,6 +453,11 @@ func writeTempConfig(t *testing.T, body string) string {
 
 func writeConfig(t *testing.T, path, workdir, secrets string) {
 	t.Helper()
+	writeConfigWithSuffix(t, path, workdir, secrets, "")
+}
+
+func writeConfigWithSuffix(t *testing.T, path, workdir, secrets, suffix string) {
+	t.Helper()
 	body := fmt.Sprintf(`
 server:
   bind: ":8080"
@@ -260,7 +493,7 @@ echo_output_defaults:
 log:
   level: info
   format: json
-`, filepath.Join(filepath.Dir(workdir), "echo.db"), workdir, secrets, filepath.Join(filepath.Dir(workdir), "output"))
+%s`, filepath.Join(filepath.Dir(workdir), "echo.db"), workdir, secrets, filepath.Join(filepath.Dir(workdir), "output"), suffix)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

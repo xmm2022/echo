@@ -25,7 +25,8 @@ func Auth(token string) func(http.Handler) http.Handler {
 				writeUnauthorized(w)
 				return
 			}
-			next.ServeHTTP(w, r)
+			user := auth.UserContext{UserID: "admin", Role: "admin", Scopes: []string{"admin"}}
+			next.ServeHTTP(w, r.WithContext(auth.NewContext(r.Context(), user)))
 		})
 	}
 }

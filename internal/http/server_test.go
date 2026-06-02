@@ -116,19 +116,35 @@ func TestAuthedRoutesRequireToken(t *testing.T) {
 	}
 	h := HandlerWithDeps(deps)
 
-	for _, path := range []string{"/api/accounts", "/api/jobs", "/api/conflicts", "/ui/jobs", "/ui/conflicts"} {
+	for _, path := range []string{
+		"/api/accounts",
+		"/api/jobs",
+		"/api/conflicts",
+		"/api/discovery/subscriptions",
+		"/ui/jobs",
+		"/ui/conflicts",
+	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s without token = %d, want 401", path, rec.Code)
 		}
+	}
 
-		rec = httptest.NewRecorder()
+	for _, path := range []string{
+		"/api/accounts",
+		"/api/jobs",
+		"/api/conflicts",
+		"/api/discovery/subscriptions",
+		"/ui/jobs",
+		"/ui/conflicts",
+	} {
+		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer sekret")
 		h.ServeHTTP(rec, req)
-		if rec.Code == http.StatusUnauthorized {
-			t.Fatalf("%s with token = 401, want it to reach the handler", path)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s with token = %d, want 200", path, rec.Code)
 		}
 	}
 }

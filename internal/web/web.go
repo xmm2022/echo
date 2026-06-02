@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
 	"github.com/xmm2022/echo/internal/web/templates"
@@ -51,27 +52,33 @@ func (d Deps) Index(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// MountUI registers the authenticated HTML fragment routes. Callers mount it
-// inside the authed group alongside the API.
-//
-// SECURITY NOTE / follow-up: the /ui tree is currently AUTHENTICATION-gated, not
-// admin-gated. AuthFunc admits any valid token and these fragment handlers do not check
-// the admin scope (unlike the JSON API's requireAdmin / requestedUserOrSelf). Several
-// fragments below surface cross-user playback data and admin-only config, so before any
-// non-admin (role='user') API-token path ships, gate the whole /ui tree on the admin
-// scope (mirror handlers.requireAdmin). Today this is not reachable: the only
-// token-minting path (bootstrap) issues admin-scope tokens only.
+// MountUI registers the authenticated, admin-only HTML fragment routes. Callers
+// mount it inside the authed group alongside the API; this method adds the
+// admin-scope check for the dashboard fragment tree.
 func (d Deps) MountUI(r chi.Router) {
-	r.Get("/ui/jobs", d.UIJobs)
-	r.Get("/ui/conflicts", d.UIConflicts)
-	r.Get("/ui/emby/servers", d.UIEmbyServers)
-	r.Get("/ui/emby/user-links", d.UIEmbyUserLinks)
-	r.Get("/ui/emby/library-mappings", d.UIEmbyLibraryMappings)
-	r.Get("/ui/account-pools", d.UIAccountPools)
-	r.Get("/ui/quota/policies", d.UIQuotaPolicies)
-	r.Get("/ui/quota/usage", d.UIQuotaUsage)
-	r.Get("/ui/playback/sessions", d.UIPlaybackSessions)
-	r.Get("/ui/playback/events", d.UIPlaybackEvents)
+	r.Group(func(r chi.Router) {
+		r.Use(requireAdmin)
+		r.Get("/ui/jobs", d.UIJobs)
+		r.Get("/ui/conflicts", d.UIConflicts)
+		r.Get("/ui/emby/servers", d.UIEmbyServers)
+		r.Get("/ui/emby/user-links", d.UIEmbyUserLinks)
+		r.Get("/ui/emby/library-mappings", d.UIEmbyLibraryMappings)
+		r.Get("/ui/account-pools", d.UIAccountPools)
+		r.Get("/ui/quota/policies", d.UIQuotaPolicies)
+		r.Get("/ui/quota/usage", d.UIQuotaUsage)
+		r.Get("/ui/playback/sessions", d.UIPlaybackSessions)
+		r.Get("/ui/playback/events", d.UIPlaybackEvents)
+	})
+}
+
+func requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !auth.FromContext(r.Context()).HasScope("admin") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // UIJobs serves GET /ui/jobs — the recent-jobs HTML fragment.
