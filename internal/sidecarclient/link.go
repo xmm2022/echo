@@ -16,6 +16,40 @@ type DirectLink struct {
 	ExpiresAt time.Time
 }
 
+type linkHeaderValues map[string][]string
+
+func (h *linkHeaderValues) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*h = nil
+		return nil
+	}
+
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	values := make(linkHeaderValues, len(raw))
+	for key, item := range raw {
+		var single string
+		if err := json.Unmarshal(item, &single); err == nil {
+			values[key] = []string{single}
+			continue
+		}
+
+		var multi []string
+		if err := json.Unmarshal(item, &multi); err == nil {
+			values[key] = multi
+			continue
+		}
+
+		return fmt.Errorf("decode link header %q: want string or []string", key)
+	}
+
+	*h = values
+	return nil
+}
+
 func (c *Client) Link(ctx context.Context, storageMount, remotePath string) (*DirectLink, error) {
 	fullPath := sidecarPath(storageMount, remotePath)
 	payload := map[string]string{
@@ -41,11 +75,11 @@ func (c *Client) Link(ctx context.Context, storageMount, remotePath string) (*Di
 	}
 
 	var raw struct {
-		URL       string            `json:"url"`
-		RawURL    string            `json:"raw_url"`
-		Headers   map[string]string `json:"headers"`
-		Header    map[string]string `json:"header"`
-		ExpiresAt string            `json:"expires_at"`
+		URL       string           `json:"url"`
+		RawURL    string           `json:"raw_url"`
+		Headers   linkHeaderValues `json:"headers"`
+		Header    linkHeaderValues `json:"header"`
+		ExpiresAt string           `json:"expires_at"`
 	}
 	if err := decodeData(resp.Body, &raw); err != nil {
 		// A non-success OpenList envelope (code != 200, incl. code == 0) on a
@@ -66,12 +100,8 @@ func (c *Client) Link(ctx context.Context, storageMount, remotePath string) (*Di
 		return nil, ErrLinkNotAvailable
 	}
 	headers := http.Header{}
-	for key, value := range raw.Header {
-		headers.Set(key, value)
-	}
-	for key, value := range raw.Headers {
-		headers.Set(key, value)
-	}
+	mergeLinkHeaders(headers, raw.Header)
+	mergeLinkHeaders(headers, raw.Headers)
 	expiresAt := time.Time{}
 	if raw.ExpiresAt != "" {
 		parsed, err := time.Parse(time.RFC3339, raw.ExpiresAt)
@@ -85,4 +115,13 @@ func (c *Client) Link(ctx context.Context, storageMount, remotePath string) (*Di
 		Headers:   headers,
 		ExpiresAt: expiresAt,
 	}, nil
+}
+
+func mergeLinkHeaders(dst http.Header, src linkHeaderValues) {
+	for key, values := range src {
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
 }

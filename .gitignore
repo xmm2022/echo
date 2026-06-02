@@ -18,6 +18,7 @@
 # Local config / secrets
 .env
 .env.local
+.env.real-gates.local
 config.local.yaml
 
 # Editor

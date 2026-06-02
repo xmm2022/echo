@@ -3,8 +3,10 @@ package sidecarclient
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -35,6 +37,81 @@ func TestLinkReturnsDirectLink(t *testing.T) {
 	}
 	if req.FullPath != "/115-main/Movies/Film.mkv" {
 		t.Fatalf("link path = %q, want /115-main/Movies/Film.mkv", req.FullPath)
+	}
+}
+
+func TestLinkDecodesArrayValuedHeadersAndStreamFallbackUsesThem(t *testing.T) {
+	tests := []struct {
+		name      string
+		fieldName string
+	}{
+		{name: "header field", fieldName: "header"},
+		{name: "headers field", fieldName: "headers"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/d/mnt/movie.mkv":
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte("401 Unauthorized expire missing"))
+				case "/api/fs/link":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"code":200,"message":"success","data":{"url":"` + srv.URL + `/download/movie.mkv","` + tt.fieldName + `":{"X-Download-Token":["signed-a","signed-b"],"X-Trace":["trace-1"]}}}`))
+				case "/download/movie.mkv":
+					if got := r.Header.Values("X-Download-Token"); !reflect.DeepEqual(got, []string{"signed-a", "signed-b"}) {
+						t.Fatalf("direct-link X-Download-Token headers = %#v", got)
+					}
+					if got := r.Header.Values("X-Trace"); !reflect.DeepEqual(got, []string{"trace-1"}) {
+						t.Fatalf("direct-link X-Trace headers = %#v", got)
+					}
+					if got := r.Header.Get("Range"); got != "bytes=0-3" {
+						t.Fatalf("range header = %q, want bytes=0-3", got)
+					}
+					w.Header().Set("Content-Range", "bytes 0-3/10")
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = w.Write([]byte("0123"))
+				default:
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+
+			client := New(testConfig(srv.URL, ""))
+
+			link, err := client.Link(context.Background(), "/mnt", "/movie.mkv")
+			if err != nil {
+				t.Fatalf("Link returned error: %v", err)
+			}
+			if got := link.Headers.Values("X-Download-Token"); !reflect.DeepEqual(got, []string{"signed-a", "signed-b"}) {
+				t.Fatalf("Link headers X-Download-Token = %#v", got)
+			}
+			if got := link.Headers.Values("X-Trace"); !reflect.DeepEqual(got, []string{"trace-1"}) {
+				t.Fatalf("Link headers X-Trace = %#v", got)
+			}
+
+			result, err := client.Stream(context.Background(), StreamRequest{
+				StorageMount: "/mnt",
+				RemotePath:   "/movie.mkv",
+				Headers:      http.Header{"Range": []string{"bytes=0-3"}},
+			})
+			if err != nil {
+				t.Fatalf("Stream returned error: %v", err)
+			}
+			defer result.Body.Close()
+			if result.StatusCode != http.StatusPartialContent {
+				t.Fatalf("StatusCode = %d, want 206", result.StatusCode)
+			}
+			body, err := io.ReadAll(result.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != "0123" {
+				t.Fatalf("body = %q, want 0123", body)
+			}
+		})
 	}
 }
 
