@@ -110,3 +110,38 @@ func TestLeaseWrappersRejectNonPositiveLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestSchedulerTickEnqueuesDueWork(t *testing.T) {
+	st := openDiscoveryTestStore(t)
+	ds := NewStore(st)
+	fixture := seedDiscoveryFixture(t, st)
+	seedDueSource(t, st, 10)
+	seedDueSubscription(t, st, fixture.SubscriptionID, 10)
+	seedDispatchableMatch(t, st, fixture.SubscriptionID, fixture.ResourceID, fixture.RuleProfileID)
+	seedQueuedMatchForReconcile(t, st, fixture.SubscriptionID, fixture.ResourceID, fixture.RuleProfileID)
+	seedDueTMDBMedia(t, st, "123", "movie", 10)
+	enqueued := map[string]int{}
+	s := NewScheduler(SchedulerConfig{
+		Store:      ds,
+		BatchLimit: 10,
+		Now:        func() time.Time { return time.Unix(10, 0) },
+		Enqueue: func(ctx context.Context, kind string, payload any) (int64, error) {
+			enqueued[kind]++
+			return int64(len(enqueued)), nil
+		},
+	})
+	if err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{
+		KindSourceCrawl,
+		KindSubscriptionCheck,
+		KindDispatch,
+		KindReconcile,
+		KindTMDBRefresh,
+	} {
+		if enqueued[kind] == 0 {
+			t.Fatalf("missing enqueue for %s: %#v", kind, enqueued)
+		}
+	}
+}

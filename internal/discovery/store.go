@@ -25,6 +25,11 @@ type DiscoveredResourceStore struct {
 	writer *SafeDiscoveredResourceWriter
 }
 
+type QueuedMatchForReconcile struct {
+	MatchID int64
+	JobID   int64
+}
+
 type AcceptMatchParams struct {
 	SubscriptionID     int64
 	ResourceID         int64
@@ -370,6 +375,44 @@ func (s *Store) BackoffSubscription(ctx context.Context, subscriptionID int64, n
 		LastErrorMessage: nullStringEmpty(message),
 		UpdatedAt:        time.Now().Unix(),
 		ID:               subscriptionID,
+	})
+}
+
+func (s *Store) ListDueDiscoveryDispatchMatches(ctx context.Context, limit int64) ([]int64, error) {
+	if err := validateLeaseLimit(limit); err != nil {
+		return nil, err
+	}
+	return s.store.ListDueDiscoveryDispatchMatches(ctx, storeq.ListDueDiscoveryDispatchMatchesParams{
+		Limit: limit,
+	})
+}
+
+func (s *Store) ListQueuedDiscoveryMatchesForReconcile(ctx context.Context, limit int64) ([]QueuedMatchForReconcile, error) {
+	if err := validateLeaseLimit(limit); err != nil {
+		return nil, err
+	}
+	rows, err := s.store.ListQueuedDiscoveryMatchesForReconcile(ctx, storeq.ListQueuedDiscoveryMatchesForReconcileParams{
+		Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QueuedMatchForReconcile, 0, len(rows))
+	for _, row := range rows {
+		if !row.QueuedJobID.Valid {
+			continue
+		}
+		out = append(out, QueuedMatchForReconcile{
+			MatchID: row.ID,
+			JobID:   row.QueuedJobID.Int64,
+		})
+	}
+	return out, nil
+}
+
+func (s *Store) CountDueTMDBMediaRefresh(ctx context.Context, now time.Time) (int64, error) {
+	return s.store.CountDueTMDBMediaRefresh(ctx, storeq.CountDueTMDBMediaRefreshParams{
+		NextRefreshAt: unixOrNow(now),
 	})
 }
 

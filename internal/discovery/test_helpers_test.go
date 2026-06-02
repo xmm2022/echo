@@ -2,9 +2,11 @@ package discovery
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
+	"github.com/xmm2022/echo/internal/job"
 	storepkg "github.com/xmm2022/echo/internal/store"
 )
 
@@ -162,6 +164,77 @@ func lastTelegramMessageID(t *testing.T, st *storepkg.Store, sourceID int64, cha
 SELECT COALESCE(last_message_id, 0)
 FROM telegram_channels
 WHERE source_id = ? AND channel_ref = ?`, sourceID, channelRef).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func seedDispatchableMatch(t *testing.T, st *storepkg.Store, subscriptionID, resourceID, ruleProfileID int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	now := int64(100)
+	var id int64
+	if err := st.DB.QueryRowContext(ctx, `
+INSERT INTO subscription_matches (
+  subscription_id, resource_id, rule_profile_id, rule_profile_version,
+  score_json, decision, reason, dispatch_state, idempotency_key,
+  created_at, updated_at, decided_at
+) VALUES (?, ?, ?, 1, '{}', 'accept', 'accepted', 'none', ?, ?, ?, ?)
+RETURNING id`,
+		subscriptionID,
+		resourceID,
+		ruleProfileID,
+		fmt.Sprintf("dispatchable:%d:%d:%d", subscriptionID, resourceID, now),
+		now,
+		now,
+		now,
+	).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func seedQueuedMatchForReconcile(t *testing.T, st *storepkg.Store, subscriptionID, resourceID, ruleProfileID int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	now := int64(100)
+	var jobID int64
+	if err := st.DB.QueryRowContext(ctx, `
+INSERT INTO jobs (kind, status, payload, progress, owner_id, created_at, finished_at)
+VALUES (?, 'done', '{}', '{}', 'discovery', ?, ?)
+RETURNING id`, job.KindIngestProducer, now, now).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := st.DB.QueryRowContext(ctx, `
+INSERT INTO subscription_matches (
+  subscription_id, resource_id, rule_profile_id, rule_profile_version,
+  score_json, decision, reason, dispatch_state, idempotency_key, queued_job_id,
+  created_at, updated_at, decided_at
+) VALUES (?, ?, ?, 1, '{}', 'queue', 'queued', 'queued', ?, ?, ?, ?, ?)
+RETURNING id`,
+		subscriptionID,
+		resourceID,
+		ruleProfileID,
+		fmt.Sprintf("queued:%d:%d:%d", subscriptionID, resourceID, jobID),
+		jobID,
+		now,
+		now,
+		now,
+	).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func seedDueTMDBMedia(t *testing.T, st *storepkg.Store, tmdbID, mediaType string, dueAt int64) int64 {
+	t.Helper()
+	var id int64
+	if err := st.DB.QueryRowContext(context.Background(), `
+INSERT INTO tmdb_media (
+  tmdb_id, media_type, language, title, raw_json, fetched_at, next_refresh_at
+) VALUES (?, ?, 'zh-CN', 'Known Movie', '{}', ?, ?)
+RETURNING id`, tmdbID, mediaType, dueAt, dueAt).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id

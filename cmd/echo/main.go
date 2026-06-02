@@ -21,6 +21,7 @@ import (
 
 	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/config"
+	"github.com/xmm2022/echo/internal/discovery"
 	"github.com/xmm2022/echo/internal/embyproxy"
 	httpserver "github.com/xmm2022/echo/internal/http"
 	"github.com/xmm2022/echo/internal/http/handlers"
@@ -158,6 +159,23 @@ func runServe(args []string) error {
 		return fmt.Errorf("start job runner: %w", err)
 	}
 	defer runner.Stop()
+
+	if cfg.Discovery.Enabled {
+		discoveryScheduler := discovery.NewScheduler(discovery.SchedulerConfig{
+			Store:         discovery.NewStore(st),
+			Enqueue:       runner.Enqueue,
+			Interval:      time.Minute,
+			LeaseDuration: 5 * time.Minute,
+			BatchLimit:    50,
+			Logger:        logger,
+		})
+		schedulerErrs := discoveryScheduler.Start(ctx)
+		go func() {
+			for err := range schedulerErrs {
+				logger.Error("discovery scheduler", "err", err)
+			}
+		}()
+	}
 
 	// Restore/stream plane.
 	resolver := restore.NewResolver(st.Queries, nil)
