@@ -54,7 +54,8 @@ type Resource struct {
 }
 
 type crawlConfig struct {
-	Channels []crawlChannel `json:"channels"`
+	HistoryLimit int            `json:"history_limit"`
+	Channels     []crawlChannel `json:"channels"`
 }
 
 type crawlChannel struct {
@@ -88,7 +89,14 @@ func NewAdapter(client Client) *Adapter {
 }
 
 func (a *Adapter) CrawlChannel(ctx context.Context, ch Channel) ([]Resource, Cursor, error) {
-	messages, err := a.client.History(ctx, ch.SessionRef, ch.Ref, ch.Cursor.LastMessageID, defaultHistoryLimit)
+	return a.crawlChannel(ctx, ch, defaultHistoryLimit)
+}
+
+func (a *Adapter) crawlChannel(ctx context.Context, ch Channel, historyLimit int) ([]Resource, Cursor, error) {
+	if historyLimit <= 0 {
+		historyLimit = defaultHistoryLimit
+	}
+	messages, err := a.client.History(ctx, ch.SessionRef, ch.Ref, ch.Cursor.LastMessageID, historyLimit)
 	if err != nil {
 		return nil, ch.Cursor, err
 	}
@@ -118,14 +126,14 @@ func (a *Adapter) Crawl(ctx context.Context, source discovery.Source) (discovery
 
 	out := discovery.SourceCrawlResult{}
 	for _, configured := range cfg.Channels {
-		resources, next, err := a.CrawlChannel(ctx, Channel{
+		resources, next, err := a.crawlChannel(ctx, Channel{
 			Ref:        configured.Ref,
 			SessionRef: configured.SessionRef,
 			Cursor: Cursor{
 				LastMessageID:   configured.LastMessageID,
 				LastMessageDate: configured.LastMessageDate,
 			},
-		})
+		}, cfg.HistoryLimit)
 		if err != nil {
 			return discovery.SourceCrawlResult{}, fmt.Errorf("telegram crawl %s: %w", configured.Ref, err)
 		}

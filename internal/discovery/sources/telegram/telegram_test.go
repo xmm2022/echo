@@ -87,6 +87,19 @@ func TestCrawlConvertsConfigAndRedactsParsedJSON(t *testing.T) {
 	}
 }
 
+func TestCrawlUsesConfiguredHistoryLimit(t *testing.T) {
+	client := &FakeClient{Messages: []Message{{ID: 10, Date: 100, Text: "Movie https://115.com/s/abc?password=pass"}}}
+	source := discovery.Source{
+		ConfigJson: `{"history_limit":7,"channels":[{"ref":"@test","session_ref":"ref:session.json","last_message_id":9}]}`,
+	}
+	if _, err := NewAdapter(client).Crawl(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	if client.Limit != 7 {
+		t.Fatalf("history limit = %d, want 7", client.Limit)
+	}
+}
+
 func TestCrawlReturnsTelegramCursorUpdates(t *testing.T) {
 	client := &FakeClient{Messages: []Message{{ID: 10, Date: 100, Text: "Movie https://115.com/s/abc?password=pass"}}}
 	source := discovery.Source{
