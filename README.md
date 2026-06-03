@@ -66,6 +66,8 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 
 > 边界原则：Echo = CAS 消费 + 资源池（manual import + restore/stream + 跨云去重）；CAS 生产（尤其 115 的 stage 编排）交给外部工具。两者通过 `.cas tree` + `manifest.jsonl` 文件解耦，符合"进程边界即接口契约"的同源思路。
 
+115 运维细节补充见 [`docs/superpowers/release-gates/2026-06-03-echo-115-cas-behavior.md`](docs/superpowers/release-gates/2026-06-03-echo-115-cas-behavior.md)：它区分了 live copy、普通 115 `.cas`、以及带 `source.type=115_share` 的 share-backed `.cas`，避免把"可播放资产"和"可重导入资产"混为一谈。
+
 ## HTTP API 与管理后台
 
 `echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。v0.1 用单一静态 admin token（`auth.admin_token`）做 Bearer 鉴权，所有 API 与管理后台数据接口都在鉴权之后；`/healthz`、`/readyz`、`/metrics` 与数据无关的仪表盘外壳 `/` 公开。
