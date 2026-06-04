@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/xmm2022/echo/internal/discovery/tmdb"
 )
 
 func TestResolvePolicyFailsClosedWithoutEnabledPolicy(t *testing.T) {
@@ -87,15 +89,39 @@ func TestResolvePolicyRejectsUnknownRequestMode(t *testing.T) {
 	}
 }
 
-func TestResolvePolicyRejectsSearchWhenCanSearchFalse(t *testing.T) {
+func TestResolvePolicyAllowsCanSearchFalseForRequesting(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	policy := createMediaPolicy(t, st, "request without search", "", 1, 100, "approval_required", 0)
+	svc := Service{Store: st}
+
+	got, err := svc.ResolvePolicy(context.Background(), "u1")
+	if err != nil {
+		t.Fatalf("ResolvePolicy returned error: %v", err)
+	}
+	if got.ID != policy.ID || got.CanSearch != 0 {
+		t.Fatalf("ResolvePolicy = %+v, want policy %d with can_search=0", got, policy.ID)
+	}
+}
+
+func TestSearchAllowedRejectsSearchWhenCanSearchFalse(t *testing.T) {
 	st := openMediaTestStore(t)
 	seedMediaUser(t, st, "u1")
 	createMediaPolicy(t, st, "no search", "", 1, 100, "auto_approve", 0)
-	svc := Service{Store: st}
+	fake := newFakeMetadataClient()
+	fake.searches["movie:Matrix"] = []tmdb.Media{{TMDBID: "603", MediaType: "movie", Title: "The Matrix"}}
+	svc := Service{Store: st, TMDB: fake, Now: mediaNow}
 
 	err := svc.SearchAllowed(context.Background(), "u1")
 	if !errors.Is(err, ErrPolicyDenied) {
 		t.Fatalf("SearchAllowed error = %v, want %v", err, ErrPolicyDenied)
+	}
+	_, err = svc.Search(context.Background(), mediaActor("u1"), SearchInput{Query: "Matrix", MediaType: "movie"})
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("Search error = %v, want %v", err, ErrPolicyDenied)
+	}
+	if fake.searchCalls != 0 {
+		t.Fatalf("tmdb search calls = %d, want 0 when can_search=0", fake.searchCalls)
 	}
 }
 

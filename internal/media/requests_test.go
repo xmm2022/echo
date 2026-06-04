@@ -135,6 +135,27 @@ func TestCatalogListsEnabledPolicyTargetsWithoutRawIDs(t *testing.T) {
 	}
 }
 
+func TestCatalogAllowsCanSearchFalse(t *testing.T) {
+	ctx := context.Background()
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	policy := createMediaPolicy(t, st, "catalog request only policy", "u1", 1, 100, "approval_required", 0)
+	deps := seedMediaTargetDeps(t, st)
+	target := createMediaTarget(t, st, deps, policy.ID, "Request Only", "movie", 1)
+	svc := Service{Store: st, Now: mediaNow}
+
+	got, err := svc.Catalog(ctx, mediaActor("u1"))
+	if err != nil {
+		t.Fatalf("Catalog returned error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != target.ID {
+		t.Fatalf("Catalog = %+v, want request-only target", got)
+	}
+	if got[0].CanSearch {
+		t.Fatalf("CanSearch = true, want false in catalog DTO")
+	}
+}
+
 func TestCreateRequestApprovalRequiredCreatesPendingWithSnapshots(t *testing.T) {
 	ctx := context.Background()
 	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
@@ -232,6 +253,90 @@ func TestCreateRequestApprovalRequiredCreatesPendingWithSnapshots(t *testing.T) 
 	}
 	if fixture.tmdb.tvCalls != 1 || fixture.tmdb.movieCalls != 0 {
 		t.Fatalf("tmdb calls movie=%d tv=%d, want one tv detail call", fixture.tmdb.movieCalls, fixture.tmdb.tvCalls)
+	}
+}
+
+func TestCreateRequestAllowsCanSearchFalse(t *testing.T) {
+	ctx := context.Background()
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	policy := createMediaPolicy(t, st, "request only policy", "u1", 1, 100, "approval_required", 0)
+	deps := seedMediaTargetDeps(t, st)
+	target := createMediaTarget(t, st, deps, policy.ID, "Request Only", "movie", 1)
+	fake := newFakeMetadataClient()
+	fake.details["movie:604"] = tmdb.Media{
+		TMDBID:    "604",
+		MediaType: "movie",
+		Title:     "Request Only Movie",
+		RawJSON:   `{}`,
+	}
+	svc := Service{Store: st, TMDB: fake, Now: mediaNow}
+
+	got, err := svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "604",
+		MediaType: "movie",
+		TargetID:  target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+	if got.Status != "pending_review" || got.Title != "Request Only Movie" {
+		t.Fatalf("CreateRequest = %+v, want pending request despite can_search=0", got)
+	}
+	if countRequestsForUser(t, st, "u1") != 1 {
+		t.Fatalf("request rows = %d, want 1", countRequestsForUser(t, st, "u1"))
+	}
+}
+
+func TestCreateRequestAutoApproveReturnsInvalidTransitionWithoutSideEffects(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "auto_approve", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:605"] = tmdb.Media{
+		TMDBID:    "605",
+		MediaType: "movie",
+		Title:     "Auto",
+		RawJSON:   `{}`,
+	}
+
+	_, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "605",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("CreateRequest error = %v, want %v", err, ErrInvalidTransition)
+	}
+	if got := countRequestsForUser(t, fixture.st, "u1"); got != 0 {
+		t.Fatalf("request rows = %d, want 0", got)
+	}
+	if got := countDiscoverySubscriptions(t, fixture.st); got != 0 {
+		t.Fatalf("canonical subscriptions = %d, want 0", got)
+	}
+	if got := countUserMediaSubscriptions(t, fixture.st); got != 0 {
+		t.Fatalf("user subscriptions = %d, want 0", got)
+	}
+	if got := countJobs(t, fixture.st); got != 0 {
+		t.Fatalf("producer jobs = %d, want 0", got)
+	}
+	if calls := fixture.tmdb.detailCalls(); calls != 0 {
+		t.Fatalf("tmdb detail calls = %d, want 0 for auto_approve guard", calls)
+	}
+}
+
+func TestCreateRequestTMDBDetailsErrorReturnsMetadataUnavailable(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+
+	_, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "606",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if !errors.Is(err, ErrMetadataUnavailable) {
+		t.Fatalf("CreateRequest error = %v, want %v", err, ErrMetadataUnavailable)
+	}
+	if got := countRequestsForUser(t, fixture.st, "u1"); got != 0 {
+		t.Fatalf("request rows = %d, want 0 on metadata error", got)
 	}
 }
 
@@ -546,6 +651,24 @@ func countJobs(t *testing.T, st *store.Store) int64 {
 	var count int64
 	if err := st.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM jobs`).Scan(&count); err != nil {
 		t.Fatalf("count jobs: %v", err)
+	}
+	return count
+}
+
+func countDiscoverySubscriptions(t *testing.T, st *store.Store) int64 {
+	t.Helper()
+	var count int64
+	if err := st.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM discovery_subscriptions`).Scan(&count); err != nil {
+		t.Fatalf("count discovery subscriptions: %v", err)
+	}
+	return count
+}
+
+func countUserMediaSubscriptions(t *testing.T, st *store.Store) int64 {
+	t.Helper()
+	var count int64
+	if err := st.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM user_media_subscriptions`).Scan(&count); err != nil {
+		t.Fatalf("count user media subscriptions: %v", err)
 	}
 	return count
 }

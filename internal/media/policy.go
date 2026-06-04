@@ -77,7 +77,7 @@ func (s *Service) SearchAllowed(ctx context.Context, userID string) error {
 	if err != nil {
 		return err
 	}
-	return validateResolvedPolicy(policy)
+	return validateSearchPolicy(policy)
 }
 
 func (s *Service) loadTopDiscoveryAccessPolicy(ctx context.Context, userID string) (queries.DiscoveryAccessPolicy, error) {
@@ -117,6 +117,13 @@ func validateResolvedPolicy(policy queries.DiscoveryAccessPolicy) error {
 	case "approval_required", "auto_approve":
 	default:
 		return ErrPolicyDenied
+	}
+	return nil
+}
+
+func validateSearchPolicy(policy queries.DiscoveryAccessPolicy) error {
+	if err := validateResolvedPolicy(policy); err != nil {
+		return err
 	}
 	if policy.CanSearch != 1 {
 		return ErrPolicyDenied
