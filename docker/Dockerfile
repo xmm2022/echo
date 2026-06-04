@@ -5,7 +5,7 @@
 # from the floating feat/cas-tools branch — pin a commit or tag and keep it in
 # sync with sidecar.default.min_version and the Echo release notes so a release
 # is reproducible. Override with: docker build --build-arg SIDECAR_TOOLS_REF=<ref>
-ARG SIDECAR_TOOLS_REF=3324d78
+ARG SIDECAR_TOOLS_REF=814736c203e2115bb2dfda597f625c676a5cda74
 ARG ECHO_VERSION=v0.1.0-dev
 
 # ---- stage 1: build the echo control-plane binary ----

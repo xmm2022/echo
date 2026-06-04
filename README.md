@@ -95,7 +95,7 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 - 115-only dispatch：accepted 115 分享会排成现有 `ingest_producer` job，仍由 `115share2cas` + v0.1 ingest 写入 `.echo`。
 - 管理后台首页已挂载 discovery subscriptions、sources、producer profiles、rule profiles、candidates、matches 和 runs 面板。
 
-Discovery 不直接写 `library_entries` / `file_copies`，也不直接 import sidecar Go 包；它只负责发现、评分、决策和把 115 分享交给现有 producer pipeline。真实 Telegram + 115 release gate 的环境变量见 [`docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md`](docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md)。
+Discovery 不直接写 `library_entries` / `file_copies`，也不直接 import sidecar Go 包；它只负责发现、评分、决策和把 115 分享交给现有 producer pipeline。当前 release 不强制 Telegram 登录；Telegram MTProto 真机 gate 是可选 operator gate，环境变量见 [`docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md`](docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md)。
 
 ## 致谢
 
@@ -107,7 +107,7 @@ Echo 站在 OpenList 生态之上，CAS（秒传占位）模式与多云 driver 
   - `cmd/115share2cas`（`feat/cas-tools` 分支）— 115 分享 → 本地 CAS tree 生产器，已编译进 Echo 镜像
   - `tools/cas139`（`feat/cas-tools` 分支）— 139 分享 → CAS tree 生产器（Python，需在 139 客户端环境运行，产物走 manual import，**不**打包进镜像）
 
-`castree/payload.go` 的字段表对齐自 `internal/casmeta`（cas-tools commit `3324d78`，即 `feat/cas-tools` 分支；9 字段含 `provider/sha1/preID`，`provider=115` 时 `sha1`+`preID` 必填）。各产生器版本固定到 Echo release notes 与 `sidecar.default.min_version`（详见 `docker/Dockerfile` 的 `SIDECAR_TOOLS_REF`），保证 release 可复现。
+`castree/payload.go` 的字段表对齐自 `internal/casmeta`（cas-tools baseline commit `3324d78`，release producer ref `814736c203e2115bb2dfda597f625c676a5cda74` / tag `echo-115cas-hotfix-20260604`；9 字段含 `provider/sha1/preID`，`provider=115` 时 `sha1`+`preID` 必填）。各产生器版本固定到 Echo release notes 与 `sidecar.default.min_version` 决策（详见 `docker/Dockerfile` 的 `SIDECAR_TOOLS_REF`），保证 release 可复现。
 
 ## License
 
