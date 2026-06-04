@@ -97,6 +97,7 @@ func HandlerWithDeps(deps Deps) http.Handler {
 	// client-side: the admin pastes the token, app.js attaches it to /ui + /api).
 	if deps.Web != nil {
 		r.Get("/", deps.Web.Index)
+		r.Get("/app", deps.Web.App)
 		r.Handle("/static/*", web.Static())
 	}
 
@@ -136,6 +137,7 @@ func HandlerWithDeps(deps Deps) http.Handler {
 			}
 			if deps.Web != nil {
 				deps.Web.MountUI(r)
+				deps.Web.MountAppUI(r)
 			}
 		})
 	})

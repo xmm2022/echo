@@ -7,13 +7,16 @@ package web
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/xmm2022/echo/internal/auth"
+	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
 	"github.com/xmm2022/echo/internal/web/templates"
@@ -34,6 +37,7 @@ const (
 // Deps wires the dashboard handlers to the store.
 type Deps struct {
 	Store  *store.Store
+	Media  *media.Service
 	Logger *slog.Logger
 }
 
@@ -49,6 +53,24 @@ func (d Deps) Index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Index().Render(r.Context(), w); err != nil {
 		d.logger().Error("web: render index", "err", err)
+	}
+}
+
+const appCSP = "default-src 'self'; script-src 'self'; img-src 'self' https://image.tmdb.org data:; object-src 'none'; base-uri 'none'"
+
+func setAppHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", appCSP)
+}
+
+// App serves GET /app — the public, data-free user media shell. The shell only
+// contains token storage and htmx panel placeholders; every panel request below
+// still requires an authenticated user with discovery scope.
+func (d Deps) App(w http.ResponseWriter, r *http.Request) {
+	setAppHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.AppShell().Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app shell", "err", err)
 	}
 }
 
@@ -78,6 +100,14 @@ func (d Deps) MountUI(r chi.Router) {
 	})
 }
 
+// MountAppUI registers authenticated user media HTML fragment routes. It is
+// separate from MountUI so user discovery scope never gains the admin /ui tree.
+func (d Deps) MountAppUI(r chi.Router) {
+	r.Get("/app/discover", d.AppDiscover)
+	r.Get("/app/requests", d.AppRequests)
+	r.Get("/app/account", d.AppAccount)
+}
+
 func requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !auth.FromContext(r.Context()).HasScope("admin") {
@@ -95,6 +125,119 @@ func requireAdminFragment(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (d Deps) requireAppMediaService(w http.ResponseWriter, r *http.Request) (media.Actor, bool) {
+	setAppHeaders(w)
+	user := auth.FromContext(r.Context())
+	if !user.HasScope("discovery") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return media.Actor{}, false
+	}
+	if d.Media == nil {
+		http.Error(w, "media service not configured", http.StatusServiceUnavailable)
+		return media.Actor{}, false
+	}
+	return media.Actor{User: user, IP: r.RemoteAddr}, true
+}
+
+func (d Deps) writeAppMediaError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, media.ErrPolicyDenied):
+		http.Error(w, "forbidden", http.StatusForbidden)
+	case errors.Is(err, media.ErrInvalidRequest):
+		http.Error(w, "invalid request", http.StatusBadRequest)
+	case errors.Is(err, media.ErrLimitReached):
+		http.Error(w, "request limit reached", http.StatusTooManyRequests)
+	case errors.Is(err, media.ErrMetadataUnavailable):
+		http.Error(w, "metadata unavailable", http.StatusServiceUnavailable)
+	case errors.Is(err, media.ErrNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+	default:
+		d.logger().Error("web: app media error", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+func (d Deps) AppDiscover(w http.ResponseWriter, r *http.Request) {
+	actor, ok := d.requireAppMediaService(w, r)
+	if !ok {
+		return
+	}
+	targets, err := d.Media.Catalog(r.Context(), actor)
+	if err != nil {
+		d.writeAppMediaError(w, err)
+		return
+	}
+	var results []media.TMDBSummaryDTO
+	if query := strings.TrimSpace(r.URL.Query().Get("q")); query != "" {
+		mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
+		if mediaType == "" {
+			mediaType = "movie"
+		}
+		results, err = d.Media.Search(r.Context(), actor, media.SearchInput{
+			Query:     query,
+			MediaType: mediaType,
+			Language:  r.URL.Query().Get("language"),
+		})
+		if err != nil {
+			d.writeAppMediaError(w, err)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.MediaSearchPanel().Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app search panel", "err", err)
+		return
+	}
+	if err := templates.MediaSearchResults(results, targets).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app search results", "err", err)
+		return
+	}
+	if err := templates.MediaCatalog(targets).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app catalog", "err", err)
+	}
+}
+
+func (d Deps) AppRequests(w http.ResponseWriter, r *http.Request) {
+	actor, ok := d.requireAppMediaService(w, r)
+	if !ok {
+		return
+	}
+	rows, err := d.Media.ListRequests(r.Context(), actor, 50, 0)
+	if err != nil {
+		d.writeAppMediaError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.MediaRequestsTable(rows).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app requests", "err", err)
+	}
+}
+
+func (d Deps) AppAccount(w http.ResponseWriter, r *http.Request) {
+	actor, ok := d.requireAppMediaService(w, r)
+	if !ok {
+		return
+	}
+	targets, err := d.Media.Catalog(r.Context(), actor)
+	if err != nil {
+		d.writeAppMediaError(w, err)
+		return
+	}
+	subscriptions, err := d.Media.ListSubscriptions(r.Context(), actor, 50, 0)
+	if err != nil {
+		d.writeAppMediaError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.MediaCatalog(targets).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app account catalog", "err", err)
+		return
+	}
+	if err := templates.MediaSubscriptionsTable(subscriptions).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render app subscriptions", "err", err)
+	}
 }
 
 // UIJobs serves GET /ui/jobs — the recent-jobs HTML fragment.

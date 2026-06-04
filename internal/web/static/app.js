@@ -1,21 +1,41 @@
-// app.js — Echo admin dashboard glue.
-//
-// The v0.1 API is guarded by a single static admin bearer token (spec §6). A
-// browser cannot send that header on its own, so the dashboard shell at "/" is a
-// data-free public page with a token box: the admin pastes the token once, it is
-// kept in localStorage, and this script attaches it to every htmx request. The
-// data endpoints (/ui/*, /api/*) stay behind the auth middleware.
+// app.js - Echo admin dashboard and user app glue.
 (function () {
   "use strict";
-  var KEY = "echo_admin_token";
+  var ADMIN_KEY = "echo_admin_token";
+  var APP_KEY = "echo_app_token";
 
-  function token() {
-    return (localStorage.getItem(KEY) || "").trim();
+  function tokenForPath(path) {
+    if (path.indexOf("/static/") === 0) {
+      return "";
+    }
+    if (path.indexOf("/api/me/") === 0 || path.indexOf("/app/") === 0) {
+      return localStorage.getItem(APP_KEY) || "";
+    }
+    if (path.indexOf("/ui/") === 0 || path.indexOf("/api/") === 0) {
+      return localStorage.getItem(ADMIN_KEY) || "";
+    }
+    return "";
   }
 
-  // Attach the bearer token to every htmx-issued request.
+  function sameOriginPath(url) {
+    if (!url) {
+      return "";
+    }
+    try {
+      var parsed = new URL(url, window.location.origin);
+      if (parsed.origin !== window.location.origin) {
+        return "";
+      }
+      return parsed.pathname;
+    } catch (err) {
+      return "";
+    }
+  }
+
+  // Attach a bearer token only to same-origin htmx requests owned by one shell.
   document.body.addEventListener("htmx:configRequest", function (evt) {
-    var t = token();
+    var path = sameOriginPath(evt.detail.path);
+    var t = tokenForPath(path);
     if (t) {
       evt.detail.headers["Authorization"] = "Bearer " + t;
     }
@@ -78,10 +98,23 @@
       url = form.getAttribute("hx-patch");
       method = "PATCH";
     }
-    if (!url || url.indexOf("/api/") !== 0) {
+    var path = sameOriginPath(url);
+    if (!path || path.indexOf("/api/me/") === 0 || path.indexOf("/api/") !== 0) {
       return null;
     }
     return { url: url, method: method };
+  }
+
+  function userMediaTarget(form) {
+    var url = form.getAttribute("hx-post");
+    if (!url) {
+      return null;
+    }
+    var path = sameOriginPath(url);
+    if (!path || path.indexOf("/api/me/discovery/") !== 0) {
+      return null;
+    }
+    return { url: url, path: path, method: "POST" };
   }
 
   // Intercept submits of the v0.2 management forms in the capture phase, before
@@ -95,6 +128,15 @@
       if (!form || form.tagName !== "FORM") {
         return;
       }
+      var userTarget = userMediaTarget(form);
+      if (userTarget) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        submitJSONForm(form, userTarget, function () {
+          reloadAppPanels();
+        });
+        return;
+      }
       var target = managementTarget(form);
       if (!target) {
         return;
@@ -102,31 +144,37 @@
       evt.preventDefault();
       evt.stopPropagation();
 
-      var headers = { "Content-Type": "application/json" };
-      var t = token();
-      if (t) {
-        headers["Authorization"] = "Bearer " + t;
-      }
-      fetch(target.url, {
-        method: target.method,
-        headers: headers,
-        body: JSON.stringify(serializeForm(form)),
-      })
-        .then(function (resp) {
-          if (resp.ok) {
-            reloadFor(form);
-            return;
-          }
-          return resp.text().then(function (body) {
-            alert("Save failed (" + resp.status + "): " + body);
-          });
-        })
-        .catch(function (err) {
-          alert("Save failed: " + err);
-        });
+      submitJSONForm(form, target, function () {
+        reloadFor(form);
+      });
     },
     true
   );
+
+  function submitJSONForm(form, target, onOK) {
+    var headers = { "Content-Type": "application/json" };
+    var t = tokenForPath(target.path || sameOriginPath(target.url));
+    if (t) {
+      headers["Authorization"] = "Bearer " + t;
+    }
+    fetch(target.url, {
+      method: target.method,
+      headers: headers,
+      body: JSON.stringify(serializeForm(form)),
+    })
+      .then(function (resp) {
+        if (resp.ok) {
+          onOK();
+          return;
+        }
+        return resp.text().then(function (body) {
+          alert("Save failed (" + resp.status + "): " + body);
+        });
+      })
+      .catch(function (err) {
+        alert("Save failed: " + err);
+      });
+  }
 
   // reloadFor refreshes the data after a successful mutation. It re-triggers the
   // enclosing htmx panel (the [data-reload] div with an hx-get) so only that
@@ -142,22 +190,42 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    var input = document.getElementById("admin-token");
+    if (window.htmx) {
+      window.htmx.config.allowScriptTags = false;
+    }
+    bindTokenInput("admin-token", ADMIN_KEY);
+    bindTokenInput("app-token", APP_KEY);
+  });
+
+  function bindTokenInput(id, key) {
+    var input = document.getElementById(id);
     if (!input) {
       return;
     }
-    input.value = token();
+    input.value = localStorage.getItem(key) || "";
     input.addEventListener("change", function () {
-      localStorage.setItem(KEY, input.value.trim());
+      localStorage.setItem(key, input.value.trim());
       reloadPanels();
     });
-  });
+  }
 
   function reloadPanels() {
     if (!window.htmx) {
       return;
     }
     var panels = document.querySelectorAll("[data-reload]");
+    for (var i = 0; i < panels.length; i++) {
+      window.htmx.trigger(panels[i], "reload");
+    }
+  }
+
+  function reloadAppPanels() {
+    if (!window.htmx) {
+      return;
+    }
+    var panels = document.querySelectorAll(
+      "#media-requests-panel, #media-account-panel"
+    );
     for (var i = 0; i < panels.length; i++) {
       window.htmx.trigger(panels[i], "reload");
     }

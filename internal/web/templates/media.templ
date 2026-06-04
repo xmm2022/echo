@@ -1,0 +1,228 @@
+package templates
+
+import (
+	"strconv"
+	"strings"
+
+	"github.com/xmm2022/echo/internal/media"
+)
+
+func mediaPosterURL(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\"'<>") {
+		return ""
+	}
+	return "https://image.tmdb.org/t/p/w92" + path
+}
+
+func mediaYear(year int) string {
+	if year == 0 {
+		return ""
+	}
+	return strconv.Itoa(year)
+}
+
+func mediaInt64(value int64) string {
+	if value == 0 {
+		return ""
+	}
+	return strconv.FormatInt(value, 10)
+}
+
+func mediaTargetOptionLabel(target media.TargetDTO) string {
+	label := target.Label
+	if target.MediaType != "" {
+		label += " - " + target.MediaType
+	}
+	if target.Default {
+		label += " - default"
+	}
+	return label
+}
+
+templ AppShell() {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>Echo App</title>
+			<script src="/static/htmx.min.js"></script>
+			<script src="/static/app.js"></script>
+		</head>
+		<body>
+			<header>
+				<h1>Echo App</h1>
+				<form>
+					<label for="app-token">Token</label>
+					<input id="app-token" type="password" autocomplete="off" placeholder="Bearer token"/>
+				</form>
+			</header>
+			<main>
+				<section aria-labelledby="media-discover-heading">
+					<h2 id="media-discover-heading">Discover</h2>
+					<div id="media-discover-panel" data-reload="true" hx-get="/app/discover" hx-trigger="load, reload" hx-target="this">Loading...</div>
+				</section>
+				<section aria-labelledby="media-requests-heading">
+					<h2 id="media-requests-heading">Requests</h2>
+					<div id="media-requests-panel" data-reload="true" hx-get="/app/requests" hx-trigger="load, reload" hx-target="this">Loading...</div>
+				</section>
+				<section aria-labelledby="media-account-heading">
+					<h2 id="media-account-heading">Subscriptions</h2>
+					<div id="media-account-panel" data-reload="true" hx-get="/app/account" hx-trigger="load, reload" hx-target="this">Loading...</div>
+				</section>
+			</main>
+		</body>
+	</html>
+}
+
+templ MediaSearchPanel() {
+	<form hx-get="/app/discover" hx-target="#media-discover-panel" hx-swap="innerHTML">
+		<label for="media-query">Search</label>
+		<input id="media-query" name="q" type="search" maxlength="120" required/>
+		<label for="media-type">Type</label>
+		<select id="media-type" name="type">
+			<option value="movie">Movie</option>
+			<option value="tv">TV</option>
+		</select>
+		<label for="media-language">Language</label>
+		<input id="media-language" name="language" value="zh-CN" maxlength="32"/>
+		<button type="submit">Search</button>
+	</form>
+}
+
+templ MediaSearchResults(rows []media.TMDBSummaryDTO, targets []media.TargetDTO) {
+	<section aria-labelledby="media-results-heading">
+		<h3 id="media-results-heading">Search results</h3>
+		if len(rows) == 0 {
+			<p>No search results.</p>
+		} else {
+			for _, row := range rows {
+				<article>
+					if mediaPosterURL(row.PosterPath) != "" {
+						<img src={ mediaPosterURL(row.PosterPath) } width="64" height="96" alt={ "Poster for " + row.Title } loading="lazy"/>
+					}
+					<h4>{ row.Title }</h4>
+					<p>{ row.MediaType } { mediaYear(row.ReleaseYear) }</p>
+					if row.Overview != "" {
+						<p>{ row.Overview }</p>
+					}
+					if len(targets) > 0 {
+						<form hx-post="/api/me/discovery/requests" hx-swap="none">
+							<input type="hidden" name="tmdb_id" value={ row.TMDBID }/>
+							<input type="hidden" name="media_type" value={ row.MediaType }/>
+							<input type="hidden" name="tmdb_language" value="zh-CN"/>
+							<label for={ "media-target-" + row.MediaType + "-" + row.TMDBID }>Target</label>
+							<select id={ "media-target-" + row.MediaType + "-" + row.TMDBID } name="target_id" data-type="number">
+								for _, target := range targets {
+									<option value={ strconv.FormatInt(target.ID, 10) } selected?={ target.Default }>{ mediaTargetOptionLabel(target) }</option>
+								}
+							</select>
+							<label for={ "media-note-" + row.MediaType + "-" + row.TMDBID }>Note</label>
+							<input id={ "media-note-" + row.MediaType + "-" + row.TMDBID } name="user_note" maxlength="1000"/>
+							<button type="submit">Request</button>
+						</form>
+					}
+				</article>
+			}
+		}
+	</section>
+}
+
+templ MediaRequestsTable(rows []media.RequestDTO) {
+	if len(rows) == 0 {
+		<p>No requests.</p>
+	} else {
+		<table>
+			<thead>
+				<tr><th>ID</th><th>Title</th><th>Type</th><th>Target</th><th>Status</th><th>Reason</th><th>Created</th><th></th></tr>
+			</thead>
+			<tbody>
+				for _, row := range rows {
+					<tr>
+						<td>{ strconv.FormatInt(row.ID, 10) }</td>
+						<td>{ row.Title }</td>
+						<td>{ row.MediaType }</td>
+						<td>{ row.TargetLabel }</td>
+						<td>{ row.Status }</td>
+						<td>{ row.SafeReason }</td>
+						<td>{ mediaInt64(row.CreatedAt) }</td>
+						<td>
+							if row.Status == "pending_review" {
+								<form hx-post={ "/api/me/discovery/requests/" + strconv.FormatInt(row.ID, 10) + "/cancel" } hx-swap="none">
+									<button type="submit">Cancel</button>
+								</form>
+							}
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ MediaSubscriptionsTable(rows []media.SubscriptionDTO) {
+	<section aria-labelledby="media-subscriptions-heading">
+		<h3 id="media-subscriptions-heading">Subscription status</h3>
+		if len(rows) == 0 {
+			<p>No subscriptions.</p>
+		} else {
+			<table>
+				<thead>
+					<tr><th>ID</th><th>Title</th><th>Type</th><th>Target</th><th>User</th><th>Pipeline</th><th>Latest</th><th>Updated</th><th></th></tr>
+				</thead>
+				<tbody>
+					for _, row := range rows {
+						<tr>
+							<td>{ strconv.FormatInt(row.ID, 10) }</td>
+							<td>{ row.Title }</td>
+							<td>{ row.MediaType }</td>
+							<td>{ row.TargetLabel }</td>
+							<td>{ row.UserStatus }</td>
+							<td>{ row.PipelineStatus }</td>
+							<td>{ row.LatestState }</td>
+							<td>{ mediaInt64(row.UpdatedAt) }</td>
+							<td>
+								if row.UserStatus == "active" {
+									<form hx-post={ "/api/me/discovery/subscriptions/" + strconv.FormatInt(row.ID, 10) + "/pause" } hx-swap="none">
+										<button type="submit">Pause</button>
+									</form>
+								} else if row.UserStatus == "paused" {
+									<form hx-post={ "/api/me/discovery/subscriptions/" + strconv.FormatInt(row.ID, 10) + "/resume" } hx-swap="none">
+										<button type="submit">Resume</button>
+									</form>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}
+
+templ MediaCatalog(targets []media.TargetDTO) {
+	<section aria-labelledby="media-catalog-heading">
+		<h3 id="media-catalog-heading">Account status</h3>
+		if len(targets) == 0 {
+			<p>No targets available.</p>
+		} else {
+			<table>
+				<thead>
+					<tr><th>Target</th><th>Type</th><th>Default</th><th>Requests</th><th>Search</th></tr>
+				</thead>
+				<tbody>
+					for _, target := range targets {
+						<tr>
+							<td>{ target.Label }</td>
+							<td>{ target.MediaType }</td>
+							<td>{ strconv.FormatBool(target.Default) }</td>
+							<td>{ target.RequestMode }</td>
+							<td>{ strconv.FormatBool(target.CanSearch) }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}
