@@ -17,6 +17,13 @@ type MetadataClient interface {
 
 type RateLimiter interface {
 	Allow(key string, limit int, window time.Duration) bool
+	AllowAll(checks []RateLimitCheck) bool
+}
+
+type RateLimitCheck struct {
+	Key    string
+	Limit  int
+	Window time.Duration
 }
 
 type Service struct {

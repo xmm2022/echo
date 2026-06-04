@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,6 +16,9 @@ import (
 const (
 	mediaAPIDefaultLimit = 50
 	mediaAPIMaxLimit     = 100
+
+	mediaSearchQueryMaxBytes = 120
+	mediaUserNoteMaxBytes    = 1000
 )
 
 type createMediaRequestBody struct {
@@ -52,9 +56,19 @@ func (d APIDeps) SearchMedia(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	mediaType := normalizeMediaAPIMediaType(r.URL.Query().Get("type"))
+	if query == "" || len([]byte(query)) > mediaSearchQueryMaxBytes || !isAllowedMediaAPIMediaType(mediaType) {
+		d.writeMediaError(w, media.ErrInvalidRequest)
+		return
+	}
+	if !d.Media.AllowSearchWithTMDBRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
+		return
+	}
 	rows, err := d.Media.Search(r.Context(), actor, media.SearchInput{
-		Query:     r.URL.Query().Get("q"),
-		MediaType: r.URL.Query().Get("type"),
+		Query:     query,
+		MediaType: mediaType,
 		Language:  r.URL.Query().Get("language"),
 	})
 	if err != nil {
@@ -70,6 +84,10 @@ func (d APIDeps) SearchMedia(w http.ResponseWriter, r *http.Request) {
 func (d APIDeps) ListMediaCatalog(w http.ResponseWriter, r *http.Request) {
 	actor, ok := d.requireMediaService(w, r)
 	if !ok {
+		return
+	}
+	if !d.Media.AllowStatusPollRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
 		return
 	}
 	rows, err := d.Media.Catalog(r.Context(), actor)
@@ -92,6 +110,15 @@ func (d APIDeps) CreateMediaRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !validateCreateMediaRequestBody(body) {
+		d.writeMediaError(w, media.ErrInvalidRequest)
+		return
+	}
+	if !d.Media.AllowRequestCreateWithTMDBRefreshRate(actor) {
+		_ = d.Media.RecordUserAuditEvent(r.Context(), actor, "rate_limit_deny", "request", body.TMDBID, "rate-limit-reached")
+		d.writeMediaError(w, media.ErrLimitReached)
+		return
+	}
 	row, err := d.Media.CreateRequest(r.Context(), actor, media.CreateRequestInput{
 		TMDBID:           body.TMDBID,
 		MediaType:        body.MediaType,
@@ -112,6 +139,10 @@ func (d APIDeps) ListMediaRequests(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !d.Media.AllowStatusPollRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
+		return
+	}
 	rows, err := d.Media.ListRequests(r.Context(), actor, queryLimit(r, mediaAPIDefaultLimit, mediaAPIMaxLimit), queryOffset(r))
 	if err != nil {
 		d.writeMediaError(w, err)
@@ -126,6 +157,10 @@ func (d APIDeps) ListMediaRequests(w http.ResponseWriter, r *http.Request) {
 func (d APIDeps) GetMediaRequest(w http.ResponseWriter, r *http.Request) {
 	actor, ok := d.requireMediaService(w, r)
 	if !ok {
+		return
+	}
+	if !d.Media.AllowStatusPollRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
 		return
 	}
 	id, ok := parseInt64Param(w, r, "id")
@@ -145,6 +180,10 @@ func (d APIDeps) CancelMediaRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !d.Media.AllowRequestActionRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
+		return
+	}
 	id, ok := parseInt64Param(w, r, "id")
 	if !ok {
 		return
@@ -160,6 +199,10 @@ func (d APIDeps) CancelMediaRequest(w http.ResponseWriter, r *http.Request) {
 func (d APIDeps) ListMediaSubscriptions(w http.ResponseWriter, r *http.Request) {
 	actor, ok := d.requireMediaService(w, r)
 	if !ok {
+		return
+	}
+	if !d.Media.AllowStatusPollRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
 		return
 	}
 	rows, err := d.Media.ListSubscriptions(r.Context(), actor, queryLimit(r, mediaAPIDefaultLimit, mediaAPIMaxLimit), queryOffset(r))
@@ -178,6 +221,10 @@ func (d APIDeps) PauseMediaSubscription(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if !d.Media.AllowRequestActionRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
+		return
+	}
 	id, ok := parseInt64Param(w, r, "id")
 	if !ok {
 		return
@@ -193,6 +240,10 @@ func (d APIDeps) PauseMediaSubscription(w http.ResponseWriter, r *http.Request) 
 func (d APIDeps) ResumeMediaSubscription(w http.ResponseWriter, r *http.Request) {
 	actor, ok := d.requireMediaService(w, r)
 	if !ok {
+		return
+	}
+	if !d.Media.AllowRequestActionRate(actor) {
+		d.writeMediaError(w, media.ErrLimitReached)
 		return
 	}
 	id, ok := parseInt64Param(w, r, "id")
@@ -258,6 +309,36 @@ func decodeCreateMediaRequestBody(w http.ResponseWriter, r *http.Request) (creat
 		return createMediaRequestBody{}, false
 	}
 	return body, true
+}
+
+func validateCreateMediaRequestBody(body createMediaRequestBody) bool {
+	tmdbID := strings.TrimSpace(body.TMDBID)
+	mediaType := normalizeMediaAPIMediaType(body.MediaType)
+	language := strings.TrimSpace(body.TMDBLanguage)
+	if language == "" {
+		language = "zh-CN"
+	}
+	userNote := strings.TrimSpace(body.UserNote)
+	if tmdbID == "" || len([]byte(tmdbID)) > 64 || !isAllowedMediaAPIMediaType(mediaType) || body.TargetID <= 0 {
+		return false
+	}
+	if !validMediaAPILanguage(language) || len([]byte(userNote)) > mediaUserNoteMaxBytes {
+		return false
+	}
+	_, _, err := media.ValidateSeasonFilterForMedia(mediaType, body.SeasonFilterJSON)
+	return err == nil
+}
+
+func normalizeMediaAPIMediaType(mediaType string) string {
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
+func isAllowedMediaAPIMediaType(mediaType string) bool {
+	return mediaType == "movie" || mediaType == "tv"
+}
+
+func validMediaAPILanguage(language string) bool {
+	return language != "" && len([]byte(language)) <= 32 && !strings.ContainsAny(language, " \t\r\n")
 }
 
 func (d APIDeps) writeMediaError(w http.ResponseWriter, err error) {

@@ -237,6 +237,7 @@ func runServe(args []string) error {
 	}
 
 	apiDeps := buildAPIDeps(st, sidecar, runner, cfg, logger, tmdbClient, time.Now)
+	webDeps := buildWebDeps(st, logger, apiDeps.Media)
 	deps := httpserver.Deps{
 		Logger:     logger,
 		AdminToken: cfg.Auth.AdminToken,
@@ -245,7 +246,7 @@ func runServe(args []string) error {
 		Stream:     &handlers.StreamDeps{Resolver: resolver, Sidecar: sidecar, Logger: logger, Metrics: m},
 		API:        &apiDeps,
 		Bootstrap:  &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
-		Web:        &web.Deps{Store: st, Logger: logger},
+		Web:        &webDeps,
 		Ready:      buildReadyChecker(cfg, st.DB, rawSidecar, version),
 		Registry:   registry,
 		Emby:       embyDeps,
@@ -293,9 +294,13 @@ func buildAPIDeps(
 		Now:           now,
 	}
 	if tmdbClient != nil {
-		deps.Media = &media.Service{Store: st, TMDB: tmdbClient, Now: now}
+		deps.Media = &media.Service{Store: st, TMDB: tmdbClient, Limiter: media.NewFixedWindowLimiter(now), Now: now}
 	}
 	return deps
+}
+
+func buildWebDeps(st *store.Store, logger *slog.Logger, mediaService *media.Service) web.Deps {
+	return web.Deps{Store: st, Media: mediaService, Logger: logger}
 }
 
 // buildEmbyDeps constructs the Emby reverse-proxy Deps. When no enabled Emby server is

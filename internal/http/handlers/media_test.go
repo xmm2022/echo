@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -322,11 +323,326 @@ WHERE id = ?`, req.ID); err != nil {
 	assertBodyOmits(t, rec.Body.String(), "acc-115", "default_args_json", "target_account")
 }
 
+func TestUserMediaRateLimitReturnsSafe429(t *testing.T) {
+	limiter := newFakeMediaLimiter()
+	limiter.deny["search:user:u1"] = true
+	fake := newFakeMediaMetadataClient()
+	deps := APIDeps{
+		Media:  &media.Service{TMDB: fake, Limiter: limiter, Now: apiClock()},
+		Logger: apiLogger(),
+		Now:    apiClock(),
+	}
+
+	rec := doReqAs(t, http.MethodGet, "/api/me/discovery/search?q=Matrix&type=movie", "", mediaHTTPUser("u1"), func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate limited search status=%d body=%s, want 429", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request-limit-reached") {
+		t.Fatalf("rate limited search body=%s, want safe rate-limit code", rec.Body.String())
+	}
+	assertNoStore(t, rec)
+	assertBodyOmits(t, rec.Body.String(), mediaHTTPForbiddenResponseFragments()...)
+	if fake.searchCalls() != 0 {
+		t.Fatalf("search calls=%d, want 0 when HTTP limiter denies", fake.searchCalls())
+	}
+}
+
+func TestUserMediaSearchCapsQueryAndPageSize(t *testing.T) {
+	st, deps, fake, target := newMediaHTTPCreateFixture(t, "u1", "approval_required")
+	fake.searches["movie:Matrix"] = []tmdb.Media{{TMDBID: "603", MediaType: "movie", Title: "The Matrix", RawJSON: `{}`}}
+	user := mediaHTTPUser("u1")
+
+	longQuery := strings.Repeat("x", 121)
+	rec := doReqAs(t, http.MethodGet, "/api/me/discovery/search?q="+longQuery+"&type=movie", "", user, func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("long search status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls() != 0 {
+		t.Fatalf("search calls=%d, want 0 for overlong query", fake.searchCalls())
+	}
+
+	for i := 0; i < 101; i++ {
+		seedMediaHTTPRequestRow(t, st, "u1", target, mediaHTTPTargetDeps{
+			libraryID:         target.LibraryID,
+			producerProfileID: target.ProducerProfileID,
+			ruleProfileID:     target.RuleProfileID,
+		}, int64(i))
+	}
+	rec = doReqAs(t, http.MethodGet, "/api/me/discovery/requests?limit=9999", "", user, func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request list status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var requests []media.RequestDTO
+	decodeBody(t, rec, &requests)
+	if len(requests) != 100 {
+		t.Fatalf("request list length=%d, want capped 100", len(requests))
+	}
+
+	seedMediaHTTPSubscriptions(t, st, "u1", mediaHTTPTargetDeps{
+		libraryID:         target.LibraryID,
+		producerProfileID: target.ProducerProfileID,
+		ruleProfileID:     target.RuleProfileID,
+	}, 101)
+	rec = doReqAs(t, http.MethodGet, "/api/me/discovery/subscriptions?limit=9999", "", user, func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("subscription list status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var subscriptions []media.SubscriptionDTO
+	decodeBody(t, rec, &subscriptions)
+	if len(subscriptions) != 100 {
+		t.Fatalf("subscription list length=%d, want capped 100", len(subscriptions))
+	}
+}
+
+func TestUserMediaSearchHonorsGlobalTMDBLimit(t *testing.T) {
+	st := newAPIStore(t)
+	createUserRow(t, st, "u1", "user")
+	seedMediaHTTPPolicy(t, st, "search policy", "u1", "approval_required", 1)
+	fake := newFakeMediaMetadataClient()
+	limiter := newFakeMediaLimiter()
+	limiter.deny["tmdb:global:search"] = true
+	deps := newMediaHTTPDeps(st, fake)
+	deps.Media.Limiter = limiter
+
+	rec := doReqAs(t, http.MethodGet, "/api/me/discovery/search?q=Matrix&type=movie", "", mediaHTTPUser("u1"), func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("global search limit status=%d body=%s, want 429", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls() != 0 {
+		t.Fatalf("search calls=%d, want 0 when global TMDB limiter denies", fake.searchCalls())
+	}
+}
+
+func TestUserMediaRateLimitUsesRemoteAddrNotForwardedFor(t *testing.T) {
+	limiter := newFakeMediaLimiter()
+	fake := newFakeMediaMetadataClient()
+	fake.searches["movie:Matrix"] = []tmdb.Media{{TMDBID: "603", MediaType: "movie", Title: "The Matrix", RawJSON: `{}`}}
+	deps := APIDeps{
+		Media:  &media.Service{TMDB: fake, Limiter: limiter, Now: apiClock()},
+		Logger: apiLogger(),
+		Now:    apiClock(),
+	}
+	r := chi.NewRouter()
+	deps.MountMedia(r)
+	req := httptest.NewRequest(http.MethodGet, "/api/me/discovery/search?q=Matrix&type=movie", nil)
+	req.RemoteAddr = "203.0.113.10:54321"
+	req.Header.Set("X-Forwarded-For", "198.51.100.99")
+	req = req.WithContext(auth.NewContext(req.Context(), mediaHTTPUser("u1")))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("search status=%d body=%s, want policy 403 after rate checks", rec.Code, rec.Body.String())
+	}
+	limiter.assertCalled(t, "search:ip:203.0.113.10")
+	limiter.assertNotCalled(t, "search:ip:198.51.100.99")
+}
+
+func TestUserMediaPolicyAndRateLimitDenyCreateSafeAuditEvents(t *testing.T) {
+	st := newAPIStore(t)
+	createUserRow(t, st, "u1", "user")
+	deps := newMediaHTTPDeps(st, newFakeMediaMetadataClient())
+	rec := doReqAs(t, http.MethodPost, "/api/me/discovery/requests", `{"tmdb_id":"603","media_type":"movie","target_id":1}`, mediaHTTPUser("u1"), func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("policy deny create status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+	action, reason := latestMediaHTTPAudit(t, st, "u1")
+	if action != "request_create_deny" || reason != "request-disabled" {
+		t.Fatalf("policy deny audit action=%q reason=%q, want request_create_deny/request-disabled", action, reason)
+	}
+
+	st, deps, fake, target := newMediaHTTPCreateFixture(t, "limited-user", "approval_required")
+	fake.movies["603"] = tmdb.Media{TMDBID: "603", MediaType: "movie", Title: "The Matrix", RawJSON: `{}`}
+	limiter := newFakeMediaLimiter()
+	limiter.deny["request-create:user:limited-user"] = true
+	deps.Media.Limiter = limiter
+	body := `{"tmdb_id":"603","media_type":"movie","target_id":` + itoa(target.ID) + `}`
+	rec = doReqAs(t, http.MethodPost, "/api/me/discovery/requests", body, mediaHTTPUser("limited-user"), func(r chi.Router) {
+		deps.MountMedia(r)
+	})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate deny create status=%d body=%s, want 429", rec.Code, rec.Body.String())
+	}
+	if fake.detailCalls() != 0 {
+		t.Fatalf("detail calls=%d, want 0 when create limiter denies", fake.detailCalls())
+	}
+	action, reason = latestMediaHTTPAudit(t, st, "limited-user")
+	if action != "rate_limit_deny" || reason != "rate-limit-reached" {
+		t.Fatalf("rate deny audit action=%q reason=%q, want rate_limit_deny/rate-limit-reached", action, reason)
+	}
+}
+
+func TestUserMediaDTOJSONDoesNotContainSensitiveKeys(t *testing.T) {
+	payload, err := json.Marshal(struct {
+		Search        media.TMDBSummaryDTO  `json:"search"`
+		Request       media.RequestDTO      `json:"request"`
+		Subscription  media.SubscriptionDTO `json:"subscription"`
+		Target        media.TargetDTO       `json:"target"`
+		PosterPathRaw string                `json:"poster_path_raw"`
+	}{
+		Search: media.TMDBSummaryDTO{
+			TMDBID:       "603",
+			MediaType:    "movie",
+			Title:        "The Matrix",
+			PosterPath:   "/poster.jpg?share_code=not-a-json-key",
+			Availability: "unknown",
+		},
+		Request:       media.RequestDTO{ID: 1, TMDBID: "603", MediaType: "movie", Title: "The Matrix", TargetLabel: "Default", Status: "pending_review"},
+		Subscription:  media.SubscriptionDTO{ID: 2, TMDBID: "603", MediaType: "movie", Title: "The Matrix", UserStatus: "active", PipelineStatus: "active", LatestState: "pending"},
+		Target:        media.TargetDTO{ID: 3, Label: "Default", Default: true, RequestMode: "approval_required", CanSearch: true},
+		PosterPathRaw: "/still/inert/share_code/text",
+	})
+	if err != nil {
+		t.Fatalf("marshal DTOs: %v", err)
+	}
+	body := string(payload)
+	for _, key := range []string{
+		`"share_code"`,
+		`"receive_code"`,
+		`"raw_text_ref"`,
+		`"target_account"`,
+		`"storage_mount"`,
+		`"default_args_json"`,
+		`"queued_job_id"`,
+	} {
+		if strings.Contains(body, key) {
+			t.Fatalf("DTO JSON leaked sensitive key %s: %s", key, body)
+		}
+	}
+}
+
+func TestHXRequestDoesNotBypassDiscoveryScope(t *testing.T) {
+	st := newAPIStore(t)
+	createUserRow(t, st, "discovery-user", "user")
+	createUserRow(t, st, "read-user", "user")
+	discoveryToken := "discovery-token"
+	readToken := "read-token"
+	seedMediaHTTPAPIToken(t, st, "tok-discovery", "discovery-user", discoveryToken, []string{"discovery"})
+	seedMediaHTTPAPIToken(t, st, "tok-read", "read-user", readToken, []string{"read"})
+
+	checker := (&auth.Authenticator{Store: st, Now: apiClock()}).Authenticate
+	deps := APIDeps{Media: &media.Service{Store: st, Now: apiClock()}, Logger: apiLogger(), Now: apiClock()}
+	router := chi.NewRouter()
+	router.Use(authmw.AuthFunc(checker))
+	deps.MountMedia(router)
+
+	do := func(method, target, token string, mutate func(*http.Request)) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, target, nil)
+		req.RemoteAddr = "203.0.113.10:12345"
+		req.Header.Set("HX-Request", "true")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if mutate != nil {
+			mutate(req)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := do(http.MethodGet, "/api/me/discovery/catalog", "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("HX request without bearer status=%d body=%s, want 401", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("HX request without bearer missing WWW-Authenticate")
+	}
+
+	rec = do(http.MethodGet, "/api/me/discovery/catalog", readToken, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bearer without discovery scope status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+
+	authBypassCases := []struct {
+		name   string
+		target string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "cookie",
+			mutate: func(req *http.Request) {
+				req.AddCookie(&http.Cookie{Name: "Authorization", Value: "Bearer " + discoveryToken})
+			},
+		},
+		{name: "query token", target: "?access_token=" + discoveryToken},
+		{
+			name: "form token",
+			mutate: func(req *http.Request) {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Body = io.NopCloser(strings.NewReader("access_token=" + discoveryToken))
+			},
+		},
+	}
+	for _, tc := range authBypassCases {
+		target := "/api/me/discovery/catalog" + tc.target
+		rec = do(http.MethodGet, target, "", tc.mutate)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s auth bypass status=%d body=%s, want 401", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+
+	methodOverrideCases := []struct {
+		name   string
+		target string
+		mutate func(*http.Request)
+	}{
+		{name: "_method query", target: "?_method=POST"},
+		{
+			name: "X-HTTP-Method-Override",
+			mutate: func(req *http.Request) {
+				req.Header.Set("X-HTTP-Method-Override", "POST")
+			},
+		},
+	}
+	for _, tc := range methodOverrideCases {
+		target := "/api/me/discovery/requests/1/cancel" + tc.target
+		rec = do(http.MethodGet, target, discoveryToken, tc.mutate)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s override status=%d body=%s, want 405 method not accepted", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec = do(http.MethodGet, "/api/me/discovery/requests?_method=POST", discoveryToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create route GET with _method status=%d body=%s, want list route 200", rec.Code, rec.Body.String())
+	}
+	if got := countMediaHTTPRequestsForUser(t, st, "discovery-user"); got != 0 {
+		t.Fatalf("GET _method=POST created %d requests, want 0", got)
+	}
+
+	for _, path := range []string{
+		"/api/me/discovery/requests/1/cancel",
+		"/api/me/discovery/subscriptions/1/pause",
+		"/api/me/discovery/subscriptions/1/resume",
+	} {
+		rec = do(http.MethodGet, path, discoveryToken, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("state-changing route %s GET status=%d body=%s, want 405", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 type fakeMediaMetadataClient struct {
 	mu       sync.Mutex
 	searches map[string][]tmdb.Media
 	movies   map[string]tmdb.Media
 	tv       map[string]tmdb.Media
+	search   int
 	details  int
 }
 
@@ -341,6 +657,7 @@ func newFakeMediaMetadataClient() *fakeMediaMetadataClient {
 func (f *fakeMediaMetadataClient) Search(_ context.Context, query, mediaType string) ([]tmdb.Media, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.search++
 	return append([]tmdb.Media(nil), f.searches[mediaType+":"+query]...), nil
 }
 
@@ -370,6 +687,12 @@ func (f *fakeMediaMetadataClient) detailCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.details
+}
+
+func (f *fakeMediaMetadataClient) searchCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.search
 }
 
 func newMediaHTTPDeps(st *store.Store, tmdbClient media.MetadataClient) APIDeps {
@@ -565,6 +888,84 @@ func createMediaRequestThroughService(t *testing.T, deps APIDeps, userID string,
 	return got
 }
 
+func seedMediaHTTPRequestRow(t *testing.T, st *store.Store, userID string, target queries.DiscoveryPolicyTarget, deps mediaHTTPTargetDeps, n int64) queries.DiscoverySubscriptionRequest {
+	t.Helper()
+	row, err := st.CreateDiscoverySubscriptionRequest(context.Background(), queries.CreateDiscoverySubscriptionRequestParams{
+		RequesterUserID:             userID,
+		Status:                      "pending_review",
+		TmdbID:                      "req-" + itoa(n),
+		MediaType:                   "movie",
+		TmdbLanguage:                "zh-CN",
+		TitleSnapshot:               "Request " + itoa(n),
+		OriginalTitleSnapshot:       sql.NullString{},
+		ReleaseYearSnapshot:         sql.NullInt64{},
+		PosterPathSnapshot:          sql.NullString{},
+		SeasonFilterJson:            sql.NullString{},
+		PolicyIDSnapshot:            sql.NullInt64{Int64: target.PolicyID, Valid: true},
+		PolicyTargetIDSnapshot:      sql.NullInt64{Int64: target.ID, Valid: true},
+		TargetLabelSnapshot:         target.Label,
+		TargetLibraryID:             deps.libraryID,
+		TargetLibraryNameSnapshot:   "Media",
+		ProducerProfileIDSnapshot:   deps.producerProfileID,
+		ProducerProfileNameSnapshot: "115 default",
+		RuleProfileIDSnapshot:       deps.ruleProfileID,
+		RuleProfileVersionSnapshot:  1,
+		UserNote:                    sql.NullString{},
+		AdminNote:                   sql.NullString{},
+		ReviewedBy:                  sql.NullString{},
+		ReviewedAt:                  sql.NullInt64{},
+		SubscriptionID:              sql.NullInt64{},
+		IdempotencyKey:              "http-request-" + userID + "-" + itoa(n),
+		LastErrorKind:               sql.NullString{},
+		LastErrorMessage:            sql.NullString{},
+		CreatedAt:                   1000 + n,
+		UpdatedAt:                   1000 + n,
+	})
+	if err != nil {
+		t.Fatalf("seed request row %d: %v", n, err)
+	}
+	return row
+}
+
+func seedMediaHTTPSubscriptions(t *testing.T, st *store.Store, userID string, deps mediaHTTPTargetDeps, count int) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		n := int64(i)
+		subscription, err := st.CreateDiscoverySubscription(context.Background(), queries.CreateDiscoverySubscriptionParams{
+			OwnerID:           userID,
+			TmdbID:            "sub-" + itoa(n),
+			MediaType:         "movie",
+			TmdbLanguage:      "zh-CN",
+			TitleSnapshot:     "Subscription " + itoa(n),
+			LibraryID:         deps.libraryID,
+			ProducerProfileID: deps.producerProfileID,
+			RuleProfileID:     deps.ruleProfileID,
+			Status:            "active",
+			SeasonFilterJson:  sql.NullString{},
+			NextCheckAt:       sql.NullInt64{},
+			CreatedAt:         2000 + n,
+			UpdatedAt:         2000 + n,
+		})
+		if err != nil {
+			t.Fatalf("seed discovery subscription %d: %v", i, err)
+		}
+		if _, err := st.UpsertUserMediaSubscription(context.Background(), queries.UpsertUserMediaSubscriptionParams{
+			EchoUserID:              userID,
+			RequestID:               sql.NullInt64{},
+			DiscoverySubscriptionID: subscription.ID,
+			TmdbID:                  subscription.TmdbID,
+			MediaType:               subscription.MediaType,
+			SeasonFilterJson:        sql.NullString{},
+			SeasonFilterKey:         "",
+			Status:                  "active",
+			CreatedAt:               2000 + n,
+			UpdatedAt:               2000 + n,
+		}); err != nil {
+			t.Fatalf("seed user media subscription %d: %v", i, err)
+		}
+	}
+}
+
 func countMediaHTTPRequestsForUser(t *testing.T, st *store.Store, userID string) int64 {
 	t.Helper()
 	var count int64
@@ -575,6 +976,20 @@ WHERE requester_user_id = ?`, userID).Scan(&count); err != nil {
 		t.Fatalf("count requests for %s: %v", userID, err)
 	}
 	return count
+}
+
+func latestMediaHTTPAudit(t *testing.T, st *store.Store, userID string) (string, string) {
+	t.Helper()
+	var action, reason string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT action, safe_reason
+FROM discovery_user_audit_events
+WHERE actor_user_id = ?
+ORDER BY id DESC
+LIMIT 1`, userID).Scan(&action, &reason); err != nil {
+		t.Fatalf("latest audit for %s: %v", userID, err)
+	}
+	return action, reason
 }
 
 func mediaHTTPUser(userID string, scopes ...string) auth.UserContext {
@@ -640,5 +1055,55 @@ func mediaHTTPForbiddenResponseFragments() []string {
 		"producer args",
 		"rule secret",
 		"acc-115",
+	}
+}
+
+type fakeMediaLimiter struct {
+	mu    sync.Mutex
+	deny  map[string]bool
+	calls []string
+}
+
+func newFakeMediaLimiter() *fakeMediaLimiter {
+	return &fakeMediaLimiter{deny: make(map[string]bool)}
+}
+
+func (l *fakeMediaLimiter) Allow(key string, limit int, window time.Duration) bool {
+	return l.AllowAll([]media.RateLimitCheck{{Key: key, Limit: limit, Window: window}})
+}
+
+func (l *fakeMediaLimiter) AllowAll(checks []media.RateLimitCheck) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	allowed := true
+	for _, check := range checks {
+		l.calls = append(l.calls, check.Key)
+		if l.deny[check.Key] {
+			allowed = false
+		}
+	}
+	return allowed
+}
+
+func (l *fakeMediaLimiter) assertCalled(t *testing.T, key string) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, call := range l.calls {
+		if call == key {
+			return
+		}
+	}
+	t.Fatalf("limiter calls=%v, want call %q", l.calls, key)
+}
+
+func (l *fakeMediaLimiter) assertNotCalled(t *testing.T, key string) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, call := range l.calls {
+		if call == key {
+			t.Fatalf("limiter calls=%v, did not want call %q", l.calls, key)
+		}
 	}
 }

@@ -32,6 +32,7 @@ const (
 	// reads of the same sqlc queries.
 	dashboardManagementLimit = 100
 	dashboardPlaybackLimit   = 200
+	appMediaSearchMaxBytes   = 120
 )
 
 // Deps wires the dashboard handlers to the store.
@@ -148,7 +149,7 @@ func (d Deps) writeAppMediaError(w http.ResponseWriter, err error) {
 	case errors.Is(err, media.ErrInvalidRequest):
 		http.Error(w, "invalid request", http.StatusBadRequest)
 	case errors.Is(err, media.ErrLimitReached):
-		http.Error(w, "request limit reached", http.StatusTooManyRequests)
+		http.Error(w, "request-limit-reached", http.StatusTooManyRequests)
 	case errors.Is(err, media.ErrMetadataUnavailable):
 		http.Error(w, "metadata unavailable", http.StatusServiceUnavailable)
 	case errors.Is(err, media.ErrNotFound):
@@ -164,17 +165,31 @@ func (d Deps) AppDiscover(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	mediaType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+	if mediaType == "" {
+		mediaType = "movie"
+	}
+	if query != "" {
+		if len([]byte(query)) > appMediaSearchMaxBytes || !isAppMediaType(mediaType) {
+			d.writeAppMediaError(w, media.ErrInvalidRequest)
+			return
+		}
+		if !d.Media.AllowSearchPageRate(actor) {
+			d.writeAppMediaError(w, media.ErrLimitReached)
+			return
+		}
+	} else if !d.Media.AllowStatusPollRate(actor) {
+		d.writeAppMediaError(w, media.ErrLimitReached)
+		return
+	}
 	targets, err := d.Media.Catalog(r.Context(), actor)
 	if err != nil {
 		d.writeAppMediaError(w, err)
 		return
 	}
 	var results []media.TMDBSummaryDTO
-	if query := strings.TrimSpace(r.URL.Query().Get("q")); query != "" {
-		mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
-		if mediaType == "" {
-			mediaType = "movie"
-		}
+	if query != "" {
 		results, err = d.Media.Search(r.Context(), actor, media.SearchInput{
 			Query:     query,
 			MediaType: mediaType,
@@ -204,6 +219,10 @@ func (d Deps) AppRequests(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !d.Media.AllowStatusPollRate(actor) {
+		d.writeAppMediaError(w, media.ErrLimitReached)
+		return
+	}
 	rows, err := d.Media.ListRequests(r.Context(), actor, 50, 0)
 	if err != nil {
 		d.writeAppMediaError(w, err)
@@ -218,6 +237,10 @@ func (d Deps) AppRequests(w http.ResponseWriter, r *http.Request) {
 func (d Deps) AppAccount(w http.ResponseWriter, r *http.Request) {
 	actor, ok := d.requireAppMediaService(w, r)
 	if !ok {
+		return
+	}
+	if !d.Media.AllowStatusPollRate(actor) {
+		d.writeAppMediaError(w, media.ErrLimitReached)
 		return
 	}
 	targets, err := d.Media.Catalog(r.Context(), actor)
@@ -238,6 +261,10 @@ func (d Deps) AppAccount(w http.ResponseWriter, r *http.Request) {
 	if err := templates.MediaSubscriptionsTable(subscriptions).Render(r.Context(), w); err != nil {
 		d.logger().Error("web: render app subscriptions", "err", err)
 	}
+}
+
+func isAppMediaType(mediaType string) bool {
+	return mediaType == "movie" || mediaType == "tv"
 }
 
 // UIJobs serves GET /ui/jobs — the recent-jobs HTML fragment.

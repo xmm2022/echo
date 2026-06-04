@@ -17,6 +17,7 @@ import (
 
 	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
+	apihandlers "github.com/xmm2022/echo/internal/http/handlers"
 	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -255,6 +256,101 @@ func TestAppSearchFragmentEscapesHostileText(t *testing.T) {
 	}
 	if !strings.Contains(body, `name="target_id"`) || !strings.Contains(body, `data-type="number"`) {
 		t.Fatalf("request form must serialize target_id as a JSON number: %s", body)
+	}
+}
+
+func TestAppMediaRateLimitRunsBeforeDBOrTMDBWork(t *testing.T) {
+	searchLimiter := newFakeAppLimiter()
+	searchLimiter.deny["search:user:u1"] = true
+	searchTMDB := newFakeAppTMDB()
+	rec := serveAppFragmentAs(t, Deps{Media: &media.Service{TMDB: searchTMDB, Limiter: searchLimiter, Now: appClock}}, appUser("discovery"), "/app/discover?q=matrix&type=movie")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("search limited app status=%d body=%s, want 429 before DB/TMDB work", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request-limit-reached") {
+		t.Fatalf("search limited app body=%s, want safe rate-limit code", rec.Body.String())
+	}
+	if searchTMDB.searchCalls() != 0 {
+		t.Fatalf("TMDB search calls=%d, want 0 when app search limiter denies", searchTMDB.searchCalls())
+	}
+
+	pollBeforeSearchLimiter := newFakeAppLimiter()
+	pollBeforeSearchLimiter.deny["status-poll:user:u1"] = true
+	rec = serveAppFragmentAs(t, Deps{Media: &media.Service{TMDB: newFakeAppTMDB(), Limiter: pollBeforeSearchLimiter, Now: appClock}}, appUser("discovery"), "/app/discover?q=matrix&type=movie")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("search page poll limited status=%d body=%s, want 429 before DB/TMDB work", rec.Code, rec.Body.String())
+	}
+	pollBeforeSearchLimiter.assertNotCommitted(t, "search:user:u1")
+	pollBeforeSearchLimiter.assertNotCommitted(t, "tmdb:global:search")
+
+	for _, path := range []string{"/app/discover", "/app/requests", "/app/account"} {
+		pollLimiter := newFakeAppLimiter()
+		pollLimiter.deny["status-poll:user:u1"] = true
+		rec := serveAppFragmentAs(t, Deps{Media: &media.Service{Limiter: pollLimiter, Now: appClock}}, appUser("discovery"), path)
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("%s poll limited status=%d body=%s, want 429 before DB work", path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "request-limit-reached") {
+			t.Fatalf("%s poll limited body=%s, want safe rate-limit code", path, rec.Body.String())
+		}
+	}
+}
+
+func TestPosterProxyRejectsUnsafePosterPathsIfAdded(t *testing.T) {
+	fixture := newAppMediaFixture(t, "approval_required")
+	fixture.fake.searches["movie:poster"] = []tmdb.Media{
+		{
+			TMDBID:      "safe",
+			MediaType:   "movie",
+			Title:       "Safe Poster",
+			PosterPath:  "/safe.jpg",
+			ReleaseYear: 2026,
+			RawJSON:     `{}`,
+		},
+		{
+			TMDBID:      "unsafe",
+			MediaType:   "movie",
+			Title:       "Unsafe Poster",
+			PosterPath:  "http://169.254.169.254/latest/meta-data",
+			ReleaseYear: 2026,
+			RawJSON:     `{}`,
+		},
+	}
+
+	rec := serveAppFragmentAs(t, Deps{Media: fixture.service}, fixture.user, "/app/discover?q=poster&type=movie")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://image.tmdb.org/t/p/w92/safe.jpg") {
+		t.Fatalf("safe TMDB poster path did not render as direct TMDB image URL: %s", body)
+	}
+	for _, bad := range []string{
+		"/api/me/discovery/poster",
+		"/api/me/discovery/posters",
+		"/app/poster",
+		"169.254.169.254",
+		"latest/meta-data",
+	} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("poster path was proxied or leaked unsafe text %q: %s", bad, body)
+		}
+	}
+
+	r := chi.NewRouter()
+	r.Use(appContextMiddleware(fixture.user))
+	Deps{Media: fixture.service}.MountAppUI(r)
+	apihandlers.APIDeps{Media: fixture.service}.MountMedia(r)
+	for _, path := range []string{
+		"/app/poster?path=http://169.254.169.254/latest/meta-data",
+		"/api/me/discovery/poster?path=http://169.254.169.254/latest/meta-data",
+		"/api/me/discovery/posters/unsafe",
+	} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("poster proxy route %s status=%d body=%s, want 404", path, rec.Code, rec.Body.String())
+		}
 	}
 }
 
@@ -541,6 +637,7 @@ type fakeAppTMDB struct {
 	searches map[string][]tmdb.Media
 	movies   map[string]tmdb.Media
 	tv       map[string]tmdb.Media
+	search   int
 }
 
 func newFakeAppTMDB() *fakeAppTMDB {
@@ -554,7 +651,14 @@ func newFakeAppTMDB() *fakeAppTMDB {
 func (f *fakeAppTMDB) Search(_ context.Context, query, mediaType string) ([]tmdb.Media, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.search++
 	return append([]tmdb.Media(nil), f.searches[mediaType+":"+query]...), nil
+}
+
+func (f *fakeAppTMDB) searchCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.search
 }
 
 func (f *fakeAppTMDB) MovieDetails(_ context.Context, tmdbID string) (tmdb.Media, error) {
@@ -575,4 +679,46 @@ func (f *fakeAppTMDB) TVDetails(_ context.Context, tmdbID string) (tmdb.Media, e
 		return tmdb.Media{}, media.ErrMetadataUnavailable
 	}
 	return item, nil
+}
+
+type fakeAppLimiter struct {
+	mu        sync.Mutex
+	deny      map[string]bool
+	committed []string
+}
+
+func newFakeAppLimiter() *fakeAppLimiter {
+	return &fakeAppLimiter{deny: make(map[string]bool)}
+}
+
+func (l *fakeAppLimiter) Allow(key string, limit int, window time.Duration) bool {
+	return l.AllowAll([]media.RateLimitCheck{{Key: key, Limit: limit, Window: window}})
+}
+
+func (l *fakeAppLimiter) AllowAll(checks []media.RateLimitCheck) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	allowed := true
+	for _, check := range checks {
+		if l.deny[check.Key] {
+			allowed = false
+		}
+	}
+	if allowed {
+		for _, check := range checks {
+			l.committed = append(l.committed, check.Key)
+		}
+	}
+	return allowed
+}
+
+func (l *fakeAppLimiter) assertNotCommitted(t *testing.T, key string) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, committed := range l.committed {
+		if committed == key {
+			t.Fatalf("limiter committed keys=%v, did not want %q", l.committed, key)
+		}
+	}
 }
