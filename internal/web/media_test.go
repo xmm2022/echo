@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -121,11 +122,11 @@ func TestAppJSTokenRoutingKeepsAdminAndUserTokensSeparate(t *testing.T) {
 		}
 	}
 	if !strings.Contains(js, `path.indexOf("/api/me/") === 0 || path.indexOf("/app/") === 0`) ||
-		!strings.Contains(js, `return localStorage.getItem(APP_KEY) || "";`) {
+		!strings.Contains(js, `return (localStorage.getItem(APP_KEY) || "").trim();`) {
 		t.Fatalf("app.js does not route /api/me/ and /app/ requests only to APP_KEY")
 	}
 	if !strings.Contains(js, `path.indexOf("/ui/") === 0 || path.indexOf("/api/") === 0`) ||
-		!strings.Contains(js, `return localStorage.getItem(ADMIN_KEY) || "";`) {
+		!strings.Contains(js, `return (localStorage.getItem(ADMIN_KEY) || "").trim();`) {
 		t.Fatalf("app.js does not route /ui/ and admin /api/ requests only to ADMIN_KEY")
 	}
 	for _, bad := range []string{
@@ -137,6 +138,85 @@ func TestAppJSTokenRoutingKeepsAdminAndUserTokensSeparate(t *testing.T) {
 		if strings.Contains(js, bad) {
 			t.Fatalf("app.js allows token fallback through %q", bad)
 		}
+	}
+}
+
+func TestAppJSTokenRoutingRuntime(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	script := `
+const fs = require("fs");
+const vm = require("vm");
+const listeners = {};
+const document = {
+  addEventListener: function (name, handler) {
+    (listeners[name] || (listeners[name] = [])).push(handler);
+  },
+  getElementById: function () { return null; }
+};
+const store = {
+  echo_app_token: " app-token ",
+  echo_admin_token: " admin-token "
+};
+const localStorage = {
+  getItem: function (key) { return store[key] || ""; },
+  setItem: function (key, value) { store[key] = value; }
+};
+const window = {
+  location: { origin: "https://echo.test" },
+  htmx: { config: { allowScriptTags: true }, trigger: function () {} }
+};
+const context = {
+  URL: URL,
+  alert: function (msg) { throw new Error(msg); },
+  console: console,
+  document: document,
+  fetch: function () { return Promise.resolve({ ok: true }); },
+  localStorage: localStorage,
+  location: { reload: function () {} },
+  window: window
+};
+context.globalThis = context;
+vm.runInNewContext(fs.readFileSync("static/app.js", "utf8"), context, { filename: "app.js" });
+
+function authFor(path) {
+  const evt = { detail: { path: path, headers: {} } };
+  (listeners["htmx:configRequest"] || []).forEach(function (handler) { handler(evt); });
+  return evt.detail.headers.Authorization || "";
+}
+
+const got = {
+  appAPI: authFor("/api/me/discovery/catalog"),
+  appFragment: authFor("/app/discover"),
+  adminAPI: authFor("/api/discovery/subscriptions"),
+  adminUI: authFor("/ui/jobs"),
+  staticAsset: authFor("/static/app.js"),
+  external: authFor("https://evil.test/api/me/discovery/catalog")
+};
+const want = {
+  appAPI: "Bearer app-token",
+  appFragment: "Bearer app-token",
+  adminAPI: "Bearer admin-token",
+  adminUI: "Bearer admin-token",
+  staticAsset: "",
+  external: ""
+};
+for (const key of Object.keys(want)) {
+  if (got[key] !== want[key]) {
+    throw new Error(key + " auth=" + JSON.stringify(got[key]) + ", want " + JSON.stringify(want[key]));
+  }
+}
+(listeners["DOMContentLoaded"] || []).forEach(function (handler) { handler(); });
+if (window.htmx.config.allowScriptTags !== false) {
+  throw new Error("htmx allowScriptTags was not disabled");
+}
+`
+	cmd := exec.Command("node", "-e", script)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node app.js behavior failed: %v\n%s", err, out)
 	}
 }
 
@@ -178,6 +258,34 @@ func TestAppSearchFragmentEscapesHostileText(t *testing.T) {
 	}
 }
 
+func TestAppSearchResultsFilterTargetsByMediaType(t *testing.T) {
+	fixture := newAppMediaFixture(t, "approval_required")
+	seedAppMediaTarget(t, fixture.store, fixture.targetDeps, fixture.policy.ID, "Movie Only", "movie", 1)
+	seedAppMediaTarget(t, fixture.store, fixture.targetDeps, fixture.policy.ID, "TV Only", "tv", 1)
+	fixture.fake.searches["movie:matrix"] = []tmdb.Media{{
+		TMDBID:      "603",
+		MediaType:   "movie",
+		Title:       "The Matrix",
+		ReleaseYear: 1999,
+		RawJSON:     `{}`,
+	}}
+
+	rec := serveAppFragmentAs(t, Deps{Media: fixture.service}, fixture.user, "/app/discover?q=matrix&type=movie")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	options := appSelectFragment(t, body, `media-target-movie-603`)
+	for _, want := range []string{"Default Target", "Movie Only"} {
+		if !strings.Contains(options, want) {
+			t.Fatalf("movie request form missing eligible target %q: %s", want, options)
+		}
+	}
+	if strings.Contains(options, "TV Only") {
+		t.Fatalf("movie request form rendered tv-only target: %s", options)
+	}
+}
+
 func TestAdminIndexDoesNotEmbedUserRequestData(t *testing.T) {
 	fixture := newAppMediaFixture(t, "approval_required")
 	fixture.fake.movies["701"] = tmdb.Media{TMDBID: "701", MediaType: "movie", Title: "User Request Leak Sentinel", RawJSON: `{}`}
@@ -216,6 +324,19 @@ func assertAppSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
+func appSelectFragment(t *testing.T, body, id string) string {
+	t.Helper()
+	start := strings.Index(body, `<select id="`+id+`"`)
+	if start < 0 {
+		t.Fatalf("body missing select %s: %s", id, body)
+	}
+	end := strings.Index(body[start:], `</select>`)
+	if end < 0 {
+		t.Fatalf("select %s missing closing tag: %s", id, body[start:])
+	}
+	return body[start : start+end]
+}
+
 func serveAppFragmentAs(t *testing.T, deps Deps, user auth.UserContext, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := chi.NewRouter()
@@ -242,11 +363,13 @@ func appUser(scopes ...string) auth.UserContext {
 }
 
 type appMediaFixture struct {
-	store   *store.Store
-	service *media.Service
-	fake    *fakeAppTMDB
-	user    auth.UserContext
-	target  queries.DiscoveryPolicyTarget
+	store      *store.Store
+	service    *media.Service
+	fake       *fakeAppTMDB
+	user       auth.UserContext
+	policy     queries.DiscoveryAccessPolicy
+	targetDeps appTargetDeps
+	target     queries.DiscoveryPolicyTarget
 }
 
 func newAppMediaFixture(t *testing.T, requestMode string) appMediaFixture {
@@ -255,15 +378,17 @@ func newAppMediaFixture(t *testing.T, requestMode string) appMediaFixture {
 	user := appUser("discovery")
 	seedAppMediaUser(t, st, user.UserID)
 	policy := seedAppMediaPolicy(t, st, "policy-"+requestMode, user.UserID, requestMode, 1)
-	deps := seedAppMediaTargetDeps(t, st)
-	target := seedAppMediaTarget(t, st, deps, policy.ID, "Default Target", "", 1)
+	targetDeps := seedAppMediaTargetDeps(t, st)
+	target := seedAppMediaTarget(t, st, targetDeps, policy.ID, "Default Target", "", 1)
 	fake := newFakeAppTMDB()
 	return appMediaFixture{
-		store:   st,
-		service: &media.Service{Store: st, TMDB: fake, Now: appClock},
-		fake:    fake,
-		user:    user,
-		target:  target,
+		store:      st,
+		service:    &media.Service{Store: st, TMDB: fake, Now: appClock},
+		fake:       fake,
+		user:       user,
+		policy:     policy,
+		targetDeps: targetDeps,
+		target:     target,
 	}
 }
 

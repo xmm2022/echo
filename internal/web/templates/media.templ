@@ -40,6 +40,28 @@ func mediaTargetOptionLabel(target media.TargetDTO) string {
 	return label
 }
 
+func mediaTargetsFor(mediaType string, targets []media.TargetDTO) []media.TargetDTO {
+	out := make([]media.TargetDTO, 0, len(targets))
+	for _, target := range targets {
+		if target.MediaType == "" || target.MediaType == mediaType {
+			out = append(out, target)
+		}
+	}
+	return out
+}
+
+func mediaDefaultTargetID(targets []media.TargetDTO) int64 {
+	if len(targets) == 0 {
+		return 0
+	}
+	for _, target := range targets {
+		if target.Default {
+			return target.ID
+		}
+	}
+	return targets[0].ID
+}
+
 templ AppShell() {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -53,10 +75,8 @@ templ AppShell() {
 		<body>
 			<header>
 				<h1>Echo App</h1>
-				<form>
-					<label for="app-token">Token</label>
-					<input id="app-token" type="password" autocomplete="off" placeholder="Bearer token"/>
-				</form>
+				<label for="app-token">Token</label>
+				<input id="app-token" type="password" autocomplete="off" placeholder="Bearer token"/>
 			</header>
 			<main>
 				<section aria-labelledby="media-discover-heading">
@@ -107,21 +127,23 @@ templ MediaSearchResults(rows []media.TMDBSummaryDTO, targets []media.TargetDTO)
 					if row.Overview != "" {
 						<p>{ row.Overview }</p>
 					}
-					if len(targets) > 0 {
+					if len(mediaTargetsFor(row.MediaType, targets)) > 0 {
 						<form hx-post="/api/me/discovery/requests" hx-swap="none">
 							<input type="hidden" name="tmdb_id" value={ row.TMDBID }/>
 							<input type="hidden" name="media_type" value={ row.MediaType }/>
 							<input type="hidden" name="tmdb_language" value="zh-CN"/>
 							<label for={ "media-target-" + row.MediaType + "-" + row.TMDBID }>Target</label>
 							<select id={ "media-target-" + row.MediaType + "-" + row.TMDBID } name="target_id" data-type="number">
-								for _, target := range targets {
-									<option value={ strconv.FormatInt(target.ID, 10) } selected?={ target.Default }>{ mediaTargetOptionLabel(target) }</option>
+								for _, target := range mediaTargetsFor(row.MediaType, targets) {
+									<option value={ strconv.FormatInt(target.ID, 10) } selected?={ target.ID == mediaDefaultTargetID(mediaTargetsFor(row.MediaType, targets)) }>{ mediaTargetOptionLabel(target) }</option>
 								}
 							</select>
 							<label for={ "media-note-" + row.MediaType + "-" + row.TMDBID }>Note</label>
 							<input id={ "media-note-" + row.MediaType + "-" + row.TMDBID } name="user_note" maxlength="1000"/>
 							<button type="submit">Request</button>
 						</form>
+					} else {
+						<p>No available target for this type.</p>
 					}
 				</article>
 			}

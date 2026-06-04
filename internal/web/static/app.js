@@ -4,15 +4,19 @@
   var ADMIN_KEY = "echo_admin_token";
   var APP_KEY = "echo_app_token";
 
+  if (window.htmx) {
+    window.htmx.config.allowScriptTags = false;
+  }
+
   function tokenForPath(path) {
     if (path.indexOf("/static/") === 0) {
       return "";
     }
     if (path.indexOf("/api/me/") === 0 || path.indexOf("/app/") === 0) {
-      return localStorage.getItem(APP_KEY) || "";
+      return (localStorage.getItem(APP_KEY) || "").trim();
     }
     if (path.indexOf("/ui/") === 0 || path.indexOf("/api/") === 0) {
-      return localStorage.getItem(ADMIN_KEY) || "";
+      return (localStorage.getItem(ADMIN_KEY) || "").trim();
     }
     return "";
   }
@@ -33,7 +37,7 @@
   }
 
   // Attach a bearer token only to same-origin htmx requests owned by one shell.
-  document.body.addEventListener("htmx:configRequest", function (evt) {
+  document.addEventListener("htmx:configRequest", function (evt) {
     var path = sameOriginPath(evt.detail.path);
     var t = tokenForPath(path);
     if (t) {
@@ -121,7 +125,7 @@
   // htmx's own form handling runs, and resubmit them as typed JSON with the bearer
   // token. The forms KEEP their hx-post/hx-patch attributes (the Go tests assert
   // their presence and we read the URL+method from them).
-  document.body.addEventListener(
+  document.addEventListener(
     "submit",
     function (evt) {
       var form = evt.target;

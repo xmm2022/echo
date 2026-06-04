@@ -1,17 +1,23 @@
 package httpserver
 
 import (
+	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/embyproxy"
 	"github.com/xmm2022/echo/internal/http/handlers"
+	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/restore"
 	"github.com/xmm2022/echo/internal/store"
+	"github.com/xmm2022/echo/internal/store/queries"
 	"github.com/xmm2022/echo/internal/web"
 )
 
@@ -174,6 +180,82 @@ func TestPublicRoutesAreOpen(t *testing.T) {
 	}
 }
 
+func TestAppRoutesUsePublicShellAndAuthenticatedDiscoveryFragments(t *testing.T) {
+	st := openServerTestStore(t)
+	seedServerAppUser(t, st, "u1")
+	policy := seedServerAppPolicy(t, st, "u1")
+	targetDeps := seedServerAppTargetDeps(t, st)
+	seedServerAppTarget(t, st, targetDeps, policy.ID)
+
+	authCheck := func(r *http.Request) (auth.UserContext, bool) {
+		switch auth.BearerToken(r.Header.Get("Authorization")) {
+		case "discover":
+			return auth.UserContext{UserID: "u1", Role: "user", Scopes: []string{"discovery"}, Now: time.Unix(1000, 0)}, true
+		case "read":
+			return auth.UserContext{UserID: "u1", Role: "user", Scopes: []string{"read"}, Now: time.Unix(1000, 0)}, true
+		default:
+			return auth.UserContext{}, false
+		}
+	}
+	deps := Deps{
+		Logger:    discardLogger(),
+		AuthCheck: authCheck,
+		API:       &handlers.APIDeps{Store: st, Media: &media.Service{Store: st, Now: serverAppClock}, Logger: discardLogger(), Now: serverAppClock},
+		Web:       &web.Deps{Store: st, Media: &media.Service{Store: st, Now: serverAppClock}, Logger: discardLogger()},
+	}
+	h := HandlerWithDeps(deps)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/app", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/app without token status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("/app Cache-Control=%q, want no-store", rec.Header().Get("Cache-Control"))
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/app/discover", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/app/discover without token status=%d body=%s, want 401", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/app/discover", nil)
+	req.Header.Set("Authorization", "Bearer discover")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/app/discover discovery token status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("/app/discover Cache-Control=%q, want no-store", rec.Header().Get("Cache-Control"))
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/app/discover", nil)
+	req.Header.Set("Authorization", "Bearer read")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("/app/discover read token status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/ui/jobs", nil)
+	req.Header.Set("Authorization", "Bearer discover")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("/ui/jobs discovery token status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/discovery/subscriptions", nil)
+	req.Header.Set("Authorization", "Bearer discover")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("/api/discovery/subscriptions discovery token status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+}
+
 func TestEmbyReservedRoutesDoNotFallThroughToProxy(t *testing.T) {
 	deps := Deps{
 		Logger: discardLogger(),
@@ -204,6 +286,131 @@ func TestEmbyReservedRoutesDoNotFallThroughToProxy(t *testing.T) {
 			t.Fatalf("%s route = %q, want %q", path, rec.Header().Get("X-Test-Route"), wantRoute)
 		}
 	}
+}
+
+func seedServerAppUser(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	if err := st.CreateUser(context.Background(), queries.CreateUserParams{
+		ID:            id,
+		Username:      id,
+		Role:          "user",
+		Status:        "active",
+		QuotaPolicyID: 1,
+		CreatedAt:     1000,
+		UpdatedAt:     1000,
+	}); err != nil {
+		t.Fatalf("create user %s: %v", id, err)
+	}
+}
+
+func seedServerAppPolicy(t *testing.T, st *store.Store, userID string) queries.DiscoveryAccessPolicy {
+	t.Helper()
+	policy, err := st.CreateDiscoveryAccessPolicy(context.Background(), queries.CreateDiscoveryAccessPolicyParams{
+		Name:          "server app policy",
+		Enabled:       1,
+		Priority:      100,
+		SubjectUserID: serverAppNullString(userID),
+		RequestMode:   "approval_required",
+		CanSearch:     1,
+		CreatedBy:     serverAppNullString("admin"),
+		CreatedAt:     1000,
+		UpdatedAt:     1000,
+	})
+	if err != nil {
+		t.Fatalf("create app policy: %v", err)
+	}
+	return policy
+}
+
+type serverAppTargetDeps struct {
+	libraryID         int64
+	producerProfileID int64
+	ruleProfileID     int64
+}
+
+func seedServerAppTargetDeps(t *testing.T, st *store.Store) serverAppTargetDeps {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.CreateAccount(ctx, queries.CreateAccountParams{
+		ID:           "server-app-acc-115",
+		Provider:     "115",
+		SidecarID:    "sidecar-1",
+		StorageMount: "/115",
+		Status:       "active",
+		OwnerID:      "admin",
+		CreatedAt:    1000,
+		UpdatedAt:    1000,
+	}); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	library, err := st.CreateLibrary(ctx, queries.CreateLibraryParams{
+		Name:           "Server App Media",
+		EchoOutputKind: "local",
+		EchoOutputPath: "/tmp/echo-server-app-test",
+		OwnerID:        "admin",
+		CreatedAt:      1000,
+	})
+	if err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	profile, err := st.CreateDiscoveryProducerProfile(ctx, queries.CreateDiscoveryProducerProfileParams{
+		Name:                   "server app 115",
+		Provider:               "115",
+		Tool:                   "115share2cas",
+		TargetAccount:          "server-app-acc-115",
+		TargetSubdirTemplate:   "{{.Title}}",
+		LibraryRelPathTemplate: "{{.Title}}",
+		DefaultArgsJson:        `{}`,
+		Enabled:                1,
+		CreatedAt:              1000,
+		UpdatedAt:              1000,
+	})
+	if err != nil {
+		t.Fatalf("create producer profile: %v", err)
+	}
+	ruleProfile, err := st.CreateRuleProfile(ctx, queries.CreateRuleProfileParams{
+		Name:      "server app rules",
+		Version:   1,
+		RulesJson: `{}`,
+		Enabled:   1,
+		CreatedAt: 1000,
+	})
+	if err != nil {
+		t.Fatalf("create rule profile: %v", err)
+	}
+	return serverAppTargetDeps{libraryID: library.ID, producerProfileID: profile.ID, ruleProfileID: ruleProfile.ID}
+}
+
+func seedServerAppTarget(t *testing.T, st *store.Store, deps serverAppTargetDeps, policyID int64) {
+	t.Helper()
+	if _, err := st.CreateDiscoveryPolicyTarget(context.Background(), queries.CreateDiscoveryPolicyTargetParams{
+		PolicyID:                policyID,
+		Label:                   "Server App Target",
+		LibraryID:               deps.libraryID,
+		ProducerProfileID:       deps.producerProfileID,
+		RuleProfileID:           deps.ruleProfileID,
+		PipelineOwnerID:         "admin",
+		MediaType:               sql.NullString{},
+		MatchMode:               "admin_review",
+		GrantPlaybackOnApproval: 1,
+		Enabled:                 1,
+		DefaultTarget:           1,
+		CreatedAt:               1000,
+		UpdatedAt:               1000,
+	}); err != nil {
+		t.Fatalf("create policy target: %v", err)
+	}
+}
+
+func serverAppNullString(value string) sql.NullString {
+	if value == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: value, Valid: true}
+}
+
+func serverAppClock() time.Time {
+	return time.Unix(1000, 0)
 }
 
 func TestEmbyReservedMalformedRoutesDoNotFallThroughToProxy(t *testing.T) {
