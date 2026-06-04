@@ -28,9 +28,10 @@ func HashToken(token string) string {
 // HasScope (admin-implies-all) and decodeScopes both derive from it so the
 // scope vocabulary lives in exactly one place.
 var validScopes = map[string]struct{}{
-	"admin":    {},
-	"read":     {},
-	"playback": {},
+	"admin":     {},
+	"discovery": {},
+	"read":      {},
+	"playback":  {},
 }
 
 // UserContext carries the authenticated identity and scopes for a request;

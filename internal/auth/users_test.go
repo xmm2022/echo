@@ -35,21 +35,28 @@ func TestGenerateTokenHashDoesNotExposeSecret(t *testing.T) {
 }
 
 func TestTokenScopes(t *testing.T) {
+	scopes, err := decodeScopes(`["read","playback","discovery"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := UserContext{
 		UserID: "user1",
 		Role:   "user",
-		Scopes: []string{"read", "playback"},
+		Scopes: scopes,
 		Now:    time.Unix(1000, 0),
 	}
 	if !ctx.HasScope("playback") {
 		t.Fatal("playback scope missing")
 	}
+	if !ctx.HasScope("discovery") {
+		t.Fatal("discovery scope missing")
+	}
 	if ctx.HasScope("admin") {
 		t.Fatal("non-admin token has admin scope")
 	}
 	admin := UserContext{UserID: "admin", Role: "admin", Scopes: []string{"admin"}}
-	if !admin.HasScope("read") || !admin.HasScope("playback") || !admin.HasScope("admin") {
-		t.Fatal("admin scope should imply admin/read/playback")
+	if !admin.HasScope("read") || !admin.HasScope("playback") || !admin.HasScope("admin") || !admin.HasScope("discovery") {
+		t.Fatal("admin scope should imply admin/read/playback/discovery")
 	}
 }
 
