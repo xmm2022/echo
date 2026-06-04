@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
@@ -290,8 +289,7 @@ func (s *Service) RejectRequest(ctx context.Context, actor Actor, requestID int6
 	return requestDTO(row), nil
 }
 
-func (s *Service) ListRequestsForAdmin(ctx context.Context, status string, limit, offset int64) ([]RequestDTO, error) {
-	actor := Actor{User: auth.FromContext(ctx)}
+func (s *Service) ListRequestsForAdmin(ctx context.Context, actor Actor, status string, limit, offset int64) ([]RequestDTO, error) {
 	if !actor.User.HasScope("admin") {
 		return nil, ErrPolicyDenied
 	}
@@ -321,8 +319,7 @@ func (s *Service) ListRequestsForAdmin(ctx context.Context, status string, limit
 	return out, nil
 }
 
-func (s *Service) GetRequestForAdmin(ctx context.Context, requestID int64) (RequestDTO, error) {
-	actor := Actor{User: auth.FromContext(ctx)}
+func (s *Service) GetRequestForAdmin(ctx context.Context, actor Actor, requestID int64) (RequestDTO, error) {
 	if !actor.User.HasScope("admin") {
 		return RequestDTO{}, ErrPolicyDenied
 	}

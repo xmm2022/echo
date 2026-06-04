@@ -9,7 +9,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -1065,23 +1064,21 @@ func TestApproveRejectRequireAdminScope(t *testing.T) {
 	if _, err := fixture.svc.RejectRequest(ctx, mediaActor("u1"), req.ID, "raw admin secret"); !errors.Is(err, ErrPolicyDenied) {
 		t.Fatalf("RejectRequest non-admin error = %v, want %v", err, ErrPolicyDenied)
 	}
-	nonAdminCtx := mediaContextWithActor(ctx, mediaActor("u1"))
-	adminCtx := mediaContextWithActor(ctx, adminMediaActor())
-	if _, err := fixture.svc.ListRequestsForAdmin(nonAdminCtx, "", 10, 0); !errors.Is(err, ErrPolicyDenied) {
+	if _, err := fixture.svc.ListRequestsForAdmin(ctx, mediaActor("u1"), "", 10, 0); !errors.Is(err, ErrPolicyDenied) {
 		t.Fatalf("ListRequestsForAdmin non-admin error = %v, want %v", err, ErrPolicyDenied)
 	}
-	if _, err := fixture.svc.GetRequestForAdmin(nonAdminCtx, req.ID); !errors.Is(err, ErrPolicyDenied) {
+	if _, err := fixture.svc.GetRequestForAdmin(ctx, mediaActor("u1"), req.ID); !errors.Is(err, ErrPolicyDenied) {
 		t.Fatalf("GetRequestForAdmin non-admin error = %v, want %v", err, ErrPolicyDenied)
 	}
 
-	listed, err := fixture.svc.ListRequestsForAdmin(adminCtx, "pending_review", 10, 0)
+	listed, err := fixture.svc.ListRequestsForAdmin(ctx, adminMediaActor(), "pending_review", 10, 0)
 	if err != nil {
 		t.Fatalf("ListRequestsForAdmin returned error: %v", err)
 	}
 	if len(listed) != 1 || listed[0].ID != req.ID || listed[0].Status != "pending_review" {
 		t.Fatalf("admin list = %+v, want pending request", listed)
 	}
-	got, err := fixture.svc.GetRequestForAdmin(adminCtx, req.ID)
+	got, err := fixture.svc.GetRequestForAdmin(ctx, adminMediaActor(), req.ID)
 	if err != nil {
 		t.Fatalf("GetRequestForAdmin returned error: %v", err)
 	}
@@ -1481,10 +1478,6 @@ func adminMediaActor() Actor {
 	actor.User.Role = "admin"
 	actor.User.Scopes = []string{"admin"}
 	return actor
-}
-
-func mediaContextWithActor(ctx context.Context, actor Actor) context.Context {
-	return auth.NewContext(ctx, actor.User)
 }
 
 func getRequestByID(t *testing.T, st *store.Store, id int64) queries.DiscoverySubscriptionRequest {
