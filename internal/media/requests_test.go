@@ -340,6 +340,157 @@ func TestCreateRequestTMDBDetailsErrorReturnsMetadataUnavailable(t *testing.T) {
 	}
 }
 
+func TestCreatePendingRequestDuplicateReturnsExistingBeforeLimits(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", nullInt64(1), sql.NullInt64{}, sql.NullInt64{})
+	target, err := fixture.svc.ResolveTarget(ctx, fixture.policy, fixture.target.ID, "movie")
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+	media := tmdb.Media{TMDBID: "607", MediaType: "movie", Title: "Duplicate", RawJSON: `{}`}
+	key, err := requestIdempotencyKey("u1", media.TMDBID, media.MediaType, "zh-CN", target.TargetID, "")
+	if err != nil {
+		t.Fatalf("idempotency key: %v", err)
+	}
+
+	first, err := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
+	if err != nil {
+		t.Fatalf("first createPendingRequest returned error: %v", err)
+	}
+	second, err := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
+	if err != nil {
+		t.Fatalf("duplicate createPendingRequest returned error: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate ID = %d, want existing %d", second.ID, first.ID)
+	}
+	if got := countRequestsForUser(t, fixture.st, "u1"); got != 1 {
+		t.Fatalf("request rows = %d, want 1", got)
+	}
+}
+
+func TestCreatePendingRequestConcurrentDifferentKeysRespectPendingLimit(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", nullInt64(1), sql.NullInt64{}, sql.NullInt64{})
+	target, err := fixture.svc.ResolveTarget(ctx, fixture.policy, fixture.target.ID, "movie")
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+
+	type result struct {
+		row queries.DiscoverySubscriptionRequest
+		err error
+	}
+	results := make(chan result, 2)
+	for _, tmdbID := range []string{"608", "609"} {
+		tmdbID := tmdbID
+		go func() {
+			media := tmdb.Media{TMDBID: tmdbID, MediaType: "movie", Title: "Movie " + tmdbID, RawJSON: `{}`}
+			key, keyErr := requestIdempotencyKey("u1", media.TMDBID, media.MediaType, "zh-CN", target.TargetID, "")
+			if keyErr != nil {
+				results <- result{err: keyErr}
+				return
+			}
+			row, createErr := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
+			results <- result{row: row, err: createErr}
+		}()
+	}
+
+	successes := 0
+	limitErrors := 0
+	for i := 0; i < 2; i++ {
+		got := <-results
+		if got.err == nil && got.row.ID != 0 {
+			successes++
+			continue
+		}
+		if errors.Is(got.err, ErrLimitReached) {
+			limitErrors++
+			continue
+		}
+		t.Fatalf("createPendingRequest result = row %+v err %v, want one success and one limit error", got.row, got.err)
+	}
+	if successes != 1 || limitErrors != 1 {
+		t.Fatalf("successes=%d limitErrors=%d, want 1/1", successes, limitErrors)
+	}
+	if got := countRequestsForUser(t, fixture.st, "u1"); got != 1 {
+		t.Fatalf("request rows = %d, want 1", got)
+	}
+	if reason := latestAuditSafeReason(t, fixture.st, "u1"); reason != "request-limit-reached" {
+		t.Fatalf("audit reason = %q, want request-limit-reached", reason)
+	}
+}
+
+func TestListRequestsRedactsUnsafeFailureFields(t *testing.T) {
+	ctx := context.Background()
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	policy := createMediaPolicy(t, st, "redaction policy", "u1", 1, 100, "approval_required", 1)
+	deps := seedMediaTargetDeps(t, st)
+	target := createMediaTarget(t, st, deps, policy.ID, "Redaction Target", "movie", 1)
+	request := seedUnsafeFailedRequest(t, st, "u1", policy, target, deps)
+	svc := Service{Store: st, Now: mediaNow}
+
+	listed, err := svc.ListRequests(ctx, mediaActor("u1"), 10, 0)
+	if err != nil {
+		t.Fatalf("ListRequests returned error: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != request.ID {
+		t.Fatalf("listed requests = %+v, want seeded failed request", listed)
+	}
+	if listed[0].SafeReason != "request_failed" {
+		t.Fatalf("SafeReason = %q, want request_failed", listed[0].SafeReason)
+	}
+	got, err := svc.GetRequest(ctx, mediaActor("u1"), request.ID)
+	if err != nil {
+		t.Fatalf("GetRequest returned error: %v", err)
+	}
+	if got.SafeReason != "request_failed" {
+		t.Fatalf("GetRequest SafeReason = %q, want request_failed", got.SafeReason)
+	}
+	data, err := json.Marshal([]RequestDTO{got})
+	if err != nil {
+		t.Fatalf("marshal request DTO: %v", err)
+	}
+	jsonText := string(data)
+	for _, forbidden := range []string{
+		"unsafe_kind",
+		"last_error_message",
+		"last error secret",
+		"raw user note secret",
+		"raw admin note secret",
+		"raw_text_ref",
+	} {
+		if strings.Contains(jsonText, forbidden) {
+			t.Fatalf("request DTO JSON leaked %q: %s", forbidden, jsonText)
+		}
+	}
+}
+
+func TestRecordUserAuditEventTruncatesTargetID(t *testing.T) {
+	ctx := context.Background()
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	svc := Service{Store: st, Now: mediaNow}
+	longTargetID := strings.Repeat("a", 160)
+
+	if err := svc.RecordUserAuditEvent(ctx, mediaActor("u1"), "request_create_deny", "request", longTargetID, "request-disabled"); err != nil {
+		t.Fatalf("RecordUserAuditEvent returned error: %v", err)
+	}
+	var stored string
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT target_id
+FROM discovery_user_audit_events
+WHERE actor_user_id = 'u1'
+ORDER BY id DESC
+LIMIT 1`).Scan(&stored); err != nil {
+		t.Fatalf("read audit target id: %v", err)
+	}
+	if len(stored) > 120 {
+		t.Fatalf("stored target_id length = %d, want <= 120", len(stored))
+	}
+}
+
 func TestCreateRequestDuplicateReturnsExistingRequest(t *testing.T) {
 	ctx := context.Background()
 	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
@@ -633,6 +784,52 @@ func newRequestFixture(
 		target: target,
 		deps:   deps,
 	}
+}
+
+func seedUnsafeFailedRequest(
+	t *testing.T,
+	st *store.Store,
+	userID string,
+	policy queries.DiscoveryAccessPolicy,
+	target queries.DiscoveryPolicyTarget,
+	deps mediaTargetDeps,
+) queries.DiscoverySubscriptionRequest {
+	t.Helper()
+	request, err := st.CreateDiscoverySubscriptionRequest(context.Background(), queries.CreateDiscoverySubscriptionRequestParams{
+		RequesterUserID:             userID,
+		Status:                      "failed",
+		TmdbID:                      "999",
+		MediaType:                   "movie",
+		TmdbLanguage:                "zh-CN",
+		TitleSnapshot:               "Failed Movie",
+		OriginalTitleSnapshot:       sql.NullString{},
+		ReleaseYearSnapshot:         sql.NullInt64{},
+		PosterPathSnapshot:          sql.NullString{},
+		SeasonFilterJson:            sql.NullString{},
+		PolicyIDSnapshot:            sql.NullInt64{Int64: policy.ID, Valid: true},
+		PolicyTargetIDSnapshot:      sql.NullInt64{Int64: target.ID, Valid: true},
+		TargetLabelSnapshot:         target.Label,
+		TargetLibraryID:             deps.LibraryID,
+		TargetLibraryNameSnapshot:   "Media",
+		ProducerProfileIDSnapshot:   deps.ProducerProfileID,
+		ProducerProfileNameSnapshot: "115 default",
+		RuleProfileIDSnapshot:       deps.RuleProfileID,
+		RuleProfileVersionSnapshot:  1,
+		UserNote:                    sql.NullString{String: "raw user note secret", Valid: true},
+		AdminNote:                   sql.NullString{String: "raw admin note secret", Valid: true},
+		ReviewedBy:                  sql.NullString{},
+		ReviewedAt:                  sql.NullInt64{},
+		SubscriptionID:              sql.NullInt64{},
+		IdempotencyKey:              "unsafe-failed-request-" + userID,
+		LastErrorKind:               sql.NullString{String: "unsafe_kind raw_text_ref", Valid: true},
+		LastErrorMessage:            sql.NullString{String: "last error secret", Valid: true},
+		CreatedAt:                   mediaTestNow,
+		UpdatedAt:                   mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("seed unsafe failed request: %v", err)
+	}
+	return request
 }
 
 func countRequestsForUser(t *testing.T, st *store.Store, userID string) int64 {

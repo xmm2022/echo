@@ -57,6 +57,56 @@ func TestPauseResumeUserSubscriptionOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestPauseResumeUserSubscriptionRejectsInvalidTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		startStatus string
+		action      string
+	}{
+		{name: "pause paused", startStatus: "paused", action: "pause"},
+		{name: "pause canceled", startStatus: "canceled", action: "pause"},
+		{name: "resume active", startStatus: "active", action: "resume"},
+		{name: "resume canceled", startStatus: "canceled", action: "resume"},
+		{name: "resume completed", startStatus: "completed", action: "resume"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newSubscriptionFixture(t)
+			_, err := fixture.st.UpdateUserMediaSubscriptionStatus(ctx, queries.UpdateUserMediaSubscriptionStatusParams{
+				ID:         fixture.userSubscription.ID,
+				EchoUserID: "u1",
+				Status:     tc.startStatus,
+				UpdatedAt:  mediaTestNow,
+			})
+			if err != nil {
+				t.Fatalf("seed subscription status: %v", err)
+			}
+
+			switch tc.action {
+			case "pause":
+				_, err = fixture.svc.PauseSubscription(ctx, mediaActor("u1"), fixture.userSubscription.ID)
+			case "resume":
+				_, err = fixture.svc.ResumeSubscription(ctx, mediaActor("u1"), fixture.userSubscription.ID)
+			default:
+				t.Fatalf("unknown action %q", tc.action)
+			}
+			if !errors.Is(err, ErrInvalidTransition) {
+				t.Fatalf("%s from %s error = %v, want %v", tc.action, tc.startStatus, err, ErrInvalidTransition)
+			}
+			row, err := fixture.st.GetUserMediaSubscriptionForUser(ctx, queries.GetUserMediaSubscriptionForUserParams{
+				ID:         fixture.userSubscription.ID,
+				EchoUserID: "u1",
+			})
+			if err != nil {
+				t.Fatalf("get user subscription: %v", err)
+			}
+			if row.Status != tc.startStatus {
+				t.Fatalf("status after invalid transition = %q, want %q", row.Status, tc.startStatus)
+			}
+		})
+	}
+}
+
 func TestListUserSubscriptionsProjectsLatestSafeState(t *testing.T) {
 	ctx := context.Background()
 	fixture := newSubscriptionFixture(t)

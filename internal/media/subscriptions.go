@@ -51,7 +51,18 @@ func (s *Service) setSubscriptionStatus(ctx context.Context, actor Actor, id int
 	if userID == "" || id <= 0 {
 		return SubscriptionDTO{}, ErrNotFound
 	}
-	before, err := s.Store.GetUserMediaSubscriptionForUser(ctx, queries.GetUserMediaSubscriptionForUserParams{
+	tx, q, err := s.Store.BeginImmediateTx(ctx)
+	if err != nil {
+		return SubscriptionDTO{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	before, err := q.GetUserMediaSubscriptionForUser(ctx, queries.GetUserMediaSubscriptionForUserParams{
 		ID:         id,
 		EchoUserID: userID,
 	})
@@ -62,11 +73,15 @@ func (s *Service) setSubscriptionStatus(ctx context.Context, actor Actor, id int
 	if err != nil {
 		return SubscriptionDTO{}, err
 	}
-	updated, err := s.Store.UpdateUserMediaSubscriptionStatus(ctx, queries.UpdateUserMediaSubscriptionStatusParams{
+	if !validUserSubscriptionTransition(before.Status, status) {
+		return SubscriptionDTO{}, ErrInvalidTransition
+	}
+	now := nowUnix(s)
+	updated, err := q.UpdateUserMediaSubscriptionStatus(ctx, queries.UpdateUserMediaSubscriptionStatusParams{
 		ID:         id,
 		EchoUserID: userID,
 		Status:     status,
-		UpdatedAt:  nowUnix(s),
+		UpdatedAt:  now,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return SubscriptionDTO{}, ErrNotFound
@@ -75,11 +90,19 @@ func (s *Service) setSubscriptionStatus(ctx context.Context, actor Actor, id int
 		return SubscriptionDTO{}, err
 	}
 	if before.RequestID.Valid {
-		if err := s.appendRequestEvent(ctx, before.RequestID.Int64, actor, action, before.Status, status, nowUnix(s)); err != nil {
+		if err := appendRequestEventWithQueries(ctx, q, before.RequestID.Int64, actor, action, before.Status, status, now); err != nil {
 			return SubscriptionDTO{}, err
 		}
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return SubscriptionDTO{}, err
+	}
+	committed = true
 	return s.projectSubscriptionDTO(ctx, userID, id, updated)
+}
+
+func validUserSubscriptionTransition(from, to string) bool {
+	return from == "active" && to == "paused" || from == "paused" && to == "active"
 }
 
 func (s *Service) projectSubscriptionDTO(ctx context.Context, userID string, id int64, fallback queries.UserMediaSubscription) (SubscriptionDTO, error) {

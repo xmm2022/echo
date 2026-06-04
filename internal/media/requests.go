@@ -164,10 +164,6 @@ func (s *Service) CreateRequest(ctx context.Context, actor Actor, in CreateReque
 		return RequestDTO{}, err
 	}
 
-	if err := s.enforceRequestLimits(ctx, actor, policy, tmdbID, nowUnix(s)); err != nil {
-		return RequestDTO{}, err
-	}
-
 	media, err := s.fetchDetails(ctx, tmdbID, mediaType)
 	if err != nil {
 		return RequestDTO{}, err
@@ -244,7 +240,18 @@ func (s *Service) CancelRequest(ctx context.Context, actor Actor, id int64) (Req
 	if userID == "" || id <= 0 {
 		return RequestDTO{}, ErrNotFound
 	}
-	before, err := s.Store.GetDiscoverySubscriptionRequestForUser(ctx, queries.GetDiscoverySubscriptionRequestForUserParams{
+	tx, q, err := s.Store.BeginImmediateTx(ctx)
+	if err != nil {
+		return RequestDTO{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	before, err := q.GetDiscoverySubscriptionRequestForUser(ctx, queries.GetDiscoverySubscriptionRequestForUserParams{
 		ID:              id,
 		RequesterUserID: userID,
 	})
@@ -258,7 +265,7 @@ func (s *Service) CancelRequest(ctx context.Context, actor Actor, id int64) (Req
 		return RequestDTO{}, ErrInvalidTransition
 	}
 	now := nowUnix(s)
-	row, err := s.Store.CancelPendingDiscoverySubscriptionRequest(ctx, queries.CancelPendingDiscoverySubscriptionRequestParams{
+	row, err := q.CancelPendingDiscoverySubscriptionRequest(ctx, queries.CancelPendingDiscoverySubscriptionRequestParams{
 		ID:              id,
 		RequesterUserID: userID,
 		UpdatedAt:       now,
@@ -269,9 +276,13 @@ func (s *Service) CancelRequest(ctx context.Context, actor Actor, id int64) (Req
 	if err != nil {
 		return RequestDTO{}, err
 	}
-	if err := s.appendRequestEvent(ctx, row.ID, actor, "canceled", "pending_review", "canceled", now); err != nil {
+	if err := appendRequestEventWithQueries(ctx, q, row.ID, actor, "canceled", "pending_review", "canceled", now); err != nil {
 		return RequestDTO{}, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return RequestDTO{}, err
+	}
+	committed = true
 	return requestDTO(row), nil
 }
 
@@ -281,48 +292,55 @@ func (s *Service) RecordUserAuditEvent(ctx context.Context, actor Actor, action,
 	}
 	action = safeAuditAction(action)
 	targetKind = safeAuditValue(targetKind, "unknown")
-	targetID = strings.TrimSpace(targetID)
 	safeReason = safeAuditValue(safeReason, "policy-denied")
-	_, err := s.Store.CreateDiscoveryUserAuditEvent(ctx, queries.CreateDiscoveryUserAuditEventParams{
+	return createUserAuditEventWithQueries(ctx, s.Store.Queries, actor, action, targetKind, targetID, safeReason, nowUnix(s))
+}
+
+func createUserAuditEventWithQueries(ctx context.Context, q *queries.Queries, actor Actor, action, targetKind, targetID, safeReason string, now int64) error {
+	_, err := q.CreateDiscoveryUserAuditEvent(ctx, queries.CreateDiscoveryUserAuditEventParams{
 		ActorUserID:  sqlNullString(actorUserID(actor)),
 		Action:       action,
 		TargetKind:   targetKind,
-		TargetID:     sqlNullString(targetID),
+		TargetID:     sqlNullString(safeAuditTargetID(targetID)),
 		SafeReason:   safeReason,
 		SnapshotJson: "{}",
-		CreatedAt:    nowUnix(s),
+		CreatedAt:    now,
 	})
 	return err
 }
 
-func (s *Service) enforceRequestLimits(ctx context.Context, actor Actor, policy queries.DiscoveryAccessPolicy, tmdbID string, now int64) error {
+func enforceRequestLimitsWithQueries(ctx context.Context, q *queries.Queries, actor Actor, policy queries.DiscoveryAccessPolicy, tmdbID string, now int64) error {
 	userID := actorUserID(actor)
 	if policy.MaxPendingRequests.Valid {
-		count, err := s.Store.CountPendingDiscoveryRequestsForUser(ctx, queries.CountPendingDiscoveryRequestsForUserParams{
+		count, err := q.CountPendingDiscoveryRequestsForUser(ctx, queries.CountPendingDiscoveryRequestsForUserParams{
 			RequesterUserID: userID,
 		})
 		if err != nil {
 			return err
 		}
 		if count >= policy.MaxPendingRequests.Int64 {
-			_ = s.RecordUserAuditEvent(ctx, actor, "request_create_deny", "request", tmdbID, "request-limit-reached")
+			if err := createUserAuditEventWithQueries(ctx, q, actor, "request_create_deny", "request", tmdbID, "request-limit-reached", now); err != nil {
+				return err
+			}
 			return ErrLimitReached
 		}
 	}
 	if policy.MaxActiveSubscriptions.Valid {
-		count, err := s.Store.CountActiveUserMediaSubscriptions(ctx, queries.CountActiveUserMediaSubscriptionsParams{
+		count, err := q.CountActiveUserMediaSubscriptions(ctx, queries.CountActiveUserMediaSubscriptionsParams{
 			EchoUserID: userID,
 		})
 		if err != nil {
 			return err
 		}
 		if count >= policy.MaxActiveSubscriptions.Int64 {
-			_ = s.RecordUserAuditEvent(ctx, actor, "request_create_deny", "request", tmdbID, "request-limit-reached")
+			if err := createUserAuditEventWithQueries(ctx, q, actor, "request_create_deny", "request", tmdbID, "request-limit-reached", now); err != nil {
+				return err
+			}
 			return ErrLimitReached
 		}
 	}
 	if policy.RequestCooldownSeconds.Valid && policy.RequestCooldownSeconds.Int64 > 0 {
-		count, err := s.Store.CountRecentDiscoveryRequestsForUser(ctx, queries.CountRecentDiscoveryRequestsForUserParams{
+		count, err := q.CountRecentDiscoveryRequestsForUser(ctx, queries.CountRecentDiscoveryRequestsForUserParams{
 			RequesterUserID: userID,
 			CreatedSince:    now - policy.RequestCooldownSeconds.Int64,
 		})
@@ -330,7 +348,9 @@ func (s *Service) enforceRequestLimits(ctx context.Context, actor Actor, policy 
 			return err
 		}
 		if count > 0 {
-			_ = s.RecordUserAuditEvent(ctx, actor, "rate_limit_deny", "request", tmdbID, "rate-limit-reached")
+			if err := createUserAuditEventWithQueries(ctx, q, actor, "rate_limit_deny", "request", tmdbID, "rate-limit-reached", now); err != nil {
+				return err
+			}
 			return ErrLimitReached
 		}
 	}
@@ -422,6 +442,16 @@ func (s *Service) createPendingRequest(
 	}
 
 	now := nowUnix(s)
+	if err := enforceRequestLimitsWithQueries(ctx, q, actor, policy, media.TMDBID, now); err != nil {
+		if errors.Is(err, ErrLimitReached) {
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return queries.DiscoverySubscriptionRequest{}, commitErr
+			}
+			committed = true
+		}
+		return queries.DiscoverySubscriptionRequest{}, err
+	}
+
 	row, err := q.CreateDiscoverySubscriptionRequest(ctx, queries.CreateDiscoverySubscriptionRequestParams{
 		RequesterUserID:             actorUserID(actor),
 		Status:                      "pending_review",
@@ -475,8 +505,8 @@ func (s *Service) createPendingRequest(
 	return row, nil
 }
 
-func (s *Service) appendRequestEvent(ctx context.Context, requestID int64, actor Actor, action, fromStatus, toStatus string, now int64) error {
-	_, err := s.Store.CreateDiscoverySubscriptionRequestEvent(ctx, queries.CreateDiscoverySubscriptionRequestEventParams{
+func appendRequestEventWithQueries(ctx context.Context, q *queries.Queries, requestID int64, actor Actor, action, fromStatus, toStatus string, now int64) error {
+	_, err := q.CreateDiscoverySubscriptionRequestEvent(ctx, queries.CreateDiscoverySubscriptionRequestEventParams{
 		RequestID:    requestID,
 		ActorUserID:  sqlNullString(actorUserID(actor)),
 		Action:       action,
@@ -507,7 +537,7 @@ func requestDTO(row queries.DiscoverySubscriptionRequest) RequestDTO {
 		dto.SubscriptionID = row.SubscriptionID.Int64
 	}
 	if row.LastErrorKind.Valid {
-		dto.SafeReason = row.LastErrorKind.String
+		dto.SafeReason = safeRequestReason(row.LastErrorKind.String)
 	}
 	return dto
 }
@@ -581,4 +611,23 @@ func safeAuditValue(value, fallback string) string {
 		return value[:120]
 	}
 	return value
+}
+
+func safeAuditTargetID(value string) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	for len([]byte(value)) > 120 {
+		runes = runes[:len(runes)-1]
+		value = string(runes)
+	}
+	return value
+}
+
+func safeRequestReason(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "metadata_unavailable", "policy_denied", "request_failed":
+		return strings.TrimSpace(kind)
+	default:
+		return "request_failed"
+	}
 }
