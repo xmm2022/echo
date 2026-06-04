@@ -2,7 +2,7 @@
 
 跨云盘资源池服务。把多家网盘（115、189pc、139 起步）的资源通过 `.echo` 占位文件统一管理：ingest 阶段在指定账号上秒传一份并落库，输出可被 Emby / OpenList / 媒体工具消费的 `.echo` 文件树；访问 `.echo` 时由 Echo 通过 sidecar 拿直链或代理流式回放，不再二次实例化。v0.1 中只有 115 支持"丢一个分享链接进来自动 ingest"（`115share2cas` 自动 exec）；139 走 manual import（用户自行跑 `cas139` 生成 `.cas` tree 后通过 `/api/ingest/manual` 导入）。
 
-> 状态：v0.3 discovery 主线已实现并通过本地验证；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)。
+> 状态：v0.4 media request 主线已实现并通过本地 fake full-path gate；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)，v0.4 设计见 [`docs/superpowers/specs/2026-06-04-echo-v0.4-design.md`](docs/superpowers/specs/2026-06-04-echo-v0.4-design.md)。
 
 ## 定位
 
@@ -17,7 +17,7 @@ Echo 是 NextEmby（闭源 PyArmor）和 RoseHub（闭源 Docker）之外的**�
 容器部署（推荐）:
 
 ```bash
-cp .env.example .env          # 填入 ECHO_ADMIN_TOKEN / ECHO_SIDECAR_TOKEN
+cp .env.example .env          # 填入 ECHO_BOOTSTRAP_ADMIN_TOKEN / ECHO_SIDECAR_TOKEN
 make docker                   # 构建本地 echo:dev 镜像 (docker/Dockerfile)
 docker compose -f docker-compose.example.yml up
 ```
@@ -27,7 +27,7 @@ docker compose -f docker-compose.example.yml up
 - `GET /healthz` 永远 200（liveness）
 - `GET /readyz` 在 sidecar token 未配 / 版本不符时返回 503；配齐后返回 200（DB ping + sidecar Ping + 版本校验）
 - `GET /metrics` 暴露 Prometheus 指标（`echo_*` 业务指标 + Go/进程指标）
-- 浏览器打开 `/`，粘贴 admin token 即可访问只读仪表盘
+- 用 `ECHO_BOOTSTRAP_ADMIN_TOKEN` 调 `/api/bootstrap/admin-token` 签发 admin API token；浏览器打开 `/` 后粘贴该 DB-backed admin token 即可访问管理后台
 
 镜像里打包了 `115share2cas` 生产器（固定到 `docker/Dockerfile` 的 `SIDECAR_TOOLS_REF`）；`cas139`（Python）不打包，需在 139 客户端环境自行运行后走 manual import。反代示例见 [`nginx.example.conf`](nginx.example.conf)。
 
@@ -70,9 +70,9 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 
 ## HTTP API 与管理后台
 
-`echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。v0.1 用单一静态 admin token（`auth.admin_token`）做 Bearer 鉴权，所有 API 与管理后台数据接口都在鉴权之后；`/healthz`、`/readyz`、`/metrics` 与数据无关的仪表盘外壳 `/` 公开。
+`echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。当前默认鉴权是 DB-backed Bearer API token：`auth.bootstrap_admin_token` 只用于 `/api/bootstrap/admin-token` 签发 / 找回 admin API token；日常 `/api/*`、`/ui/*` 和 `/app/*` 数据请求都走 API token。旧的 `auth.admin_token` 仅作为 v0.1 静态 token 兼容入口，不应作为长期管理凭据。`/healthz`、`/readyz`、`/metrics` 与数据无关的仪表盘外壳 `/`、`/app`、`/static/*` 公开。
 
-最小管理后台（templ + htmx）在 `/`，只读地看 Job 与 hash 冲突。前端依赖 **vendored** 的 htmx（`internal/web/static/htmx.min.js`，不走 CDN，版本与来源见 [`internal/web/static/README.md`](internal/web/static/README.md)）。浏览器打开 `/` 后在页面里粘贴 admin token，脚本会把它作为 Bearer 头附加到后续 htmx 请求。
+最小管理后台（templ + htmx）在 `/`，只读地看 Job 与 hash 冲突。前端依赖 **vendored** 的 htmx（`internal/web/static/htmx.min.js`，不走 CDN，版本与来源见 [`internal/web/static/README.md`](internal/web/static/README.md)）。浏览器里有两个本地 token 输入：admin token 只附加到除 `/api/me/*` 以外的 `/api/*` 与 `/ui/*` 管理请求；app token 只附加到 `/api/me/*` 与 `/app/*` 用户请求。
 
 ### v0.2 Emby 反向代理（`/emby`）
 
@@ -96,6 +96,16 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 - 管理后台首页已挂载 discovery subscriptions、sources、producer profiles、rule profiles、candidates、matches 和 runs 面板。
 
 Discovery 不直接写 `library_entries` / `file_copies`，也不直接 import sidecar Go 包；它只负责发现、评分、决策和把 115 分享交给现有 producer pipeline。当前 release 不强制 Telegram 登录；Telegram MTProto 真机 gate 是可选 operator gate，环境变量见 [`docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md`](docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md)。
+
+### v0.4 Media Request 用户请求层
+
+v0.4 在 v0.3 admin-only discovery 之上增加用户侧媒体请求与订阅准入层：
+
+- `/app` 是用户 media request shell，普通用户可以搜索 TMDB、提交请求、查看自己的请求和订阅状态。
+- v0.4 MVP 继续使用 Bearer/API token；完整浏览器登录、cookie session 和 CSRF 设计留到后续版本。
+- 用户 JSON API 挂在 `/api/me/discovery/*`，调用方必须持有 `discovery` scope。
+- 现有 `/api/discovery/*` 与 `/ui/discovery/*` discovery 管理控制面仍然是 admin-only；source、producer profile、rule profile、candidate、match、run 和 raw debug 不对普通用户开放。
+- 用户请求不会直接排 producer job。admin approve 或 policy auto-approve 才会创建/复用 canonical `discovery_subscriptions`，再由既有 v0.3 scheduler / match / dispatch 路径处理。
 
 ## 致谢
 

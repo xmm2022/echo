@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### v0.4 media requests
+
+- Added media request schema for access policies, policy targets, request
+  ledger, user subscription links, request events, and user audit events.
+- Added user-facing `/api/me/discovery/*` APIs and `/app` media request shell
+  for TMDB search, catalog, request creation/cancelation, and redacted user
+  subscription status.
+- Added admin policy/target management and request approval/rejection under the
+  existing admin-only `/api/discovery/*` boundary.
+- Added canonical discovery subscription reuse across multiple users requesting
+  the same media target, keeping user request creation separate from producer
+  job dispatch.
+- Added a fake full-path gate covering user request creation, admin approval,
+  discovery subscription reuse, existing v0.3 match review, concurrent accept,
+  one `ingest_producer` job, and redacted user projections.
+
 ### v0.3 discovery
 
 - Added TMDB-backed subscriptions, Telegram/poster/manual discovery sources,
