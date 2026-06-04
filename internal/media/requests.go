@@ -279,7 +279,7 @@ func (s *Service) RejectRequest(ctx context.Context, actor Actor, requestID int6
 	if err != nil {
 		return RequestDTO{}, err
 	}
-	if err := appendRequestEventWithNoteWithQueries(ctx, q, row.ID, actor, "rejected", "pending_review", "rejected", note, now); err != nil {
+	if err := appendRequestEventWithNoteWithQueries(ctx, q, row.ID, actor, "rejected", "pending_review", "rejected", "admin_action", now); err != nil {
 		return RequestDTO{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -922,8 +922,8 @@ func (s *Service) approvePendingRequestTx(ctx context.Context, q *queries.Querie
 	if err != nil {
 		return queries.DiscoverySubscriptionRequest{}, err
 	}
-	eventNote := note
-	if auto && strings.TrimSpace(eventNote) == "" {
+	eventNote := "admin_action"
+	if auto {
 		eventNote = "auto_approve"
 	}
 	if err := appendRequestEventWithNoteWithQueries(ctx, q, row.ID, actor, "approved", "pending_review", "approved", eventNote, now); err != nil {

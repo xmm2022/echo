@@ -781,12 +781,13 @@ func TestApproveRequestCreatesCanonicalSubscriptionAndUserLink(t *testing.T) {
 		TMDBID:    "700",
 		MediaType: "movie",
 		TargetID:  fixture.target.ID,
+		UserNote:  "raw approve user secret",
 	})
 	if err != nil {
 		t.Fatalf("CreateRequest returned error: %v", err)
 	}
 
-	got, err := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, " approved by admin ")
+	got, err := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, " raw approve admin secret ")
 	if err != nil {
 		t.Fatalf("ApproveRequest returned error: %v", err)
 	}
@@ -798,7 +799,7 @@ func TestApproveRequestCreatesCanonicalSubscriptionAndUserLink(t *testing.T) {
 	if row.Status != "approved" || !row.SubscriptionID.Valid || row.SubscriptionID.Int64 != got.SubscriptionID {
 		t.Fatalf("stored request = %+v, want approved linked request", row)
 	}
-	if !row.AdminNote.Valid || row.AdminNote.String != "approved by admin" {
+	if !row.AdminNote.Valid || row.AdminNote.String != "raw approve admin secret" {
 		t.Fatalf("admin note = %+v, want trimmed note", row.AdminNote)
 	}
 	if !row.ReviewedBy.Valid || row.ReviewedBy.String != "admin" {
@@ -829,6 +830,7 @@ func TestApproveRequestCreatesCanonicalSubscriptionAndUserLink(t *testing.T) {
 	if actions := requestEventActions(t, fixture.st, req.ID); strings.Join(actions, ",") != "approved,created" {
 		t.Fatalf("event actions = %v, want approved,created", actions)
 	}
+	assertRequestEventNotesRedacted(t, fixture.st, req.ID, "raw approve admin secret", "raw approve user secret")
 }
 
 func TestApproveRequestReusesCanonicalSubscriptionAcrossUsers(t *testing.T) {
@@ -1111,6 +1113,7 @@ func TestRejectRequestLeavesDiscoveryCoreUntouched(t *testing.T) {
 		TMDBID:    "705",
 		MediaType: "movie",
 		TargetID:  fixture.target.ID,
+		UserNote:  "raw reject user secret",
 	})
 	if err != nil {
 		t.Fatalf("CreateRequest returned error: %v", err)
@@ -1119,7 +1122,7 @@ func TestRejectRequestLeavesDiscoveryCoreUntouched(t *testing.T) {
 	beforeUserSubs := countUserMediaSubscriptions(t, fixture.st)
 	beforeJobs := countJobs(t, fixture.st)
 
-	got, err := fixture.svc.RejectRequest(ctx, adminMediaActor(), req.ID, " no ")
+	got, err := fixture.svc.RejectRequest(ctx, adminMediaActor(), req.ID, " raw reject admin secret ")
 	if err != nil {
 		t.Fatalf("RejectRequest returned error: %v", err)
 	}
@@ -1130,7 +1133,7 @@ func TestRejectRequestLeavesDiscoveryCoreUntouched(t *testing.T) {
 	if row.Status != "rejected" || row.SubscriptionID.Valid {
 		t.Fatalf("stored rejected request = %+v, want no subscription link", row)
 	}
-	if !row.AdminNote.Valid || row.AdminNote.String != "no" {
+	if !row.AdminNote.Valid || row.AdminNote.String != "raw reject admin secret" {
 		t.Fatalf("admin note = %+v, want trimmed note", row.AdminNote)
 	}
 	if countDiscoverySubscriptions(t, fixture.st) != beforeCanonical {
@@ -1145,6 +1148,7 @@ func TestRejectRequestLeavesDiscoveryCoreUntouched(t *testing.T) {
 	if actions := requestEventActions(t, fixture.st, req.ID); strings.Join(actions, ",") != "rejected,created" {
 		t.Fatalf("event actions = %v, want rejected,created", actions)
 	}
+	assertRequestEventNotesRedacted(t, fixture.st, req.ID, "raw reject admin secret", "raw reject user secret")
 }
 
 func TestApproveRequestGrantsPlaybackWhenTargetAllowsGrant(t *testing.T) {
@@ -1541,6 +1545,28 @@ WHERE request_id = ? AND action = ?`, requestID, action).Scan(&count); err != ni
 		t.Fatalf("count request events by action: %v", err)
 	}
 	return count
+}
+
+func assertRequestEventNotesRedacted(t *testing.T, st *store.Store, requestID int64, forbidden ...string) {
+	t.Helper()
+	events, err := st.ListDiscoverySubscriptionRequestEvents(context.Background(), queries.ListDiscoverySubscriptionRequestEventsParams{
+		RequestID: requestID,
+		Limit:     10,
+		Offset:    0,
+	})
+	if err != nil {
+		t.Fatalf("list request events: %v", err)
+	}
+	for _, event := range events {
+		if !event.Note.Valid {
+			continue
+		}
+		for _, value := range forbidden {
+			if strings.Contains(event.Note.String, value) {
+				t.Fatalf("event %q note leaked %q: %+v", event.Action, value, event.Note)
+			}
+		}
+	}
 }
 
 func canPlaybackLibrary(t *testing.T, st *store.Store, userID string, libraryID int64) bool {
