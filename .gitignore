@@ -38,3 +38,6 @@ coverage.html
 
 # Test artifacts
 /testdata/output/
+
+# Local brainstorming mockups
+.superpowers/
