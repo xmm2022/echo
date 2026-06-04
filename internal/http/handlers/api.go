@@ -12,6 +12,7 @@ import (
 
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/ingest"
+	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/sidecarclient"
 	"github.com/xmm2022/echo/internal/store"
 )
@@ -73,6 +74,7 @@ type APIDeps struct {
 	Jobs                JobController
 	Config              APIConfig
 	DiscoveryTMDB       DiscoveryTMDBSearcher
+	Media               *media.Service
 	Logger              *slog.Logger
 	Now                 func() time.Time
 	BootstrapAdminToken string
@@ -103,6 +105,7 @@ func (d APIDeps) Mount(r chi.Router) {
 
 	d.MountV02Management(r)
 	d.MountDiscovery(r)
+	d.MountMedia(r)
 }
 
 func (d APIDeps) now() time.Time {
