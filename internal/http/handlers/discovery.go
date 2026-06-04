@@ -15,6 +15,7 @@ import (
 	"github.com/xmm2022/echo/internal/discovery"
 	"github.com/xmm2022/echo/internal/discovery/rules"
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
+	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
 
@@ -48,6 +49,16 @@ func (d APIDeps) MountDiscovery(r chi.Router) {
 	r.Post("/api/discovery/run/source/{id}", d.RunDiscoverySource)
 	r.Post("/api/discovery/run/subscription/{id}", d.RunDiscoverySubscription)
 	r.Get("/api/discovery/debug/resources/{id}/raw", d.GetDiscoveryRawResource)
+	r.Get("/api/discovery/requests", d.ListDiscoveryRequestsForAdmin)
+	r.Get("/api/discovery/requests/{id}", d.GetDiscoveryRequestForAdmin)
+	r.Post("/api/discovery/requests/{id}/approve", d.ApproveDiscoveryRequest)
+	r.Post("/api/discovery/requests/{id}/reject", d.RejectDiscoveryRequest)
+	r.Get("/api/discovery/access-policies", d.ListDiscoveryAccessPolicies)
+	r.Post("/api/discovery/access-policies", d.CreateDiscoveryAccessPolicy)
+	r.Patch("/api/discovery/access-policies/{id}", d.UpdateDiscoveryAccessPolicy)
+	r.Get("/api/discovery/access-policies/{id}/targets", d.ListDiscoveryPolicyTargets)
+	r.Post("/api/discovery/access-policies/{id}/targets", d.CreateDiscoveryPolicyTarget)
+	r.Patch("/api/discovery/access-policies/{id}/targets/{target_id}", d.UpdateDiscoveryPolicyTarget)
 }
 
 func (d APIDeps) ListDiscoverySubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -635,6 +646,306 @@ func (d APIDeps) GetDiscoveryRawResource(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"resource_id": row.ID, "raw_text_redacted": redacted})
 }
 
+func (d APIDeps) ListDiscoveryRequestsForAdmin(w http.ResponseWriter, r *http.Request) {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if d.Media == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "media service not configured")
+		return
+	}
+	rows, err := d.Media.ListRequestsForAdmin(r.Context(), media.Actor{User: admin, IP: r.RemoteAddr}, strings.TrimSpace(r.URL.Query().Get("status")), queryLimit(r, mediaAPIDefaultLimit, mediaAPIMaxLimit), queryOffset(r))
+	if err != nil {
+		d.writeMediaError(w, err)
+		return
+	}
+	if rows == nil {
+		rows = []media.RequestDTO{}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (d APIDeps) GetDiscoveryRequestForAdmin(w http.ResponseWriter, r *http.Request) {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	id, ok := parseInt64Param(w, r, "id")
+	if !ok {
+		return
+	}
+	if d.Media == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "media service not configured")
+		return
+	}
+	row, err := d.Media.GetRequestForAdmin(r.Context(), media.Actor{User: admin, IP: r.RemoteAddr}, id)
+	if err != nil {
+		d.writeMediaError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, row)
+}
+
+func (d APIDeps) ApproveDiscoveryRequest(w http.ResponseWriter, r *http.Request) {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	id, ok := parseInt64Param(w, r, "id")
+	if !ok {
+		return
+	}
+	if d.Media == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "media service not configured")
+		return
+	}
+	var body reviewMediaRequestBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	note, ok := validateReviewMediaRequestNote(w, body.Note)
+	if !ok {
+		return
+	}
+	row, err := d.Media.ApproveRequest(r.Context(), media.Actor{User: admin, IP: r.RemoteAddr}, id, note)
+	if err != nil {
+		d.writeMediaError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, row)
+}
+
+func (d APIDeps) RejectDiscoveryRequest(w http.ResponseWriter, r *http.Request) {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	id, ok := parseInt64Param(w, r, "id")
+	if !ok {
+		return
+	}
+	if d.Media == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "media service not configured")
+		return
+	}
+	var body reviewMediaRequestBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	note, ok := validateReviewMediaRequestNote(w, body.Note)
+	if !ok {
+		return
+	}
+	row, err := d.Media.RejectRequest(r.Context(), media.Actor{User: admin, IP: r.RemoteAddr}, id, note)
+	if err != nil {
+		d.writeMediaError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, row)
+}
+
+func (d APIDeps) ListDiscoveryAccessPolicies(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	if !d.requireDiscoveryStore(w) {
+		return
+	}
+	rows, err := d.Store.ListDiscoveryAccessPolicies(r.Context(), queries.ListDiscoveryAccessPoliciesParams{
+		Limit:  queryLimit(r, discoveryAPIDefaultLimit, discoveryAPIMaxLimit),
+		Offset: queryOffset(r),
+	})
+	if err != nil {
+		d.writeDiscoveryError(w, "list discovery access policies", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (d APIDeps) CreateDiscoveryAccessPolicy(w http.ResponseWriter, r *http.Request) {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if !d.requireDiscoveryStore(w) {
+		return
+	}
+	var body discoveryAccessPolicyBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := validateDiscoveryAccessPolicyBody(body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := d.now().Unix()
+	row, err := d.Store.CreateDiscoveryAccessPolicy(r.Context(), queries.CreateDiscoveryAccessPolicyParams{
+		Name:                   strings.TrimSpace(body.Name),
+		Enabled:                boolToInt(body.Enabled),
+		Priority:               body.Priority,
+		SubjectUserID:          nullDiscoveryStringPtr(body.SubjectUserID),
+		RequestMode:            strings.TrimSpace(body.RequestMode),
+		CanSearch:              boolToInt(body.CanSearch),
+		MaxPendingRequests:     nullDiscoveryInt64(body.MaxPendingRequests),
+		MaxActiveSubscriptions: nullDiscoveryInt64(body.MaxActiveSubscriptions),
+		RequestCooldownSeconds: nullDiscoveryInt64(body.RequestCooldownSeconds),
+		CreatedBy:              nullDiscoveryString(admin.UserID),
+		CreatedAt:              now,
+		UpdatedAt:              now,
+	})
+	if err != nil {
+		d.writeDiscoveryError(w, "create discovery access policy", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, row)
+}
+
+func (d APIDeps) UpdateDiscoveryAccessPolicy(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	id, ok := parseInt64Param(w, r, "id")
+	if !ok || !d.requireDiscoveryStore(w) {
+		return
+	}
+	var body discoveryAccessPolicyBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := validateDiscoveryAccessPolicyBody(body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	row, err := d.Store.UpdateDiscoveryAccessPolicy(r.Context(), queries.UpdateDiscoveryAccessPolicyParams{
+		Name:                   strings.TrimSpace(body.Name),
+		Enabled:                boolToInt(body.Enabled),
+		Priority:               body.Priority,
+		SubjectUserID:          nullDiscoveryStringPtr(body.SubjectUserID),
+		RequestMode:            strings.TrimSpace(body.RequestMode),
+		CanSearch:              boolToInt(body.CanSearch),
+		MaxPendingRequests:     nullDiscoveryInt64(body.MaxPendingRequests),
+		MaxActiveSubscriptions: nullDiscoveryInt64(body.MaxActiveSubscriptions),
+		RequestCooldownSeconds: nullDiscoveryInt64(body.RequestCooldownSeconds),
+		UpdatedAt:              d.now().Unix(),
+		ID:                     id,
+	})
+	if err != nil {
+		d.writeDiscoveryError(w, "update discovery access policy", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, row)
+}
+
+func (d APIDeps) ListDiscoveryPolicyTargets(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	policyID, ok := parseInt64Param(w, r, "id")
+	if !ok || !d.requireDiscoveryStore(w) {
+		return
+	}
+	rows, err := d.Store.ListDiscoveryPolicyTargets(r.Context(), queries.ListDiscoveryPolicyTargetsParams{
+		PolicyID: policyID,
+		Limit:    queryLimit(r, discoveryAPIDefaultLimit, discoveryAPIMaxLimit),
+		Offset:   queryOffset(r),
+	})
+	if err != nil {
+		d.writeDiscoveryError(w, "list discovery policy targets", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (d APIDeps) CreateDiscoveryPolicyTarget(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	policyID, ok := parseInt64Param(w, r, "id")
+	if !ok || !d.requireDiscoveryStore(w) {
+		return
+	}
+	var body discoveryPolicyTargetBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := validateDiscoveryPolicyTargetBody(body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := d.now().Unix()
+	row, err := d.Store.CreateDiscoveryPolicyTarget(r.Context(), queries.CreateDiscoveryPolicyTargetParams{
+		PolicyID:                policyID,
+		Label:                   strings.TrimSpace(body.Label),
+		LibraryID:               body.LibraryID,
+		ProducerProfileID:       body.ProducerProfileID,
+		RuleProfileID:           body.RuleProfileID,
+		PipelineOwnerID:         strings.TrimSpace(body.PipelineOwnerID),
+		MediaType:               nullDiscoveryStringPtr(body.MediaType),
+		MatchMode:               strings.TrimSpace(body.MatchMode),
+		GrantPlaybackOnApproval: boolToInt(body.GrantPlaybackOnApproval),
+		Enabled:                 boolToInt(body.Enabled),
+		DefaultTarget:           boolToInt(body.DefaultTarget),
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	})
+	if err != nil {
+		d.writeDiscoveryError(w, "create discovery policy target", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, row)
+}
+
+func (d APIDeps) UpdateDiscoveryPolicyTarget(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	policyID, ok := parseInt64Param(w, r, "id")
+	if !ok {
+		return
+	}
+	targetID, ok := parseInt64Param(w, r, "target_id")
+	if !ok || !d.requireDiscoveryStore(w) {
+		return
+	}
+	var body discoveryPolicyTargetBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := validateDiscoveryPolicyTargetBody(body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	target, err := d.Store.GetDiscoveryPolicyTarget(r.Context(), queries.GetDiscoveryPolicyTargetParams{ID: targetID})
+	if err != nil {
+		d.writeDiscoveryError(w, "get discovery policy target", err)
+		return
+	}
+	if target.PolicyID != policyID {
+		writeAPIError(w, http.StatusNotFound, "not found")
+		return
+	}
+	row, err := d.Store.UpdateDiscoveryPolicyTarget(r.Context(), queries.UpdateDiscoveryPolicyTargetParams{
+		Label:                   strings.TrimSpace(body.Label),
+		LibraryID:               body.LibraryID,
+		ProducerProfileID:       body.ProducerProfileID,
+		RuleProfileID:           body.RuleProfileID,
+		PipelineOwnerID:         strings.TrimSpace(body.PipelineOwnerID),
+		MediaType:               nullDiscoveryStringPtr(body.MediaType),
+		MatchMode:               strings.TrimSpace(body.MatchMode),
+		GrantPlaybackOnApproval: boolToInt(body.GrantPlaybackOnApproval),
+		Enabled:                 boolToInt(body.Enabled),
+		DefaultTarget:           boolToInt(body.DefaultTarget),
+		UpdatedAt:               d.now().Unix(),
+		ID:                      targetID,
+	})
+	if err != nil {
+		d.writeDiscoveryError(w, "update discovery policy target", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, row)
+}
+
 type discoverySubscriptionRequest struct {
 	OwnerID           string `json:"owner_id"`
 	TMDBID            string `json:"tmdb_id"`
@@ -705,6 +1016,35 @@ type ruleProfileTestRequest struct {
 	RulesJSON string `json:"rules_json"`
 	Title     string `json:"title"`
 	RawText   string `json:"raw_text"`
+}
+
+type reviewMediaRequestBody struct {
+	Note string `json:"note"`
+}
+
+type discoveryAccessPolicyBody struct {
+	Name                   string  `json:"name"`
+	Enabled                bool    `json:"enabled"`
+	Priority               int64   `json:"priority"`
+	SubjectUserID          *string `json:"subject_user_id"`
+	RequestMode            string  `json:"request_mode"`
+	CanSearch              bool    `json:"can_search"`
+	MaxPendingRequests     *int64  `json:"max_pending_requests"`
+	MaxActiveSubscriptions *int64  `json:"max_active_subscriptions"`
+	RequestCooldownSeconds *int64  `json:"request_cooldown_seconds"`
+}
+
+type discoveryPolicyTargetBody struct {
+	Label                   string  `json:"label"`
+	LibraryID               int64   `json:"library_id"`
+	ProducerProfileID       int64   `json:"producer_profile_id"`
+	RuleProfileID           int64   `json:"rule_profile_id"`
+	PipelineOwnerID         string  `json:"pipeline_owner_id"`
+	MediaType               *string `json:"media_type"`
+	MatchMode               string  `json:"match_mode"`
+	GrantPlaybackOnApproval bool    `json:"grant_playback_on_approval"`
+	Enabled                 bool    `json:"enabled"`
+	DefaultTarget           bool    `json:"default_target"`
 }
 
 type discoveryTMDBSummary struct {
@@ -869,6 +1209,74 @@ func validateDiscoveryProducerProfileRequest(req producerProfileRequest, create 
 	return validateJSONObject(defaultJSON(req.DefaultArgsJSON), "default_args_json")
 }
 
+func validateReviewMediaRequestNote(w http.ResponseWriter, note string) (string, bool) {
+	note = strings.TrimSpace(note)
+	if len([]byte(note)) > 2000 {
+		writeAPIError(w, http.StatusBadRequest, "invalid review note")
+		return "", false
+	}
+	return note, true
+}
+
+func validateDiscoveryAccessPolicyBody(body discoveryAccessPolicyBody) error {
+	if strings.TrimSpace(body.Name) == "" {
+		return errors.New("policy name is required")
+	}
+	if body.Priority < 0 {
+		return errors.New("invalid policy priority")
+	}
+	if !validDiscoveryRequestMode(strings.TrimSpace(body.RequestMode)) {
+		return errors.New("invalid request_mode")
+	}
+	if body.MaxPendingRequests != nil && *body.MaxPendingRequests < 0 {
+		return errors.New("invalid max_pending_requests")
+	}
+	if body.MaxActiveSubscriptions != nil && *body.MaxActiveSubscriptions < 0 {
+		return errors.New("invalid max_active_subscriptions")
+	}
+	if body.RequestCooldownSeconds != nil && *body.RequestCooldownSeconds < 0 {
+		return errors.New("invalid request_cooldown_seconds")
+	}
+	return nil
+}
+
+func validateDiscoveryPolicyTargetBody(body discoveryPolicyTargetBody) error {
+	if strings.TrimSpace(body.Label) == "" {
+		return errors.New("target label is required")
+	}
+	if body.LibraryID <= 0 || body.ProducerProfileID <= 0 || body.RuleProfileID <= 0 {
+		return errors.New("invalid target references")
+	}
+	if strings.TrimSpace(body.PipelineOwnerID) == "" {
+		return errors.New("pipeline_owner_id is required")
+	}
+	if body.MediaType != nil && !validDiscoveryMediaType(strings.TrimSpace(*body.MediaType)) {
+		return errors.New("invalid media_type")
+	}
+	if !validDiscoveryMatchMode(strings.TrimSpace(body.MatchMode)) {
+		return errors.New("invalid match_mode")
+	}
+	return nil
+}
+
+func validDiscoveryRequestMode(value string) bool {
+	switch value {
+	case "disabled", "approval_required", "auto_approve":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiscoveryMatchMode(value string) bool {
+	switch value {
+	case "admin_review", "auto_dispatch":
+		return true
+	default:
+		return false
+	}
+}
+
 func validDiscoverySourceKind(value string) bool {
 	switch value {
 	case "telegram_mtproto", "poster_http", "manual":
@@ -928,6 +1336,13 @@ func nullDiscoveryInt64(value *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *value, Valid: true}
+}
+
+func nullDiscoveryStringPtr(value *string) sql.NullString {
+	if value == nil {
+		return sql.NullString{}
+	}
+	return nullDiscoveryString(*value)
 }
 
 func nullDiscoveryInt64FromInt(value int) sql.NullInt64 {

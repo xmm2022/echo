@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/discovery"
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
+	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
@@ -130,6 +132,16 @@ func TestDiscoveryAdminEndpointsRejectNonAdmin(t *testing.T) {
 		{http.MethodPost, "/api/discovery/run/source/1"},
 		{http.MethodPost, "/api/discovery/run/subscription/1"},
 		{http.MethodGet, "/api/discovery/debug/resources/1/raw"},
+		{http.MethodGet, "/api/discovery/requests"},
+		{http.MethodGet, "/api/discovery/requests/1"},
+		{http.MethodPost, "/api/discovery/requests/1/approve"},
+		{http.MethodPost, "/api/discovery/requests/1/reject"},
+		{http.MethodGet, "/api/discovery/access-policies"},
+		{http.MethodPost, "/api/discovery/access-policies"},
+		{http.MethodPatch, "/api/discovery/access-policies/1"},
+		{http.MethodGet, "/api/discovery/access-policies/1/targets"},
+		{http.MethodPost, "/api/discovery/access-policies/1/targets"},
+		{http.MethodPatch, "/api/discovery/access-policies/1/targets/1"},
 	}
 	for _, tc := range cases {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -138,6 +150,290 @@ func TestDiscoveryAdminEndpointsRejectNonAdmin(t *testing.T) {
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("%s %s status = %d, want 403", tc.method, tc.path, rr.Code)
 		}
+	}
+}
+
+func TestDiscoveryAdminEndpointsIncludeV04RoutesAndRejectNonAdmin(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/discovery/requests", ""},
+		{http.MethodGet, "/api/discovery/requests/1", ""},
+		{http.MethodPost, "/api/discovery/requests/1/approve", `{"note":"ok"}`},
+		{http.MethodPost, "/api/discovery/requests/1/reject", `{"note":"ok"}`},
+		{http.MethodGet, "/api/discovery/access-policies", ""},
+		{http.MethodPost, "/api/discovery/access-policies", `{}`},
+		{http.MethodPatch, "/api/discovery/access-policies/1", `{}`},
+		{http.MethodGet, "/api/discovery/access-policies/1/targets", ""},
+		{http.MethodPost, "/api/discovery/access-policies/1/targets", `{}`},
+		{http.MethodPatch, "/api/discovery/access-policies/1/targets/1", `{}`},
+	}
+
+	for _, tc := range cases {
+		nonAdmin := doReqAs(t, tc.method, tc.path, tc.body, auth.UserContext{UserID: "u1", Scopes: []string{"read"}}, func(r chi.Router) {
+			APIDeps{}.MountDiscovery(r)
+		})
+		if nonAdmin.Code != http.StatusForbidden {
+			t.Fatalf("non-admin %s %s status=%d body=%s, want 403", tc.method, tc.path, nonAdmin.Code, nonAdmin.Body.String())
+		}
+
+		admin := doReqAs(t, tc.method, tc.path, tc.body, auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}, func(r chi.Router) {
+			APIDeps{}.MountDiscovery(r)
+		})
+		if admin.Code == http.StatusNotFound {
+			t.Fatalf("admin %s %s status=%d body=%s, want mounted v0.4 route", tc.method, tc.path, admin.Code, admin.Body.String())
+		}
+	}
+}
+
+func TestDiscoveryAdminPolicyCRUDUsesAdminBoundary(t *testing.T) {
+	st := newAPIStore(t)
+	createUserRow(t, st, "u1", "user")
+	deps := discoveryStoreDeps(st)
+	fixture := seedDiscoveryAPIFixture(t, st)
+	admin := auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}
+	user := auth.UserContext{UserID: "u1", Scopes: []string{"read"}}
+
+	policyBody := `{"name":"Approvals","enabled":true,"priority":25,"subject_user_id":"u1","request_mode":"approval_required","can_search":true,"max_pending_requests":2,"max_active_subscriptions":5,"request_cooldown_seconds":30}`
+	rec := doReqAs(t, http.MethodPost, "/api/discovery/access-policies", policyBody, user, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin create policy status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+
+	rec = doReqAs(t, http.MethodPost, "/api/discovery/access-policies", policyBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create policy status=%d body=%s, want 201", rec.Code, rec.Body.String())
+	}
+	var createdPolicy queries.DiscoveryAccessPolicy
+	decodeBody(t, rec, &createdPolicy)
+	if createdPolicy.ID == 0 || createdPolicy.Name != "Approvals" || createdPolicy.RequestMode != "approval_required" || createdPolicy.Enabled != 1 || createdPolicy.CanSearch != 1 {
+		t.Fatalf("created policy=%+v, want admin-created approval policy", createdPolicy)
+	}
+	if !createdPolicy.CreatedBy.Valid || createdPolicy.CreatedBy.String != "admin" || createdPolicy.CreatedAt != 1000 || createdPolicy.UpdatedAt != 1000 {
+		t.Fatalf("created policy audit=%+v, want created_by admin at fixed clock", createdPolicy)
+	}
+
+	updatePolicyBody := `{"name":"Auto Approvals","enabled":false,"priority":26,"subject_user_id":null,"request_mode":"auto_approve","can_search":false,"max_pending_requests":0,"max_active_subscriptions":null,"request_cooldown_seconds":60}`
+	rec = doReqAs(t, http.MethodPatch, "/api/discovery/access-policies/"+itoa(createdPolicy.ID), updatePolicyBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update policy status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var updatedPolicy queries.DiscoveryAccessPolicy
+	decodeBody(t, rec, &updatedPolicy)
+	if updatedPolicy.Name != "Auto Approvals" || updatedPolicy.Enabled != 0 || updatedPolicy.Priority != 26 || updatedPolicy.RequestMode != "auto_approve" || updatedPolicy.CanSearch != 0 {
+		t.Fatalf("updated policy=%+v, want patched fields", updatedPolicy)
+	}
+	if updatedPolicy.SubjectUserID.Valid || !updatedPolicy.MaxPendingRequests.Valid || updatedPolicy.MaxPendingRequests.Int64 != 0 || updatedPolicy.MaxActiveSubscriptions.Valid {
+		t.Fatalf("updated policy nullable fields=%+v, want null subject and active limit, zero pending limit", updatedPolicy)
+	}
+
+	rec = doReqAs(t, http.MethodGet, "/api/discovery/access-policies", "", admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list policies status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var policies []queries.DiscoveryAccessPolicy
+	decodeBody(t, rec, &policies)
+	if len(policies) != 1 || policies[0].ID != createdPolicy.ID {
+		t.Fatalf("policies=%+v, want created policy", policies)
+	}
+
+	badTargetBody := `{"label":"Bad","library_id":0,"producer_profile_id":` + itoa(fixture.producerProfileID) + `,"rule_profile_id":` + itoa(fixture.ruleProfileID) + `,"pipeline_owner_id":"admin","media_type":"movie","match_mode":"admin_review","grant_playback_on_approval":true,"enabled":true,"default_target":true}`
+	rec = doReqAs(t, http.MethodPost, "/api/discovery/access-policies/"+itoa(createdPolicy.ID)+"/targets", badTargetBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad target status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+
+	targetBody := `{"label":"Movie Target","library_id":` + itoa(fixture.libraryID) + `,"producer_profile_id":` + itoa(fixture.producerProfileID) + `,"rule_profile_id":` + itoa(fixture.ruleProfileID) + `,"pipeline_owner_id":"admin","media_type":"movie","match_mode":"admin_review","grant_playback_on_approval":true,"enabled":true,"default_target":true}`
+	rec = doReqAs(t, http.MethodPost, "/api/discovery/access-policies/"+itoa(createdPolicy.ID)+"/targets", targetBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create target status=%d body=%s, want 201", rec.Code, rec.Body.String())
+	}
+	var createdTarget queries.DiscoveryPolicyTarget
+	decodeBody(t, rec, &createdTarget)
+	if createdTarget.ID == 0 || createdTarget.PolicyID != createdPolicy.ID || createdTarget.Label != "Movie Target" || createdTarget.MediaType.String != "movie" || createdTarget.MatchMode != "admin_review" {
+		t.Fatalf("created target=%+v, want route policy target", createdTarget)
+	}
+	assertBodyOmits(t, rec.Body.String(), "default_args_json", "secret", "target_account", "rules_json", "job_payload")
+
+	updateTargetBody := `{"label":"TV Target","library_id":` + itoa(fixture.libraryID) + `,"producer_profile_id":` + itoa(fixture.producerProfileID) + `,"rule_profile_id":` + itoa(fixture.ruleProfileID) + `,"pipeline_owner_id":"admin","media_type":"tv","match_mode":"auto_dispatch","grant_playback_on_approval":false,"enabled":false,"default_target":false}`
+	rec = doReqAs(t, http.MethodPatch, "/api/discovery/access-policies/"+itoa(createdPolicy.ID)+"/targets/"+itoa(createdTarget.ID), updateTargetBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update target status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var updatedTarget queries.DiscoveryPolicyTarget
+	decodeBody(t, rec, &updatedTarget)
+	if updatedTarget.Label != "TV Target" || updatedTarget.MediaType.String != "tv" || updatedTarget.MatchMode != "auto_dispatch" || updatedTarget.Enabled != 0 || updatedTarget.DefaultTarget != 0 || updatedTarget.GrantPlaybackOnApproval != 0 {
+		t.Fatalf("updated target=%+v, want patched target", updatedTarget)
+	}
+
+	rec = doReqAs(t, http.MethodGet, "/api/discovery/access-policies/"+itoa(createdPolicy.ID)+"/targets", "", admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list targets status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var targets []queries.DiscoveryPolicyTarget
+	decodeBody(t, rec, &targets)
+	if len(targets) != 1 || targets[0].ID != createdTarget.ID || targets[0].PolicyID != createdPolicy.ID {
+		t.Fatalf("targets=%+v, want target under policy", targets)
+	}
+
+	otherPolicy, err := st.CreateDiscoveryAccessPolicy(context.Background(), queries.CreateDiscoveryAccessPolicyParams{
+		Name:        "Other",
+		Enabled:     1,
+		Priority:    1,
+		RequestMode: "approval_required",
+		CanSearch:   1,
+		CreatedBy:   sql.NullString{String: "admin", Valid: true},
+		CreatedAt:   1000,
+		UpdatedAt:   1000,
+	})
+	if err != nil {
+		t.Fatalf("create other policy: %v", err)
+	}
+	rec = doReqAs(t, http.MethodPatch, "/api/discovery/access-policies/"+itoa(otherPolicy.ID)+"/targets/"+itoa(createdTarget.ID), updateTargetBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-policy update target status=%d body=%s, want 404", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDiscoveryAdminApproveCreatesCanonicalSubscription(t *testing.T) {
+	st, deps, fake, target := newMediaHTTPCreateFixture(t, "u1", "approval_required")
+	fake.movies["800"] = tmdb.Media{
+		TMDBID:      "800",
+		MediaType:   "movie",
+		Title:       "Admin Approved",
+		ReleaseYear: 2026,
+		RawJSON:     `{"secret":"metadata"}`,
+	}
+	req := createMediaRequestThroughService(t, deps, "u1", target.ID, "800", "movie")
+	body := `{"note":" raw approve admin secret "}`
+
+	rec := doReqAs(t, http.MethodPost, "/api/discovery/requests/"+itoa(req.ID)+"/approve", body, auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var got media.RequestDTO
+	decodeBody(t, rec, &got)
+	if got.ID != req.ID || got.Status != "approved" || got.SubscriptionID == 0 || got.ReviewedAt != 1000 {
+		t.Fatalf("approved DTO=%+v, want approved request with canonical subscription", got)
+	}
+	assertBodyOmits(t, rec.Body.String(), "raw approve admin secret", "admin_note", "user_note", "metadata", "secret")
+
+	var subscriptionID int64
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT subscription_id FROM discovery_subscription_requests WHERE id = ?`, req.ID).Scan(&subscriptionID); err != nil {
+		t.Fatal(err)
+	}
+	if subscriptionID != got.SubscriptionID {
+		t.Fatalf("stored subscription_id=%d, want DTO subscription %d", subscriptionID, got.SubscriptionID)
+	}
+	var ownerID, tmdbID, mediaType string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT owner_id, tmdb_id, media_type FROM discovery_subscriptions WHERE id = ?`, got.SubscriptionID).Scan(&ownerID, &tmdbID, &mediaType); err != nil {
+		t.Fatal(err)
+	}
+	if ownerID != "admin" || tmdbID != "800" || mediaType != "movie" {
+		t.Fatalf("canonical subscription owner/tmdb/type=(%s,%s,%s), want admin/800/movie", ownerID, tmdbID, mediaType)
+	}
+	if got := countMediaHTTPRequestsForUser(t, st, "u1"); got != 1 {
+		t.Fatalf("request count=%d, want 1", got)
+	}
+
+	var storedNote string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COALESCE(admin_note, '') FROM discovery_subscription_requests WHERE id = ?`, req.ID).Scan(&storedNote); err != nil {
+		t.Fatal(err)
+	}
+	if storedNote != "raw approve admin secret" {
+		t.Fatalf("stored admin note=%q, want trimmed note", storedNote)
+	}
+
+	tooLongNote, err := json.Marshal(strings.Repeat("x", 2001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = doReqAs(t, http.MethodPost, "/api/discovery/requests/"+itoa(req.ID)+"/approve", `{"note":`+string(tooLongNote)+`}`, auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("long approve note status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDiscoveryAdminRejectRecordsSafeNote(t *testing.T) {
+	st, deps, fake, target := newMediaHTTPCreateFixture(t, "u1", "approval_required")
+	fake.movies["801"] = tmdb.Media{
+		TMDBID:    "801",
+		MediaType: "movie",
+		Title:     "Admin Rejected",
+		RawJSON:   `{"secret":"metadata"}`,
+	}
+	req := createMediaRequestThroughService(t, deps, "u1", target.ID, "801", "movie")
+	body := `{"note":" raw reject admin secret "}`
+
+	rec := doReqAs(t, http.MethodPost, "/api/discovery/requests/"+itoa(req.ID)+"/reject", body, auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var got media.RequestDTO
+	decodeBody(t, rec, &got)
+	if got.ID != req.ID || got.Status != "rejected" || got.SubscriptionID != 0 || got.ReviewedAt != 1000 {
+		t.Fatalf("rejected DTO=%+v, want rejected request without canonical subscription", got)
+	}
+	assertBodyOmits(t, rec.Body.String(), "raw reject admin secret", "admin_note", "user_note", "metadata", "secret")
+
+	var storedNote string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COALESCE(admin_note, '') FROM discovery_subscription_requests WHERE id = ?`, req.ID).Scan(&storedNote); err != nil {
+		t.Fatal(err)
+	}
+	if storedNote != "raw reject admin secret" {
+		t.Fatalf("stored admin note=%q, want trimmed note", storedNote)
+	}
+
+	var eventNote string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COALESCE(note, '')
+FROM discovery_subscription_request_events
+WHERE request_id = ? AND action = 'rejected'`, req.ID).Scan(&eventNote); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(eventNote, "raw reject admin secret") {
+		t.Fatalf("event note leaked raw admin note: %q", eventNote)
+	}
+
+	tooLongNote, err := json.Marshal(strings.Repeat("x", 2001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = doReqAs(t, http.MethodPost, "/api/discovery/requests/"+itoa(req.ID)+"/reject", `{"note":`+string(tooLongNote)+`}`, auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("long reject note status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
 }
 
