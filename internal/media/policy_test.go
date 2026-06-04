@@ -76,6 +76,17 @@ func TestResolvePolicyRejectsDisabledRequestMode(t *testing.T) {
 	}
 }
 
+func TestResolvePolicyRejectsUnknownRequestMode(t *testing.T) {
+	st := openMediaTestStore(t)
+	insertUncheckedMediaPolicy(t, st, "future mode", "future_mode")
+	svc := Service{Store: st}
+
+	_, err := svc.ResolvePolicy(context.Background(), "u1")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ResolvePolicy error = %v, want %v", err, ErrPolicyDenied)
+	}
+}
+
 func TestResolvePolicyRejectsSearchWhenCanSearchFalse(t *testing.T) {
 	st := openMediaTestStore(t)
 	seedMediaUser(t, st, "u1")
@@ -132,6 +143,20 @@ func TestResolveTargetRejectsDisabledOrWrongMediaType(t *testing.T) {
 				t.Fatalf("ResolveTarget error = %v, want %v", err, ErrPolicyDenied)
 			}
 		})
+	}
+}
+
+func TestResolveTargetRejectsInvalidRequestedMediaType(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	policy := createMediaPolicy(t, st, "default allow", "", 1, 100, "auto_approve", 1)
+	deps := seedMediaTargetDeps(t, st)
+	target := createMediaTarget(t, st, deps, policy.ID, "all media", "", 1)
+	svc := Service{Store: st}
+
+	_, err := svc.ResolveTarget(context.Background(), policy, target.ID, "music")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ResolveTarget error = %v, want %v", err, ErrPolicyDenied)
 	}
 }
 

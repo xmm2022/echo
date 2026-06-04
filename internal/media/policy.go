@@ -46,6 +46,9 @@ func (s *Service) ResolveTarget(ctx context.Context, policy queries.DiscoveryAcc
 	if s == nil || s.Store == nil || s.Store.Queries == nil {
 		return queries.LoadDiscoveryPolicyTargetBundleRow{}, ErrPolicyDenied
 	}
+	if !isAllowedMediaType(mediaType) {
+		return queries.LoadDiscoveryPolicyTargetBundleRow{}, ErrPolicyDenied
+	}
 	if err := validateResolvedPolicy(policy); err != nil {
 		return queries.LoadDiscoveryPolicyTargetBundleRow{}, err
 	}
@@ -110,13 +113,19 @@ func validateResolvedPolicy(policy queries.DiscoveryAccessPolicy) error {
 	if policy.Enabled != 1 {
 		return ErrPolicyDenied
 	}
-	if policy.RequestMode == "disabled" {
+	switch policy.RequestMode {
+	case "approval_required", "auto_approve":
+	default:
 		return ErrPolicyDenied
 	}
 	if policy.CanSearch != 1 {
 		return ErrPolicyDenied
 	}
 	return nil
+}
+
+func isAllowedMediaType(mediaType string) bool {
+	return mediaType == "movie" || mediaType == "tv"
 }
 
 func sqlNullString(value string) sql.NullString {

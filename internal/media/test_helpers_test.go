@@ -69,6 +69,30 @@ func createMediaPolicy(t *testing.T, st *store.Store, name, userID string, enabl
 	return policy
 }
 
+func insertUncheckedMediaPolicy(t *testing.T, st *store.Store, name, requestMode string) {
+	t.Helper()
+	ctx := context.Background()
+
+	conn, err := st.DB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open db conn: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `PRAGMA ignore_check_constraints = ON`); err != nil {
+		t.Fatalf("ignore check constraints: %v", err)
+	}
+	defer conn.ExecContext(ctx, `PRAGMA ignore_check_constraints = OFF`)
+
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO discovery_access_policies (
+  name, enabled, priority, subject_user_id, request_mode, can_search,
+  created_by, created_at, updated_at
+) VALUES (?, 1, 100, NULL, ?, 1, 'admin', ?, ?)`, name, requestMode, mediaTestNow, mediaTestNow); err != nil {
+		t.Fatalf("insert unchecked policy %s: %v", name, err)
+	}
+}
+
 func seedMediaTargetDeps(t *testing.T, st *store.Store) mediaTargetDeps {
 	t.Helper()
 	ctx := context.Background()
