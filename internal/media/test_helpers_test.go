@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
@@ -16,6 +18,11 @@ type mediaTargetDeps struct {
 	LibraryID         int64
 	ProducerProfileID int64
 	RuleProfileID     int64
+}
+
+type seededMediaUserSubscription struct {
+	UserSubscription      queries.UserMediaSubscription
+	DiscoverySubscription queries.DiscoverySubscription
 }
 
 func openMediaTestStore(t *testing.T) *store.Store {
@@ -51,17 +58,37 @@ func seedMediaUser(t *testing.T, st *store.Store, id string) {
 
 func createMediaPolicy(t *testing.T, st *store.Store, name, userID string, enabled, priority int64, requestMode string, canSearch int64) queries.DiscoveryAccessPolicy {
 	t.Helper()
+	return createMediaPolicyWithLimits(t, st, name, userID, enabled, priority, requestMode, canSearch, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+}
+
+func createMediaPolicyWithLimits(
+	t *testing.T,
+	st *store.Store,
+	name,
+	userID string,
+	enabled,
+	priority int64,
+	requestMode string,
+	canSearch int64,
+	maxPendingRequests,
+	maxActiveSubscriptions,
+	requestCooldownSeconds sql.NullInt64,
+) queries.DiscoveryAccessPolicy {
+	t.Helper()
 
 	policy, err := st.CreateDiscoveryAccessPolicy(context.Background(), queries.CreateDiscoveryAccessPolicyParams{
-		Name:          name,
-		Enabled:       enabled,
-		Priority:      priority,
-		SubjectUserID: nullString(userID),
-		RequestMode:   requestMode,
-		CanSearch:     canSearch,
-		CreatedBy:     sql.NullString{String: "admin", Valid: true},
-		CreatedAt:     mediaTestNow,
-		UpdatedAt:     mediaTestNow,
+		Name:                   name,
+		Enabled:                enabled,
+		Priority:               priority,
+		SubjectUserID:          nullString(userID),
+		RequestMode:            requestMode,
+		CanSearch:              canSearch,
+		MaxPendingRequests:     maxPendingRequests,
+		MaxActiveSubscriptions: maxActiveSubscriptions,
+		RequestCooldownSeconds: requestCooldownSeconds,
+		CreatedBy:              sql.NullString{String: "admin", Valid: true},
+		CreatedAt:              mediaTestNow,
+		UpdatedAt:              mediaTestNow,
 	})
 	if err != nil {
 		t.Fatalf("create policy %s: %v", name, err)
@@ -178,6 +205,84 @@ func createMediaTarget(t *testing.T, st *store.Store, deps mediaTargetDeps, poli
 		t.Fatalf("create target %s: %v", label, err)
 	}
 	return target
+}
+
+func seedMediaUserSubscription(
+	t *testing.T,
+	st *store.Store,
+	userID string,
+	requestID int64,
+	deps mediaTargetDeps,
+	title,
+	tmdbID,
+	mediaType,
+	status string,
+) seededMediaUserSubscription {
+	t.Helper()
+	ctx := context.Background()
+
+	subscription, err := st.CreateDiscoverySubscription(ctx, queries.CreateDiscoverySubscriptionParams{
+		OwnerID:           "admin",
+		TmdbID:            tmdbID,
+		MediaType:         mediaType,
+		TmdbLanguage:      "zh-CN",
+		TitleSnapshot:     title,
+		LibraryID:         deps.LibraryID,
+		ProducerProfileID: deps.ProducerProfileID,
+		RuleProfileID:     deps.RuleProfileID,
+		Status:            "active",
+		SeasonFilterJson:  sql.NullString{},
+		NextCheckAt:       sql.NullInt64{},
+		CreatedAt:         mediaTestNow,
+		UpdatedAt:         mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("create discovery subscription: %v", err)
+	}
+
+	requestRef := sql.NullInt64{}
+	if requestID != 0 {
+		requestRef = sql.NullInt64{Int64: requestID, Valid: true}
+	}
+	userSubscription, err := st.UpsertUserMediaSubscription(ctx, queries.UpsertUserMediaSubscriptionParams{
+		EchoUserID:              userID,
+		RequestID:               requestRef,
+		DiscoverySubscriptionID: subscription.ID,
+		TmdbID:                  tmdbID,
+		MediaType:               mediaType,
+		SeasonFilterJson:        sql.NullString{},
+		SeasonFilterKey:         "all",
+		Status:                  status,
+		CreatedAt:               mediaTestNow,
+		UpdatedAt:               mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("upsert user media subscription: %v", err)
+	}
+	return seededMediaUserSubscription{
+		UserSubscription:      userSubscription,
+		DiscoverySubscription: subscription,
+	}
+}
+
+func mediaActor(userID string) Actor {
+	return Actor{
+		User: auth.UserContext{
+			UserID: userID,
+			Role:   "user",
+			Scopes: []string{"discovery"},
+			Now:    time.Unix(mediaTestNow, 0),
+		},
+		IP: "127.0.0.1",
+	}
+}
+
+func mediaNow() time.Time {
+	return time.Unix(mediaTestNow, 0)
+}
+
+func nullInt64(value int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: value, Valid: true}
 }
 
 func nullString(value string) sql.NullString {
