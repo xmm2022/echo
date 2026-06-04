@@ -48,6 +48,7 @@ LIMIT sqlc.arg(limit) OFFSET sqlc.arg(offset);
 
 -- name: ListDiscoverySubscriptionRequestsForAdmin :many
 SELECT * FROM discovery_subscription_requests
+WHERE (status = sqlc.arg(status) OR sqlc.arg(status) = '')
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg(limit) OFFSET sqlc.arg(offset);
 

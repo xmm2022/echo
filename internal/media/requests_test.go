@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/xmm2022/echo/internal/auth"
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -288,7 +289,7 @@ func TestCreateRequestAllowsCanSearchFalse(t *testing.T) {
 	}
 }
 
-func TestCreateRequestAutoApproveReturnsInvalidTransitionWithoutSideEffects(t *testing.T) {
+func TestCreateRequestAutoApproveCreatesPendingThenApprovesInOneTransaction(t *testing.T) {
 	ctx := context.Background()
 	fixture := newRequestFixture(t, "u1", "auto_approve", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
 	fixture.tmdb.details["movie:605"] = tmdb.Media{
@@ -298,28 +299,46 @@ func TestCreateRequestAutoApproveReturnsInvalidTransitionWithoutSideEffects(t *t
 		RawJSON:   `{}`,
 	}
 
-	_, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+	got, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
 		TMDBID:    "605",
 		MediaType: "movie",
 		TargetID:  fixture.target.ID,
 	})
-	if !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("CreateRequest error = %v, want %v", err, ErrInvalidTransition)
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
 	}
-	if got := countRequestsForUser(t, fixture.st, "u1"); got != 0 {
-		t.Fatalf("request rows = %d, want 0", got)
+	if got.Status != "approved" || got.SubscriptionID == 0 || got.ReviewedAt != mediaTestNow || got.Title != "Auto" {
+		t.Fatalf("CreateRequest = %+v, want approved DTO with subscription", got)
 	}
-	if got := countDiscoverySubscriptions(t, fixture.st); got != 0 {
-		t.Fatalf("canonical subscriptions = %d, want 0", got)
+	if countRequestsForUser(t, fixture.st, "u1") != 1 {
+		t.Fatalf("request rows = %d, want 1", countRequestsForUser(t, fixture.st, "u1"))
 	}
-	if got := countUserMediaSubscriptions(t, fixture.st); got != 0 {
-		t.Fatalf("user subscriptions = %d, want 0", got)
+	if countDiscoverySubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("canonical subscriptions = %d, want 1", countDiscoverySubscriptions(t, fixture.st))
+	}
+	if countUserMediaSubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("user subscriptions = %d, want 1", countUserMediaSubscriptions(t, fixture.st))
+	}
+	row := getRequestByID(t, fixture.st, got.ID)
+	if row.Status != "approved" || !row.SubscriptionID.Valid || row.SubscriptionID.Int64 != got.SubscriptionID {
+		t.Fatalf("stored request = %+v, want approved linked request", row)
+	}
+	events, err := fixture.st.ListDiscoverySubscriptionRequestEvents(ctx, queries.ListDiscoverySubscriptionRequestEventsParams{
+		RequestID: got.ID,
+		Limit:     10,
+		Offset:    0,
+	})
+	if err != nil {
+		t.Fatalf("list request events: %v", err)
+	}
+	if len(events) != 2 || events[0].Action != "approved" || events[1].Action != "created" {
+		t.Fatalf("events = %+v, want approved then created", events)
 	}
 	if got := countJobs(t, fixture.st); got != 0 {
 		t.Fatalf("producer jobs = %d, want 0", got)
 	}
-	if calls := fixture.tmdb.detailCalls(); calls != 0 {
-		t.Fatalf("tmdb detail calls = %d, want 0 for auto_approve guard", calls)
+	if calls := fixture.tmdb.detailCalls(); calls != 1 {
+		t.Fatalf("tmdb detail calls = %d, want one details fetch", calls)
 	}
 }
 
@@ -749,6 +768,553 @@ func TestCancelPendingRequestOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestApproveRequestCreatesCanonicalSubscriptionAndUserLink(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:700"] = tmdb.Media{
+		TMDBID:      "700",
+		MediaType:   "movie",
+		Title:       "Approved Movie",
+		ReleaseYear: 2026,
+		RawJSON:     `{}`,
+	}
+	req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "700",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+
+	got, err := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, " approved by admin ")
+	if err != nil {
+		t.Fatalf("ApproveRequest returned error: %v", err)
+	}
+	if got.ID != req.ID || got.Status != "approved" || got.SubscriptionID == 0 || got.ReviewedAt != mediaTestNow {
+		t.Fatalf("approved DTO = %+v, want approved request with subscription", got)
+	}
+
+	row := getRequestByID(t, fixture.st, req.ID)
+	if row.Status != "approved" || !row.SubscriptionID.Valid || row.SubscriptionID.Int64 != got.SubscriptionID {
+		t.Fatalf("stored request = %+v, want approved linked request", row)
+	}
+	if !row.AdminNote.Valid || row.AdminNote.String != "approved by admin" {
+		t.Fatalf("admin note = %+v, want trimmed note", row.AdminNote)
+	}
+	if !row.ReviewedBy.Valid || row.ReviewedBy.String != "admin" {
+		t.Fatalf("reviewed_by = %+v, want admin", row.ReviewedBy)
+	}
+
+	sub := getDiscoverySubscriptionByID(t, fixture.st, got.SubscriptionID)
+	if sub.OwnerID != "admin" || sub.TmdbID != "700" || sub.MediaType != "movie" || sub.LibraryID != fixture.deps.LibraryID {
+		t.Fatalf("canonical subscription = %+v, want target-owned canonical row", sub)
+	}
+	if sub.ProducerProfileID != fixture.deps.ProducerProfileID || sub.RuleProfileID != fixture.deps.RuleProfileID {
+		t.Fatalf("canonical profiles = (%d,%d), want fixture deps %+v", sub.ProducerProfileID, sub.RuleProfileID, fixture.deps)
+	}
+	if sub.SeasonFilterJson.Valid {
+		t.Fatalf("canonical season filter = %+v, want series/movie-level NULL", sub.SeasonFilterJson)
+	}
+
+	userSub := getOnlyUserMediaSubscription(t, fixture.st, "u1")
+	if userSub.RequestID.Int64 != req.ID || userSub.DiscoverySubscriptionID != got.SubscriptionID || userSub.Status != "active" {
+		t.Fatalf("user subscription = %+v, want active request link", userSub)
+	}
+	if userSub.SeasonFilterJson.Valid || userSub.SeasonFilterKey != "" {
+		t.Fatalf("user season filter/key = %+v/%q, want all seasons empty key", userSub.SeasonFilterJson, userSub.SeasonFilterKey)
+	}
+	if countJobs(t, fixture.st) != 0 {
+		t.Fatalf("producer jobs = %d, want 0", countJobs(t, fixture.st))
+	}
+	if actions := requestEventActions(t, fixture.st, req.ID); strings.Join(actions, ",") != "approved,created" {
+		t.Fatalf("event actions = %v, want approved,created", actions)
+	}
+}
+
+func TestApproveRequestReusesCanonicalSubscriptionAcrossUsers(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	seedMediaUser(t, fixture.st, "u2")
+	policy2 := createMediaPolicy(t, fixture.st, "policy-u2-approval", "u2", 1, 100, "approval_required", 1)
+	target2 := createMediaTarget(t, fixture.st, fixture.deps, policy2.ID, "Default Target u2", "tv", 1)
+	fixture.tmdb.details["tv:701"] = tmdb.Media{
+		TMDBID:    "701",
+		MediaType: "tv",
+		Title:     "Shared Show",
+		RawJSON:   `{}`,
+	}
+	req1, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:           "701",
+		MediaType:        "tv",
+		SeasonFilterJSON: `[2,1,2]`,
+		TargetID:         fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u1 returned error: %v", err)
+	}
+	req2, err := fixture.svc.CreateRequest(ctx, mediaActor("u2"), CreateRequestInput{
+		TMDBID:           "701",
+		MediaType:        "tv",
+		SeasonFilterJSON: `[3]`,
+		TargetID:         target2.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u2 returned error: %v", err)
+	}
+
+	approved1, err := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req1.ID, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest u1 returned error: %v", err)
+	}
+	approved2, err := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req2.ID, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest u2 returned error: %v", err)
+	}
+	if approved1.SubscriptionID == 0 || approved1.SubscriptionID != approved2.SubscriptionID {
+		t.Fatalf("subscription ids = %d/%d, want same canonical subscription", approved1.SubscriptionID, approved2.SubscriptionID)
+	}
+	if countDiscoverySubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("canonical subscriptions = %d, want 1", countDiscoverySubscriptions(t, fixture.st))
+	}
+	if countUserMediaSubscriptions(t, fixture.st) != 2 {
+		t.Fatalf("user subscriptions = %d, want 2", countUserMediaSubscriptions(t, fixture.st))
+	}
+	canonical := getDiscoverySubscriptionByID(t, fixture.st, approved1.SubscriptionID)
+	if canonical.SeasonFilterJson.Valid {
+		t.Fatalf("canonical season filter = %+v, want series-level canonical row", canonical.SeasonFilterJson)
+	}
+	user1 := getOnlyUserMediaSubscription(t, fixture.st, "u1")
+	if !user1.SeasonFilterJson.Valid || user1.SeasonFilterJson.String != `[1,2]` || user1.SeasonFilterKey != testSeasonFilterKey(`[1,2]`) {
+		t.Fatalf("u1 season filter/key = %+v/%q, want normalized [1,2]", user1.SeasonFilterJson, user1.SeasonFilterKey)
+	}
+	user2 := getOnlyUserMediaSubscription(t, fixture.st, "u2")
+	if !user2.SeasonFilterJson.Valid || user2.SeasonFilterJson.String != `[3]` || user2.SeasonFilterKey != testSeasonFilterKey(`[3]`) {
+		t.Fatalf("u2 season filter/key = %+v/%q, want normalized [3]", user2.SeasonFilterJson, user2.SeasonFilterKey)
+	}
+}
+
+func TestApproveRequestConcurrentCallsReturnSingleCanonicalSubscription(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:702"] = tmdb.Media{
+		TMDBID:    "702",
+		MediaType: "movie",
+		Title:     "Concurrent Approval",
+		RawJSON:   `{}`,
+	}
+	req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "702",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+
+	const callers = 12
+	var wg sync.WaitGroup
+	results := make(chan RequestDTO, callers)
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, approveErr := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, "")
+			if approveErr != nil {
+				errs <- approveErr
+				return
+			}
+			results <- got
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent ApproveRequest returned error: %v", err)
+	}
+	var subscriptionID int64
+	seen := 0
+	for got := range results {
+		seen++
+		if got.Status != "approved" {
+			t.Fatalf("concurrent approval DTO = %+v, want approved", got)
+		}
+		if subscriptionID == 0 {
+			subscriptionID = got.SubscriptionID
+		}
+		if got.SubscriptionID == 0 || got.SubscriptionID != subscriptionID {
+			t.Fatalf("subscription id = %d, want stable %d", got.SubscriptionID, subscriptionID)
+		}
+	}
+	if seen != callers {
+		t.Fatalf("results = %d, want %d", seen, callers)
+	}
+	if countDiscoverySubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("canonical subscriptions = %d, want 1", countDiscoverySubscriptions(t, fixture.st))
+	}
+	if countUserMediaSubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("user subscriptions = %d, want 1", countUserMediaSubscriptions(t, fixture.st))
+	}
+	if approvedEvents := countRequestEventsByAction(t, fixture.st, req.ID, "approved"); approvedEvents != 1 {
+		t.Fatalf("approved events = %d, want 1", approvedEvents)
+	}
+}
+
+func TestApproveTwoRequestsConcurrentlyReuseOneCanonicalSubscription(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	seedMediaUser(t, fixture.st, "u2")
+	policy2 := createMediaPolicy(t, fixture.st, "policy-u2-concurrent", "u2", 1, 100, "approval_required", 1)
+	target2 := createMediaTarget(t, fixture.st, fixture.deps, policy2.ID, "Concurrent Target u2", "movie", 1)
+	fixture.tmdb.details["movie:703"] = tmdb.Media{
+		TMDBID:    "703",
+		MediaType: "movie",
+		Title:     "Shared Concurrent Movie",
+		RawJSON:   `{}`,
+	}
+	req1, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "703",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u1 returned error: %v", err)
+	}
+	req2, err := fixture.svc.CreateRequest(ctx, mediaActor("u2"), CreateRequestInput{
+		TMDBID:    "703",
+		MediaType: "movie",
+		TargetID:  target2.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u2 returned error: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan RequestDTO, 2)
+	errs := make(chan error, 2)
+	for _, requestID := range []int64{req1.ID, req2.ID} {
+		requestID := requestID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, approveErr := fixture.svc.ApproveRequest(ctx, adminMediaActor(), requestID, "")
+			if approveErr != nil {
+				errs <- approveErr
+				return
+			}
+			results <- got
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent ApproveRequest returned error: %v", err)
+	}
+	var subscriptionID int64
+	seen := 0
+	for got := range results {
+		seen++
+		if got.Status != "approved" {
+			t.Fatalf("approved DTO = %+v, want approved", got)
+		}
+		if subscriptionID == 0 {
+			subscriptionID = got.SubscriptionID
+		}
+		if got.SubscriptionID == 0 || got.SubscriptionID != subscriptionID {
+			t.Fatalf("subscription id = %d, want reused canonical %d", got.SubscriptionID, subscriptionID)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("results = %d, want 2", seen)
+	}
+	if countDiscoverySubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("canonical subscriptions = %d, want 1", countDiscoverySubscriptions(t, fixture.st))
+	}
+	if countUserMediaSubscriptions(t, fixture.st) != 2 {
+		t.Fatalf("user subscriptions = %d, want 2", countUserMediaSubscriptions(t, fixture.st))
+	}
+}
+
+func TestApproveRejectRequireAdminScope(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:704"] = tmdb.Media{
+		TMDBID:    "704",
+		MediaType: "movie",
+		Title:     "Admin Scope",
+		RawJSON:   `{}`,
+	}
+	req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "704",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+		UserNote:  "raw user secret",
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+
+	if _, err := fixture.svc.ApproveRequest(ctx, mediaActor("u1"), req.ID, "raw admin secret"); !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ApproveRequest non-admin error = %v, want %v", err, ErrPolicyDenied)
+	}
+	if _, err := fixture.svc.RejectRequest(ctx, mediaActor("u1"), req.ID, "raw admin secret"); !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("RejectRequest non-admin error = %v, want %v", err, ErrPolicyDenied)
+	}
+	nonAdminCtx := mediaContextWithActor(ctx, mediaActor("u1"))
+	adminCtx := mediaContextWithActor(ctx, adminMediaActor())
+	if _, err := fixture.svc.ListRequestsForAdmin(nonAdminCtx, "", 10, 0); !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ListRequestsForAdmin non-admin error = %v, want %v", err, ErrPolicyDenied)
+	}
+	if _, err := fixture.svc.GetRequestForAdmin(nonAdminCtx, req.ID); !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("GetRequestForAdmin non-admin error = %v, want %v", err, ErrPolicyDenied)
+	}
+
+	listed, err := fixture.svc.ListRequestsForAdmin(adminCtx, "pending_review", 10, 0)
+	if err != nil {
+		t.Fatalf("ListRequestsForAdmin returned error: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != req.ID || listed[0].Status != "pending_review" {
+		t.Fatalf("admin list = %+v, want pending request", listed)
+	}
+	got, err := fixture.svc.GetRequestForAdmin(adminCtx, req.ID)
+	if err != nil {
+		t.Fatalf("GetRequestForAdmin returned error: %v", err)
+	}
+	data, err := json.Marshal([]RequestDTO{got})
+	if err != nil {
+		t.Fatalf("marshal admin request DTO: %v", err)
+	}
+	jsonText := string(data)
+	for _, forbidden := range []string{"raw user secret", "raw admin secret", "policy_id", "producer_profile_id", "rule_profile_id", "target_library_id"} {
+		if strings.Contains(jsonText, forbidden) {
+			t.Fatalf("admin request DTO JSON leaked %q: %s", forbidden, jsonText)
+		}
+	}
+	if countDiscoverySubscriptions(t, fixture.st) != 0 || countUserMediaSubscriptions(t, fixture.st) != 0 {
+		t.Fatalf("non-admin transitions touched discovery core")
+	}
+}
+
+func TestRejectRequestLeavesDiscoveryCoreUntouched(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:705"] = tmdb.Media{
+		TMDBID:    "705",
+		MediaType: "movie",
+		Title:     "Rejected Movie",
+		RawJSON:   `{}`,
+	}
+	seedMediaUserSubscription(t, fixture.st, "u1", 0, fixture.deps, "Existing Active", "existing-705", "movie", "active")
+	req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "705",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+	beforeCanonical := countDiscoverySubscriptions(t, fixture.st)
+	beforeUserSubs := countUserMediaSubscriptions(t, fixture.st)
+	beforeJobs := countJobs(t, fixture.st)
+
+	got, err := fixture.svc.RejectRequest(ctx, adminMediaActor(), req.ID, " no ")
+	if err != nil {
+		t.Fatalf("RejectRequest returned error: %v", err)
+	}
+	if got.Status != "rejected" || got.SubscriptionID != 0 || got.ReviewedAt != mediaTestNow {
+		t.Fatalf("rejected DTO = %+v, want rejected without subscription", got)
+	}
+	row := getRequestByID(t, fixture.st, req.ID)
+	if row.Status != "rejected" || row.SubscriptionID.Valid {
+		t.Fatalf("stored rejected request = %+v, want no subscription link", row)
+	}
+	if !row.AdminNote.Valid || row.AdminNote.String != "no" {
+		t.Fatalf("admin note = %+v, want trimmed note", row.AdminNote)
+	}
+	if countDiscoverySubscriptions(t, fixture.st) != beforeCanonical {
+		t.Fatalf("canonical subscriptions changed from %d to %d", beforeCanonical, countDiscoverySubscriptions(t, fixture.st))
+	}
+	if countUserMediaSubscriptions(t, fixture.st) != beforeUserSubs {
+		t.Fatalf("user subscriptions changed from %d to %d", beforeUserSubs, countUserMediaSubscriptions(t, fixture.st))
+	}
+	if countJobs(t, fixture.st) != beforeJobs {
+		t.Fatalf("jobs changed from %d to %d", beforeJobs, countJobs(t, fixture.st))
+	}
+	if actions := requestEventActions(t, fixture.st, req.ID); strings.Join(actions, ",") != "rejected,created" {
+		t.Fatalf("event actions = %v, want rejected,created", actions)
+	}
+}
+
+func TestApproveRequestGrantsPlaybackWhenTargetAllowsGrant(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:706"] = tmdb.Media{
+		TMDBID:    "706",
+		MediaType: "movie",
+		Title:     "Grant Playback",
+		RawJSON:   `{}`,
+	}
+	req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "706",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+	if canPlaybackLibrary(t, fixture.st, "u1", fixture.deps.LibraryID) {
+		t.Fatalf("u1 can playback before approval, want missing access")
+	}
+
+	if _, err := fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, ""); err != nil {
+		t.Fatalf("ApproveRequest returned error: %v", err)
+	}
+	if !canPlaybackLibrary(t, fixture.st, "u1", fixture.deps.LibraryID) {
+		t.Fatalf("u1 can playback after approval = false, want granted access")
+	}
+	if grants := countLibraryPlaybackGrants(t, fixture.st, "u1", fixture.deps.LibraryID); grants != 1 {
+		t.Fatalf("playback grants = %d, want 1", grants)
+	}
+}
+
+func TestApproveRequestFailsWhenProfileOrRuleDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, st *store.Store, deps mediaTargetDeps, target queries.DiscoveryPolicyTarget)
+	}{
+		{
+			name: "target disabled",
+			mutate: func(t *testing.T, st *store.Store, _ mediaTargetDeps, target queries.DiscoveryPolicyTarget) {
+				t.Helper()
+				if _, err := st.DB.ExecContext(context.Background(), `UPDATE discovery_policy_targets SET enabled = 0 WHERE id = ?`, target.ID); err != nil {
+					t.Fatalf("disable target: %v", err)
+				}
+			},
+		},
+		{
+			name: "producer disabled",
+			mutate: func(t *testing.T, st *store.Store, deps mediaTargetDeps, _ queries.DiscoveryPolicyTarget) {
+				t.Helper()
+				if _, err := st.DB.ExecContext(context.Background(), `UPDATE discovery_producer_profiles SET enabled = 0 WHERE id = ?`, deps.ProducerProfileID); err != nil {
+					t.Fatalf("disable producer profile: %v", err)
+				}
+			},
+		},
+		{
+			name: "rule disabled",
+			mutate: func(t *testing.T, st *store.Store, deps mediaTargetDeps, _ queries.DiscoveryPolicyTarget) {
+				t.Helper()
+				if _, err := st.DB.ExecContext(context.Background(), `UPDATE rule_profiles SET enabled = 0 WHERE id = ?`, deps.RuleProfileID); err != nil {
+					t.Fatalf("disable rule profile: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+			fixture.tmdb.details["movie:707"] = tmdb.Media{
+				TMDBID:    "707",
+				MediaType: "movie",
+				Title:     "Disabled Dependency",
+				RawJSON:   `{}`,
+			}
+			req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+				TMDBID:    "707",
+				MediaType: "movie",
+				TargetID:  fixture.target.ID,
+			})
+			if err != nil {
+				t.Fatalf("CreateRequest returned error: %v", err)
+			}
+			tc.mutate(t, fixture.st, fixture.deps, fixture.target)
+
+			_, err = fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, "")
+			if !errors.Is(err, ErrPolicyDenied) {
+				t.Fatalf("ApproveRequest error = %v, want %v", err, ErrPolicyDenied)
+			}
+			row := getRequestByID(t, fixture.st, req.ID)
+			if row.Status != "pending_review" || row.SubscriptionID.Valid {
+				t.Fatalf("request after failed approval = %+v, want pending without subscription", row)
+			}
+			if countDiscoverySubscriptions(t, fixture.st) != 0 {
+				t.Fatalf("canonical subscriptions = %d, want 0", countDiscoverySubscriptions(t, fixture.st))
+			}
+			if countUserMediaSubscriptions(t, fixture.st) != 0 {
+				t.Fatalf("user subscriptions = %d, want 0", countUserMediaSubscriptions(t, fixture.st))
+			}
+		})
+	}
+}
+
+func TestApproveRequestExistingCanonicalProfileMismatchReturnsConflict(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRequestFixture(t, "u1", "approval_required", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	fixture.tmdb.details["movie:708"] = tmdb.Media{
+		TMDBID:    "708",
+		MediaType: "movie",
+		Title:     "Profile Conflict",
+		RawJSON:   `{}`,
+	}
+	req, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "708",
+		MediaType: "movie",
+		TargetID:  fixture.target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+	otherRule, err := fixture.st.CreateRuleProfile(ctx, queries.CreateRuleProfileParams{
+		Name:      "alternate conflict rules",
+		Version:   1,
+		RulesJson: `{}`,
+		Enabled:   1,
+		CreatedAt: mediaTestNow,
+		UpdatedAt: mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("create alternate rule profile: %v", err)
+	}
+	_, err = fixture.st.CreateDiscoverySubscription(ctx, queries.CreateDiscoverySubscriptionParams{
+		OwnerID:           "admin",
+		TmdbID:            "708",
+		MediaType:         "movie",
+		TmdbLanguage:      "zh-CN",
+		TitleSnapshot:     "Profile Conflict",
+		LibraryID:         fixture.deps.LibraryID,
+		ProducerProfileID: fixture.deps.ProducerProfileID,
+		RuleProfileID:     otherRule.ID,
+		Status:            "active",
+		SeasonFilterJson:  sql.NullString{},
+		NextCheckAt:       sql.NullInt64{},
+		CreatedAt:         mediaTestNow,
+		UpdatedAt:         mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("seed conflicting canonical subscription: %v", err)
+	}
+
+	_, err = fixture.svc.ApproveRequest(ctx, adminMediaActor(), req.ID, "")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("ApproveRequest error = %v, want %v", err, ErrConflict)
+	}
+	row := getRequestByID(t, fixture.st, req.ID)
+	if row.Status != "pending_review" || row.SubscriptionID.Valid {
+		t.Fatalf("request after conflict = %+v, want pending without subscription", row)
+	}
+	if countDiscoverySubscriptions(t, fixture.st) != 1 {
+		t.Fatalf("canonical subscriptions = %d, want unchanged 1", countDiscoverySubscriptions(t, fixture.st))
+	}
+	if countUserMediaSubscriptions(t, fixture.st) != 0 {
+		t.Fatalf("user subscriptions = %d, want 0", countUserMediaSubscriptions(t, fixture.st))
+	}
+}
+
 type mediaRequestFixture struct {
 	st     *store.Store
 	svc    Service
@@ -908,6 +1474,104 @@ LIMIT 1`, userID).Scan(&reason)
 		t.Fatalf("latest audit safe reason: %v", err)
 	}
 	return reason
+}
+
+func adminMediaActor() Actor {
+	actor := mediaActor("admin")
+	actor.User.Role = "admin"
+	actor.User.Scopes = []string{"admin"}
+	return actor
+}
+
+func mediaContextWithActor(ctx context.Context, actor Actor) context.Context {
+	return auth.NewContext(ctx, actor.User)
+}
+
+func getRequestByID(t *testing.T, st *store.Store, id int64) queries.DiscoverySubscriptionRequest {
+	t.Helper()
+	row, err := st.GetDiscoverySubscriptionRequest(context.Background(), queries.GetDiscoverySubscriptionRequestParams{ID: id})
+	if err != nil {
+		t.Fatalf("get request %d: %v", id, err)
+	}
+	return row
+}
+
+func getDiscoverySubscriptionByID(t *testing.T, st *store.Store, id int64) queries.DiscoverySubscription {
+	t.Helper()
+	row, err := st.GetDiscoverySubscription(context.Background(), queries.GetDiscoverySubscriptionParams{ID: id})
+	if err != nil {
+		t.Fatalf("get discovery subscription %d: %v", id, err)
+	}
+	return row
+}
+
+func getOnlyUserMediaSubscription(t *testing.T, st *store.Store, userID string) queries.UserMediaSubscription {
+	t.Helper()
+	rows, err := st.ListUserMediaSubscriptionsForUser(context.Background(), queries.ListUserMediaSubscriptionsForUserParams{
+		EchoUserID: userID,
+		Limit:      10,
+		Offset:     0,
+	})
+	if err != nil {
+		t.Fatalf("list user media subscriptions for %s: %v", userID, err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("user media subscriptions for %s = %+v, want one row", userID, rows)
+	}
+	return rows[0]
+}
+
+func requestEventActions(t *testing.T, st *store.Store, requestID int64) []string {
+	t.Helper()
+	events, err := st.ListDiscoverySubscriptionRequestEvents(context.Background(), queries.ListDiscoverySubscriptionRequestEventsParams{
+		RequestID: requestID,
+		Limit:     10,
+		Offset:    0,
+	})
+	if err != nil {
+		t.Fatalf("list request events: %v", err)
+	}
+	actions := make([]string, 0, len(events))
+	for _, event := range events {
+		actions = append(actions, event.Action)
+	}
+	return actions
+}
+
+func countRequestEventsByAction(t *testing.T, st *store.Store, requestID int64, action string) int64 {
+	t.Helper()
+	var count int64
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM discovery_subscription_request_events
+WHERE request_id = ? AND action = ?`, requestID, action).Scan(&count); err != nil {
+		t.Fatalf("count request events by action: %v", err)
+	}
+	return count
+}
+
+func canPlaybackLibrary(t *testing.T, st *store.Store, userID string, libraryID int64) bool {
+	t.Helper()
+	allowed, err := st.UserCanPlaybackLibrary(context.Background(), queries.UserCanPlaybackLibraryParams{
+		LibraryID:  libraryID,
+		EchoUserID: userID,
+	})
+	if err != nil {
+		t.Fatalf("check library playback: %v", err)
+	}
+	return allowed == 1
+}
+
+func countLibraryPlaybackGrants(t *testing.T, st *store.Store, userID string, libraryID int64) int64 {
+	t.Helper()
+	var count int64
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM library_grants
+WHERE library_id = ? AND echo_user_id = ? AND permission = 'playback' AND enabled = 1`, libraryID, userID).Scan(&count); err != nil {
+		t.Fatalf("count library playback grants: %v", err)
+	}
+	return count
 }
 
 func containsAny(value string, needles []string) bool {

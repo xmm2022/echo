@@ -584,17 +584,19 @@ func (q *Queries) ListDiscoverySubscriptionRequestEvents(ctx context.Context, ar
 
 const listDiscoverySubscriptionRequestsForAdmin = `-- name: ListDiscoverySubscriptionRequestsForAdmin :many
 SELECT id, requester_user_id, status, tmdb_id, media_type, tmdb_language, title_snapshot, original_title_snapshot, release_year_snapshot, poster_path_snapshot, season_filter_json, policy_id_snapshot, policy_target_id_snapshot, target_label_snapshot, target_library_id, target_library_name_snapshot, producer_profile_id_snapshot, producer_profile_name_snapshot, rule_profile_id_snapshot, rule_profile_version_snapshot, user_note, admin_note, reviewed_by, reviewed_at, subscription_id, idempotency_key, last_error_kind, last_error_message, created_at, updated_at FROM discovery_subscription_requests
+WHERE (status = ?1 OR ?1 = '')
 ORDER BY created_at DESC, id DESC
-LIMIT ?2 OFFSET ?1
+LIMIT ?3 OFFSET ?2
 `
 
 type ListDiscoverySubscriptionRequestsForAdminParams struct {
-	Offset int64 `json:"offset"`
-	Limit  int64 `json:"limit"`
+	Status string `json:"status"`
+	Offset int64  `json:"offset"`
+	Limit  int64  `json:"limit"`
 }
 
 func (q *Queries) ListDiscoverySubscriptionRequestsForAdmin(ctx context.Context, arg ListDiscoverySubscriptionRequestsForAdminParams) ([]DiscoverySubscriptionRequest, error) {
-	rows, err := q.db.QueryContext(ctx, listDiscoverySubscriptionRequestsForAdmin, arg.Offset, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listDiscoverySubscriptionRequestsForAdmin, arg.Status, arg.Offset, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
