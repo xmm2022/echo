@@ -667,6 +667,7 @@ func TestCreateRequestRejectsForbiddenLimits(t *testing.T) {
 					t.Fatalf("seed recent request: %v", err)
 				}
 			}
+			detailCallsBeforeDeny := fixture.tmdb.detailCalls()
 
 			_, err := fixture.svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
 				TMDBID:       "101",
@@ -683,6 +684,14 @@ func TestCreateRequestRejectsForbiddenLimits(t *testing.T) {
 			audit := latestAuditSafeReason(t, fixture.st, "u1")
 			if audit != tc.wantSafeAudit {
 				t.Fatalf("latest audit reason = %q, want %q", audit, tc.wantSafeAudit)
+			}
+			if errors.Is(tc.wantErr, ErrLimitReached) {
+				if calls := fixture.tmdb.detailCalls(); calls != detailCallsBeforeDeny {
+					t.Fatalf("tmdb detail calls after denied request = %d, want unchanged %d", calls, detailCallsBeforeDeny)
+				}
+				if tmdbMediaExists(t, fixture.st, "101", "movie", "zh-CN") {
+					t.Fatalf("denied request tmdb media was cached, want no cache write")
+				}
 			}
 		})
 	}
@@ -868,6 +877,22 @@ func countUserMediaSubscriptions(t *testing.T, st *store.Store) int64 {
 		t.Fatalf("count user media subscriptions: %v", err)
 	}
 	return count
+}
+
+func tmdbMediaExists(t *testing.T, st *store.Store, tmdbID, mediaType, language string) bool {
+	t.Helper()
+	_, err := st.GetTMDBMedia(context.Background(), queries.GetTMDBMediaParams{
+		TmdbID:    tmdbID,
+		MediaType: mediaType,
+		Language:  language,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("get tmdb media: %v", err)
+	}
+	return true
 }
 
 func latestAuditSafeReason(t *testing.T, st *store.Store, userID string) string {

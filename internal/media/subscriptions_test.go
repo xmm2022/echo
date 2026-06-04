@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xmm2022/echo/internal/store"
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -104,6 +105,20 @@ func TestPauseResumeUserSubscriptionRejectsInvalidTransitions(t *testing.T) {
 				t.Fatalf("status after invalid transition = %q, want %q", row.Status, tc.startStatus)
 			}
 		})
+	}
+}
+
+func TestPauseSubscriptionMissingOwnerWritesAuditInTransaction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	fixture := newSubscriptionFixture(t)
+
+	_, err := fixture.svc.PauseSubscription(ctx, mediaActor("u1"), fixture.userSubscription.ID+999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("PauseSubscription missing error = %v, want %v", err, ErrNotFound)
+	}
+	if reason := latestAuditSafeReason(t, fixture.st, "u1"); reason != "request-disabled" {
+		t.Fatalf("audit reason = %q, want request-disabled", reason)
 	}
 }
 

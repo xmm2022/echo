@@ -67,7 +67,14 @@ func (s *Service) setSubscriptionStatus(ctx context.Context, actor Actor, id int
 		EchoUserID: userID,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		_ = s.RecordUserAuditEvent(ctx, actor, "subscription_action_deny", "subscription", "", "request-disabled")
+		now := nowUnix(s)
+		if err := createUserAuditEventWithQueries(ctx, q, actor, "subscription_action_deny", "subscription", "", "request-disabled", now); err != nil {
+			return SubscriptionDTO{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return SubscriptionDTO{}, err
+		}
+		committed = true
 		return SubscriptionDTO{}, ErrNotFound
 	}
 	if err != nil {

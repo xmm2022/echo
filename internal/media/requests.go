@@ -163,6 +163,13 @@ func (s *Service) CreateRequest(ctx context.Context, actor Actor, in CreateReque
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return RequestDTO{}, err
 	}
+	preflightExisting, foundExisting, err := s.preflightRequestCreate(ctx, actor, policy, tmdbID, idempotencyKey)
+	if err != nil {
+		return RequestDTO{}, err
+	}
+	if foundExisting {
+		return requestDTO(preflightExisting), nil
+	}
 
 	media, err := s.fetchDetails(ctx, tmdbID, mediaType)
 	if err != nil {
@@ -307,6 +314,41 @@ func createUserAuditEventWithQueries(ctx context.Context, q *queries.Queries, ac
 		CreatedAt:    now,
 	})
 	return err
+}
+
+func (s *Service) preflightRequestCreate(ctx context.Context, actor Actor, policy queries.DiscoveryAccessPolicy, tmdbID, idempotencyKey string) (queries.DiscoverySubscriptionRequest, bool, error) {
+	tx, q, err := s.Store.BeginImmediateTx(ctx)
+	if err != nil {
+		return queries.DiscoverySubscriptionRequest{}, false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	existing, err := q.GetDiscoverySubscriptionRequestByIdempotency(ctx, queries.GetDiscoverySubscriptionRequestByIdempotencyParams{
+		IdempotencyKey: idempotencyKey,
+	})
+	if err == nil {
+		return existing, true, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return queries.DiscoverySubscriptionRequest{}, false, err
+	}
+
+	now := nowUnix(s)
+	if err := enforceRequestLimitsWithQueries(ctx, q, actor, policy, tmdbID, now); err != nil {
+		if errors.Is(err, ErrLimitReached) {
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return queries.DiscoverySubscriptionRequest{}, false, commitErr
+			}
+			committed = true
+		}
+		return queries.DiscoverySubscriptionRequest{}, false, err
+	}
+	return queries.DiscoverySubscriptionRequest{}, false, nil
 }
 
 func enforceRequestLimitsWithQueries(ctx context.Context, q *queries.Queries, actor Actor, policy queries.DiscoveryAccessPolicy, tmdbID string, now int64) error {
