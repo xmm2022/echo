@@ -31,6 +31,7 @@ import (
 	"github.com/xmm2022/echo/internal/ingest"
 	"github.com/xmm2022/echo/internal/job"
 	"github.com/xmm2022/echo/internal/logging"
+	"github.com/xmm2022/echo/internal/media"
 	"github.com/xmm2022/echo/internal/metrics"
 	"github.com/xmm2022/echo/internal/playback"
 	"github.com/xmm2022/echo/internal/restore"
@@ -143,6 +144,7 @@ func runServe(args []string) error {
 		ProducerConfig: ingestCfg.Producer,
 		Logger:         logger,
 	}
+	var tmdbClient discovery.TMDBClient
 	if cfg.Discovery.Enabled {
 		if cfg.Discovery.RawDebug.Enabled {
 			discoveryDeps.RawStore = discovery.NewRawStore(discovery.RawStoreConfig{
@@ -150,7 +152,7 @@ func runServe(args []string) error {
 				MaxBytes: cfg.Discovery.RawDebug.MaxBytes,
 			})
 		}
-		tmdbClient, err := discoveryTMDBClient(cfg, st)
+		tmdbClient, err = discoveryTMDBClient(cfg, st)
 		if err != nil {
 			return err
 		}
@@ -234,24 +236,19 @@ func runServe(args []string) error {
 		return err
 	}
 
+	apiDeps := buildAPIDeps(st, sidecar, runner, cfg, logger, tmdbClient, time.Now)
 	deps := httpserver.Deps{
 		Logger:     logger,
 		AdminToken: cfg.Auth.AdminToken,
 		AuthCheck:  authenticator.Authenticate,
 		Restore:    &handlers.RestoreDeps{Resolver: resolver, Sidecar: sidecar, Cache: cache, Logger: logger, Metrics: m},
 		Stream:     &handlers.StreamDeps{Resolver: resolver, Sidecar: sidecar, Logger: logger, Metrics: m},
-		API: &handlers.APIDeps{
-			Store:   st,
-			Sidecar: sidecar,
-			Jobs:    runner,
-			Config:  apiConfig(cfg),
-			Logger:  logger,
-		},
-		Bootstrap: &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
-		Web:       &web.Deps{Store: st, Logger: logger},
-		Ready:     buildReadyChecker(cfg, st.DB, rawSidecar, version),
-		Registry:  registry,
-		Emby:      embyDeps,
+		API:        &apiDeps,
+		Bootstrap:  &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
+		Web:        &web.Deps{Store: st, Logger: logger},
+		Ready:      buildReadyChecker(cfg, st.DB, rawSidecar, version),
+		Registry:   registry,
+		Emby:       embyDeps,
 	}
 
 	srv := httpserver.New(cfg, deps)
@@ -275,6 +272,30 @@ func runServe(args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func buildAPIDeps(
+	st *store.Store,
+	sidecar handlers.StorageLister,
+	jobs handlers.JobController,
+	cfg *config.Config,
+	logger *slog.Logger,
+	tmdbClient discovery.TMDBClient,
+	now func() time.Time,
+) handlers.APIDeps {
+	deps := handlers.APIDeps{
+		Store:         st,
+		Sidecar:       sidecar,
+		Jobs:          jobs,
+		Config:        apiConfig(cfg),
+		DiscoveryTMDB: tmdbClient,
+		Logger:        logger,
+		Now:           now,
+	}
+	if tmdbClient != nil {
+		deps.Media = &media.Service{Store: st, TMDB: tmdbClient, Now: now}
+	}
+	return deps
 }
 
 // buildEmbyDeps constructs the Emby reverse-proxy Deps. When no enabled Emby server is
