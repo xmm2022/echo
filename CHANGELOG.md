@@ -1,10 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### v0.3 discovery
+
+- Added TMDB-backed subscriptions, Telegram/poster/manual discovery sources,
+  deterministic rule scoring, admin candidate/match review, discovery scheduler
+  jobs, and 115-only dispatch into the existing `ingest_producer` pipeline.
+- Added admin JSON/UI surfaces under `/api/discovery/*` and `/ui/discovery/*`.
+- Added fake full-path integration coverage and an environment-gated real
+  Telegram + 115 discovery release gate.
+- Local verification recorded on 2026-06-04:
+  - `go test ./... -count=1`: `PASS`
+  - `go test ./integration -run 'TestDiscoveryFakeFullPath|TestDiscoveryRealTelegram115Gate' -v`:
+    fake gate `PASS`, real gate `SKIP` without `ECHO_REAL_DISCOVERY_GATE=1`
+  - `make migrate`: `PASS`
+  - `make build`: `PASS`
+
 ## v0.1.0 - pending tag
 
-Release hardening is in progress. The `v0.1.0` tag is blocked: the current real
-sidecar returns `sig invalid` during 115 CAS restore, so the real acceptance test
-does not pass yet.
+Release hardening is in progress. The earlier 115 real-gate `sig invalid`
+blocker was resolved by the Task 14 sidecar hotfix recorded in
+`docs/superpowers/release-gates/2026-06-03-echo-v0.3-task14-sidecar-hotfix.md`;
+the tag is still pending final release metadata and pinned sidecar version
+records.
 
 ### Reproducibility tuple
 

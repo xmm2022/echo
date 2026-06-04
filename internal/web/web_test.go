@@ -119,6 +119,18 @@ func TestIndexContainsV02ManagementPanels(t *testing.T) {
 	}
 }
 
+func TestIndexDescribesCurrentV03Scope(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Deps{}.Index(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "v0.3 discovery") {
+		t.Fatalf("index missing current v0.3 scope in body=%s", body)
+	}
+	if strings.Contains(body, "v0.1") {
+		t.Fatalf("index still describes the dashboard as v0.1-only: %s", body)
+	}
+}
+
 func TestV02FragmentsDoNotRenderSecrets(t *testing.T) {
 	st := newWebStore(t)
 	if _, err := st.UpsertEmbyServer(context.Background(), queries.UpsertEmbyServerParams{

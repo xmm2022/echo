@@ -2,7 +2,7 @@
 
 跨云盘资源池服务。把多家网盘（115、189pc、139 起步）的资源通过 `.echo` 占位文件统一管理：ingest 阶段在指定账号上秒传一份并落库，输出可被 Emby / OpenList / 媒体工具消费的 `.echo` 文件树；访问 `.echo` 时由 Echo 通过 sidecar 拿直链或代理流式回放，不再二次实例化。v0.1 中只有 115 支持"丢一个分享链接进来自动 ingest"（`115share2cas` 自动 exec）；139 走 manual import（用户自行跑 `cas139` 生成 `.cas` tree 后通过 `/api/ingest/manual` 导入）。
 
-> 状态：v0.1.0 已发布（控制面 / DB / HTTP API / 管理后台 / Job runner / 监控与部署已落地）。设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)。
+> 状态：v0.3 discovery 主线已实现并通过本地验证；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)。
 
 ## 定位
 
@@ -83,6 +83,19 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 - `/api/restore/{file_id}` 与 `/api/stream/{file_id}` 仍是 Echo 的管理 / v0.1 兼容 API，**不是** Emby PlaybackInfo 的改写目标，不要把它们填进 Emby。
 - `auth.bootstrap_admin_token` 只用于找回 / 签发 admin token；日常管理请求走 DB 里的 API token，而非这个 bootstrap 凭据。
 - 上游 Emby API key 通过 `emby_proxy.upstream.api_key_ref` 引用，支持 `env:NAME`（如 `env:EMBY_API_KEY`）或 `ref:relative/path`（相对 `secrets_root` 的常规文件，禁止绝对路径 / `..` / 软链逃逸）。
+
+### v0.3 Discovery 自动订阅
+
+启用 `discovery` 后，Echo 增加一层 admin-only 自动订阅管理面：
+
+- TMDB 订阅缓存和搜索：`/api/discovery/tmdb/search`。
+- Source 管理：Telegram MTProto source、poster HTTP source 和 manual source。
+- 规则评分：rule profile 解析标题 / 分辨率 / HDR / 音轨 / 体积 / 扩展名等特征，生成可复现 score snapshot。
+- 候选与 match 决策：`/api/discovery/candidates`、`/api/discovery/matches`，支持 accept / reject / retry。
+- 115-only dispatch：accepted 115 分享会排成现有 `ingest_producer` job，仍由 `115share2cas` + v0.1 ingest 写入 `.echo`。
+- 管理后台首页已挂载 discovery subscriptions、sources、producer profiles、rule profiles、candidates、matches 和 runs 面板。
+
+Discovery 不直接写 `library_entries` / `file_copies`，也不直接 import sidecar Go 包；它只负责发现、评分、决策和把 115 分享交给现有 producer pipeline。真实 Telegram + 115 release gate 的环境变量见 [`docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md`](docs/superpowers/release-gates/2026-06-02-echo-v0.3-discovery.md)。
 
 ## 致谢
 
