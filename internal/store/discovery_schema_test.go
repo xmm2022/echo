@@ -33,6 +33,82 @@ func TestDiscoveryMigrationCreatesCoreTables(t *testing.T) {
 	}
 }
 
+func TestMediaRequestMigrationCreatesV04Tables(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	tables := []string{
+		"discovery_access_policies",
+		"discovery_policy_targets",
+		"discovery_subscription_requests",
+		"user_media_subscriptions",
+		"discovery_subscription_request_events",
+		"discovery_user_audit_events",
+	}
+	for _, table := range tables {
+		var name string
+		err := st.DB.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name)
+		if err != nil {
+			t.Fatalf("missing table %s: %v", table, err)
+		}
+	}
+}
+
+func TestMediaRequestMigrationEnforcesV04Constraints(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	rows, err := st.DB.QueryContext(ctx, "PRAGMA foreign_key_list('discovery_policy_targets')")
+	if err != nil {
+		t.Fatalf("list discovery_policy_targets foreign keys: %v", err)
+	}
+	defer rows.Close()
+
+	fkTables := map[string]bool{}
+	for rows.Next() {
+		var (
+			id       int
+			seq      int
+			table    string
+			from     string
+			to       string
+			onUpdate string
+			onDelete string
+			match    string
+		)
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatalf("scan discovery_policy_targets foreign key: %v", err)
+		}
+		fkTables[table] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate discovery_policy_targets foreign keys: %v", err)
+	}
+	for _, table := range []string{
+		"discovery_access_policies",
+		"libraries",
+		"discovery_producer_profiles",
+		"rule_profiles",
+		"users",
+	} {
+		if !fkTables[table] {
+			t.Fatalf("discovery_policy_targets missing foreign key to %s; got %#v", table, fkTables)
+		}
+	}
+
+	if !hasUniqueIndexOnColumn(t, st.DB, "discovery_subscription_requests", "idempotency_key") {
+		t.Fatal("discovery_subscription_requests missing unique index for idempotency_key")
+	}
+
+	if _, err := st.DB.ExecContext(ctx, `
+INSERT INTO discovery_access_policies (
+  name, enabled, request_mode, created_at, updated_at
+) VALUES (
+  'bad-enabled', 2, 'approval_required', 1, 1
+)`); err == nil {
+		t.Fatal("inserted discovery_access_policies row with invalid enabled boolean")
+	}
+}
+
 func TestDiscoveryDispatchClaimRequiresAccepted115Share(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
@@ -86,6 +162,61 @@ func TestDiscoveryDispatchClaimRequiresAccepted115Share(t *testing.T) {
 			}
 		})
 	}
+}
+
+func hasUniqueIndexOnColumn(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query("PRAGMA index_list('" + table + "')")
+	if err != nil {
+		t.Fatalf("list indexes for %s: %v", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			seq     int
+			name    string
+			unique  int
+			origin  string
+			partial int
+		)
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index for %s: %v", table, err)
+		}
+		if unique == 0 {
+			continue
+		}
+		if indexHasColumn(t, db, name, column) {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate indexes for %s: %v", table, err)
+	}
+	return false
+}
+
+func indexHasColumn(t *testing.T, db *sql.DB, indexName, column string) bool {
+	t.Helper()
+	rows, err := db.Query("SELECT name FROM pragma_index_info(?)", indexName)
+	if err != nil {
+		t.Fatalf("list columns for index %s: %v", indexName, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan column for index %s: %v", indexName, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate columns for index %s: %v", indexName, err)
+	}
+	return false
 }
 
 func TestDiscoveryProducerProfileTargetAccountMustMatch115Provider(t *testing.T) {

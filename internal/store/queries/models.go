@@ -113,6 +113,39 @@ type DiscoveredResource struct {
 	LastSeenAt       int64          `json:"last_seen_at"`
 }
 
+type DiscoveryAccessPolicy struct {
+	ID                     int64          `json:"id"`
+	Name                   string         `json:"name"`
+	Enabled                int64          `json:"enabled"`
+	Priority               int64          `json:"priority"`
+	SubjectUserID          sql.NullString `json:"subject_user_id"`
+	RequestMode            string         `json:"request_mode"`
+	CanSearch              int64          `json:"can_search"`
+	MaxPendingRequests     sql.NullInt64  `json:"max_pending_requests"`
+	MaxActiveSubscriptions sql.NullInt64  `json:"max_active_subscriptions"`
+	RequestCooldownSeconds sql.NullInt64  `json:"request_cooldown_seconds"`
+	CreatedBy              sql.NullString `json:"created_by"`
+	CreatedAt              int64          `json:"created_at"`
+	UpdatedAt              int64          `json:"updated_at"`
+}
+
+type DiscoveryPolicyTarget struct {
+	ID                      int64          `json:"id"`
+	PolicyID                int64          `json:"policy_id"`
+	Label                   string         `json:"label"`
+	LibraryID               int64          `json:"library_id"`
+	ProducerProfileID       int64          `json:"producer_profile_id"`
+	RuleProfileID           int64          `json:"rule_profile_id"`
+	PipelineOwnerID         string         `json:"pipeline_owner_id"`
+	MediaType               sql.NullString `json:"media_type"`
+	MatchMode               string         `json:"match_mode"`
+	GrantPlaybackOnApproval int64          `json:"grant_playback_on_approval"`
+	Enabled                 int64          `json:"enabled"`
+	DefaultTarget           int64          `json:"default_target"`
+	CreatedAt               int64          `json:"created_at"`
+	UpdatedAt               int64          `json:"updated_at"`
+}
+
 type DiscoveryProducerProfile struct {
 	ID                     int64  `json:"id"`
 	Name                   string `json:"name"`
@@ -194,6 +227,62 @@ type DiscoverySubscription struct {
 	LastErrorMessage     sql.NullString `json:"last_error_message"`
 	CreatedAt            int64          `json:"created_at"`
 	UpdatedAt            int64          `json:"updated_at"`
+}
+
+type DiscoverySubscriptionRequest struct {
+	ID                          int64          `json:"id"`
+	RequesterUserID             string         `json:"requester_user_id"`
+	Status                      string         `json:"status"`
+	TmdbID                      string         `json:"tmdb_id"`
+	MediaType                   string         `json:"media_type"`
+	TmdbLanguage                string         `json:"tmdb_language"`
+	TitleSnapshot               string         `json:"title_snapshot"`
+	OriginalTitleSnapshot       sql.NullString `json:"original_title_snapshot"`
+	ReleaseYearSnapshot         sql.NullInt64  `json:"release_year_snapshot"`
+	PosterPathSnapshot          sql.NullString `json:"poster_path_snapshot"`
+	SeasonFilterJson            sql.NullString `json:"season_filter_json"`
+	PolicyIDSnapshot            sql.NullInt64  `json:"policy_id_snapshot"`
+	PolicyTargetIDSnapshot      sql.NullInt64  `json:"policy_target_id_snapshot"`
+	TargetLabelSnapshot         string         `json:"target_label_snapshot"`
+	TargetLibraryID             int64          `json:"target_library_id"`
+	TargetLibraryNameSnapshot   string         `json:"target_library_name_snapshot"`
+	ProducerProfileIDSnapshot   int64          `json:"producer_profile_id_snapshot"`
+	ProducerProfileNameSnapshot string         `json:"producer_profile_name_snapshot"`
+	RuleProfileIDSnapshot       int64          `json:"rule_profile_id_snapshot"`
+	RuleProfileVersionSnapshot  int64          `json:"rule_profile_version_snapshot"`
+	UserNote                    sql.NullString `json:"user_note"`
+	AdminNote                   sql.NullString `json:"admin_note"`
+	ReviewedBy                  sql.NullString `json:"reviewed_by"`
+	ReviewedAt                  sql.NullInt64  `json:"reviewed_at"`
+	SubscriptionID              sql.NullInt64  `json:"subscription_id"`
+	IdempotencyKey              string         `json:"idempotency_key"`
+	LastErrorKind               sql.NullString `json:"last_error_kind"`
+	LastErrorMessage            sql.NullString `json:"last_error_message"`
+	CreatedAt                   int64          `json:"created_at"`
+	UpdatedAt                   int64          `json:"updated_at"`
+}
+
+type DiscoverySubscriptionRequestEvent struct {
+	ID           int64          `json:"id"`
+	RequestID    int64          `json:"request_id"`
+	ActorUserID  sql.NullString `json:"actor_user_id"`
+	Action       string         `json:"action"`
+	FromStatus   sql.NullString `json:"from_status"`
+	ToStatus     sql.NullString `json:"to_status"`
+	Note         sql.NullString `json:"note"`
+	SnapshotJson string         `json:"snapshot_json"`
+	CreatedAt    int64          `json:"created_at"`
+}
+
+type DiscoveryUserAuditEvent struct {
+	ID           int64          `json:"id"`
+	ActorUserID  sql.NullString `json:"actor_user_id"`
+	Action       string         `json:"action"`
+	TargetKind   string         `json:"target_kind"`
+	TargetID     sql.NullString `json:"target_id"`
+	SafeReason   string         `json:"safe_reason"`
+	SnapshotJson string         `json:"snapshot_json"`
+	CreatedAt    int64          `json:"created_at"`
 }
 
 type EmbyItemMapping struct {
@@ -514,4 +603,18 @@ type User struct {
 	CreatedAt     int64          `json:"created_at"`
 	UpdatedAt     int64          `json:"updated_at"`
 	LastLoginAt   sql.NullInt64  `json:"last_login_at"`
+}
+
+type UserMediaSubscription struct {
+	ID                      int64          `json:"id"`
+	EchoUserID              string         `json:"echo_user_id"`
+	RequestID               sql.NullInt64  `json:"request_id"`
+	DiscoverySubscriptionID int64          `json:"discovery_subscription_id"`
+	TmdbID                  string         `json:"tmdb_id"`
+	MediaType               string         `json:"media_type"`
+	SeasonFilterJson        sql.NullString `json:"season_filter_json"`
+	SeasonFilterKey         string         `json:"season_filter_key"`
+	Status                  string         `json:"status"`
+	CreatedAt               int64          `json:"created_at"`
+	UpdatedAt               int64          `json:"updated_at"`
 }
