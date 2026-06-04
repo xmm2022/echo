@@ -9,11 +9,24 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xmm2022/echo/internal/discovery/tmdb"
 	"github.com/xmm2022/echo/internal/store/queries"
 )
+
+var mediaRequestCreateLocks keyedLockSet
+
+type keyedLockSet struct {
+	mu    sync.Mutex
+	locks map[string]*keyedLock
+}
+
+type keyedLock struct {
+	mu   sync.Mutex
+	refs int
+}
 
 const (
 	defaultTMDBLanguage = "zh-CN"
@@ -106,12 +119,20 @@ func (s *Service) Catalog(ctx context.Context, actor Actor) ([]TargetDTO, error)
 }
 
 func (s *Service) CreateRequest(ctx context.Context, actor Actor, in CreateRequestInput) (RequestDTO, error) {
+	result, err := s.CreateRequestDetailed(ctx, actor, in)
+	if err != nil {
+		return RequestDTO{}, err
+	}
+	return result.Request, nil
+}
+
+func (s *Service) CreateRequestDetailed(ctx context.Context, actor Actor, in CreateRequestInput) (CreateRequestResult, error) {
 	if s == nil || s.Store == nil || s.Store.Queries == nil {
-		return RequestDTO{}, ErrPolicyDenied
+		return CreateRequestResult{}, ErrPolicyDenied
 	}
 	userID := actorUserID(actor)
 	if userID == "" {
-		return RequestDTO{}, ErrPolicyDenied
+		return CreateRequestResult{}, ErrPolicyDenied
 	}
 
 	tmdbID := strings.TrimSpace(in.TMDBID)
@@ -122,58 +143,65 @@ func (s *Service) CreateRequest(ctx context.Context, actor Actor, in CreateReque
 	}
 	userNote := strings.TrimSpace(in.UserNote)
 	if tmdbID == "" || len([]byte(tmdbID)) > 64 || !isAllowedMediaType(mediaType) || in.TargetID <= 0 {
-		return RequestDTO{}, ErrInvalidRequest
+		return CreateRequestResult{}, ErrInvalidRequest
 	}
 	if !validTMDBLanguage(language) || len([]byte(userNote)) > 1000 {
-		return RequestDTO{}, ErrInvalidRequest
+		return CreateRequestResult{}, ErrInvalidRequest
 	}
 	seasonFilterJSON, _, err := ValidateSeasonFilterForMedia(mediaType, in.SeasonFilterJSON)
 	if err != nil {
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
 
 	policy, err := s.ResolvePolicy(ctx, userID)
 	if err != nil {
 		_ = s.RecordUserAuditEvent(ctx, actor, "request_create_deny", "request", tmdbID, "request-disabled")
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
 	autoApprove := policy.RequestMode == "auto_approve"
 	if !autoApprove && policy.RequestMode != "approval_required" {
 		_ = s.RecordUserAuditEvent(ctx, actor, "request_create_deny", "request", tmdbID, "request-disabled")
-		return RequestDTO{}, ErrPolicyDenied
+		return CreateRequestResult{}, ErrPolicyDenied
 	}
 	target, err := s.ResolveTarget(ctx, policy, in.TargetID, mediaType)
 	if err != nil {
 		_ = s.RecordUserAuditEvent(ctx, actor, "request_create_deny", "request", tmdbID, "request-disabled")
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
 
 	idempotencyKey, err := requestIdempotencyKey(userID, tmdbID, mediaType, language, target.TargetID, seasonFilterJSON)
 	if err != nil {
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
+	unlock := mediaRequestCreateLocks.lock(idempotencyKey)
+	defer unlock()
+
 	existing, err := s.Store.GetDiscoverySubscriptionRequestByIdempotency(ctx, queries.GetDiscoverySubscriptionRequestByIdempotencyParams{
 		IdempotencyKey: idempotencyKey,
 	})
 	if err == nil {
-		return requestDTO(existing), nil
+		return CreateRequestResult{Request: requestDTO(existing)}, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
 	if !autoApprove {
 		preflightExisting, foundExisting, err := s.preflightRequestCreate(ctx, actor, policy, tmdbID, idempotencyKey)
 		if err != nil {
-			return RequestDTO{}, err
+			return CreateRequestResult{}, err
 		}
 		if foundExisting {
-			return requestDTO(preflightExisting), nil
+			return CreateRequestResult{Request: requestDTO(preflightExisting)}, nil
 		}
+	}
+	if !s.AllowRequestCreateWithTMDBRefreshRate(actor) {
+		_ = s.RecordUserAuditEvent(ctx, actor, "rate_limit_deny", "request", tmdbID, "rate-limit-reached")
+		return CreateRequestResult{}, ErrLimitReached
 	}
 
 	media, err := s.fetchDetails(ctx, tmdbID, mediaType)
 	if err != nil {
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
 	media.TMDBID = tmdbID
 	media.MediaType = mediaType
@@ -181,22 +209,47 @@ func (s *Service) CreateRequest(ctx context.Context, actor Actor, in CreateReque
 		media.Title = tmdbID
 	}
 	if err := s.upsertTMDBMedia(ctx, media, language); err != nil {
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
 
 	if autoApprove {
-		row, err := s.createAndApproveRequest(ctx, actor, policy, target, media, language, seasonFilterJSON, userNote, idempotencyKey)
+		row, created, err := s.createAndApproveRequest(ctx, actor, policy, target, media, language, seasonFilterJSON, userNote, idempotencyKey)
 		if err != nil {
-			return RequestDTO{}, err
+			return CreateRequestResult{}, err
 		}
-		return requestDTO(row), nil
+		return CreateRequestResult{Request: requestDTO(row), Created: created}, nil
 	}
 
-	row, err := s.createPendingRequest(ctx, actor, policy, target, media, language, seasonFilterJSON, userNote, idempotencyKey)
+	row, created, err := s.createPendingRequest(ctx, actor, policy, target, media, language, seasonFilterJSON, userNote, idempotencyKey)
 	if err != nil {
-		return RequestDTO{}, err
+		return CreateRequestResult{}, err
 	}
-	return requestDTO(row), nil
+	return CreateRequestResult{Request: requestDTO(row), Created: created}, nil
+}
+
+func (l *keyedLockSet) lock(key string) func() {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[string]*keyedLock)
+	}
+	entry := l.locks[key]
+	if entry == nil {
+		entry = &keyedLock{}
+		l.locks[key] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.locks, key)
+		}
+		l.mu.Unlock()
+	}
 }
 
 func (s *Service) ApproveRequest(ctx context.Context, actor Actor, requestID int64, note string) (RequestDTO, error) {
@@ -606,10 +659,10 @@ func (s *Service) createPendingRequest(
 	seasonFilterJSON,
 	userNote,
 	idempotencyKey string,
-) (queries.DiscoverySubscriptionRequest, error) {
+) (queries.DiscoverySubscriptionRequest, bool, error) {
 	tx, q, err := s.Store.BeginImmediateTx(ctx)
 	if err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	committed := false
 	defer func() {
@@ -622,32 +675,32 @@ func (s *Service) createPendingRequest(
 		IdempotencyKey: idempotencyKey,
 	})
 	if err == nil {
-		return existing, nil
+		return existing, false, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 
 	now := nowUnix(s)
 	if err := enforceRequestLimitsWithQueries(ctx, q, actor, policy, media.TMDBID, now); err != nil {
 		if errors.Is(err, ErrLimitReached) {
 			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return queries.DiscoverySubscriptionRequest{}, commitErr
+				return queries.DiscoverySubscriptionRequest{}, false, commitErr
 			}
 			committed = true
 		}
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 
 	row, err := createPendingRequestTx(ctx, q, actor, policy, target, media, language, seasonFilterJSON, userNote, idempotencyKey, now)
 	if err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	committed = true
-	return row, nil
+	return row, true, nil
 }
 
 func (s *Service) createAndApproveRequest(
@@ -660,10 +713,10 @@ func (s *Service) createAndApproveRequest(
 	seasonFilterJSON,
 	userNote,
 	idempotencyKey string,
-) (queries.DiscoverySubscriptionRequest, error) {
+) (queries.DiscoverySubscriptionRequest, bool, error) {
 	tx, q, err := s.Store.BeginImmediateTx(ctx)
 	if err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	committed := false
 	defer func() {
@@ -679,43 +732,43 @@ func (s *Service) createAndApproveRequest(
 		if existing.Status == "pending_review" {
 			existing, err = s.approvePendingRequestTx(ctx, q, actor, existing.ID, "", true)
 			if err != nil {
-				return queries.DiscoverySubscriptionRequest{}, err
+				return queries.DiscoverySubscriptionRequest{}, false, err
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return queries.DiscoverySubscriptionRequest{}, err
+			return queries.DiscoverySubscriptionRequest{}, false, err
 		}
 		committed = true
-		return existing, nil
+		return existing, false, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 
 	now := nowUnix(s)
 	if err := enforceRequestLimitsWithQueries(ctx, q, actor, policy, media.TMDBID, now); err != nil {
 		if errors.Is(err, ErrLimitReached) {
 			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return queries.DiscoverySubscriptionRequest{}, commitErr
+				return queries.DiscoverySubscriptionRequest{}, false, commitErr
 			}
 			committed = true
 		}
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 
 	pending, err := createPendingRequestTx(ctx, q, actor, policy, target, media, language, seasonFilterJSON, userNote, idempotencyKey, now)
 	if err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	row, err := s.approvePendingRequestTx(ctx, q, actor, pending.ID, "", true)
 	if err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return queries.DiscoverySubscriptionRequest{}, err
+		return queries.DiscoverySubscriptionRequest{}, false, err
 	}
 	committed = true
-	return row, nil
+	return row, true, nil
 }
 
 func createPendingRequestTx(
@@ -861,6 +914,17 @@ func (s *Service) approvePendingRequestTx(ctx context.Context, q *queries.Querie
 		}
 	}
 
+	previousSubscription, err := q.FindCanonicalDiscoverySubscriptionForMediaRequest(ctx, queries.FindCanonicalDiscoverySubscriptionForMediaRequestParams{
+		TmdbID:    request.TmdbID,
+		MediaType: request.MediaType,
+		OwnerID:   target.PipelineOwnerID,
+		LibraryID: target.TargetLibraryID,
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return queries.DiscoverySubscriptionRequest{}, err
+	}
+	downgradeExistingDispatchableMatches := err == nil && previousSubscription.MatchMode != "admin_review" && target.MatchMode == "admin_review"
+
 	now := nowUnix(s)
 	subscription, err := q.UpsertDiscoverySubscriptionForMediaRequest(ctx, queries.UpsertDiscoverySubscriptionForMediaRequestParams{
 		OwnerID:           target.PipelineOwnerID,
@@ -876,12 +940,21 @@ func (s *Service) approvePendingRequestTx(ctx context.Context, q *queries.Querie
 		NextCheckAt:       sql.NullInt64{},
 		CreatedAt:         now,
 		UpdatedAt:         now,
+		MatchMode:         target.MatchMode,
 	})
 	if err != nil {
 		return queries.DiscoverySubscriptionRequest{}, err
 	}
 	if subscription.ProducerProfileID != target.ProducerProfileID || subscription.RuleProfileID != target.RuleProfileID {
 		return queries.DiscoverySubscriptionRequest{}, ErrConflict
+	}
+	if downgradeExistingDispatchableMatches && subscription.MatchMode == "admin_review" {
+		if err := q.DowngradeDispatchableSubscriptionMatchesForAdminReview(ctx, queries.DowngradeDispatchableSubscriptionMatchesForAdminReviewParams{
+			UpdatedAt:      now,
+			SubscriptionID: subscription.ID,
+		}); err != nil {
+			return queries.DiscoverySubscriptionRequest{}, err
+		}
 	}
 
 	seasonFilterJSON := ""

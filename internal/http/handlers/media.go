@@ -114,12 +114,7 @@ func (d APIDeps) CreateMediaRequest(w http.ResponseWriter, r *http.Request) {
 		d.writeMediaError(w, media.ErrInvalidRequest)
 		return
 	}
-	if !d.Media.AllowRequestCreateWithTMDBRefreshRate(actor) {
-		_ = d.Media.RecordUserAuditEvent(r.Context(), actor, "rate_limit_deny", "request", body.TMDBID, "rate-limit-reached")
-		d.writeMediaError(w, media.ErrLimitReached)
-		return
-	}
-	row, err := d.Media.CreateRequest(r.Context(), actor, media.CreateRequestInput{
+	result, err := d.Media.CreateRequestDetailed(r.Context(), actor, media.CreateRequestInput{
 		TMDBID:           body.TMDBID,
 		MediaType:        body.MediaType,
 		TMDBLanguage:     body.TMDBLanguage,
@@ -131,7 +126,11 @@ func (d APIDeps) CreateMediaRequest(w http.ResponseWriter, r *http.Request) {
 		d.writeMediaError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, row)
+	status := http.StatusOK
+	if result.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, result.Request)
 }
 
 func (d APIDeps) ListMediaRequests(w http.ResponseWriter, r *http.Request) {

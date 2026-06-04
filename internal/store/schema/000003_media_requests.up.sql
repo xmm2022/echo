@@ -1,3 +1,7 @@
+ALTER TABLE discovery_subscriptions
+ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'auto_dispatch'
+  CHECK (match_mode IN ('admin_review','auto_dispatch'));
+
 CREATE TABLE discovery_access_policies (
   id                       INTEGER PRIMARY KEY AUTOINCREMENT,
   name                     TEXT NOT NULL UNIQUE,

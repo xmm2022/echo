@@ -52,3 +52,8 @@ type CreateRequestInput struct {
 	TargetID         int64
 	UserNote         string
 }
+
+type CreateRequestResult struct {
+	Request RequestDTO
+	Created bool
+}

@@ -12,7 +12,7 @@ import (
 
 const adminAcceptSubscriptionMatch = `-- name: AdminAcceptSubscriptionMatch :one
 UPDATE subscription_matches
-SET decision = 'accept', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
+SET decision = 'accept', reason = 'admin_accept', dispatch_state = 'none', queued_job_id = NULL, updated_at = ?
 WHERE id = ?
   AND dispatch_state = 'none'
   AND decision IN ('review','accept','queue')

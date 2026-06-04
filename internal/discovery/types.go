@@ -50,6 +50,7 @@ type SubscriptionBundle struct {
 	LibraryID          int64
 	ProducerProfileID  int64
 	RuleProfileID      int64
+	MatchMode          string
 	RuleProfileVersion int64
 	RuleProfileJSON    string
 }

@@ -185,6 +185,11 @@ func seedMediaTargetDeps(t *testing.T, st *store.Store) mediaTargetDeps {
 
 func createMediaTarget(t *testing.T, st *store.Store, deps mediaTargetDeps, policyID int64, label, mediaType string, enabled int64) queries.DiscoveryPolicyTarget {
 	t.Helper()
+	return createMediaTargetWithMatchMode(t, st, deps, policyID, label, mediaType, enabled, "admin_review")
+}
+
+func createMediaTargetWithMatchMode(t *testing.T, st *store.Store, deps mediaTargetDeps, policyID int64, label, mediaType string, enabled int64, matchMode string) queries.DiscoveryPolicyTarget {
+	t.Helper()
 
 	target, err := st.CreateDiscoveryPolicyTarget(context.Background(), queries.CreateDiscoveryPolicyTargetParams{
 		PolicyID:                policyID,
@@ -194,7 +199,7 @@ func createMediaTarget(t *testing.T, st *store.Store, deps mediaTargetDeps, poli
 		RuleProfileID:           deps.RuleProfileID,
 		PipelineOwnerID:         "admin",
 		MediaType:               nullString(mediaType),
-		MatchMode:               "admin_review",
+		MatchMode:               matchMode,
 		GrantPlaybackOnApproval: 1,
 		Enabled:                 enabled,
 		DefaultTarget:           1,

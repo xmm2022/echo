@@ -148,6 +148,26 @@ WHERE id = ?`, dueAt, subscriptionID); err != nil {
 	}
 }
 
+func seedAcceptingDiscoveryRule(t *testing.T, st *storepkg.Store, ruleProfileID int64) {
+	t.Helper()
+	if _, err := st.DB.ExecContext(context.Background(), `
+UPDATE rule_profiles
+SET rules_json = '{"weights":["resolutions"],"resolutions":[{"name":"4K","enabled":true}]}'
+WHERE id = ?`, ruleProfileID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedAcceptingDiscoveredResourceTitle(t *testing.T, st *storepkg.Store, resourceID int64) {
+	t.Helper()
+	if _, err := st.DB.ExecContext(context.Background(), `
+UPDATE discovered_resources
+SET title = 'Known.Movie.2160p.mkv', raw_text_redacted = 'Known.Movie.2160p.mkv'
+WHERE id = ?`, resourceID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func countDiscoveredResources(t *testing.T, st *storepkg.Store) int {
 	t.Helper()
 	var n int

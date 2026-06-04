@@ -371,13 +371,19 @@ func TestCreatePendingRequestDuplicateReturnsExistingBeforeLimits(t *testing.T) 
 		t.Fatalf("idempotency key: %v", err)
 	}
 
-	first, err := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
+	first, created, err := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
 	if err != nil {
 		t.Fatalf("first createPendingRequest returned error: %v", err)
 	}
-	second, err := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
+	if !created {
+		t.Fatalf("first createPendingRequest created=%v, want true", created)
+	}
+	second, created, err := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
 	if err != nil {
 		t.Fatalf("duplicate createPendingRequest returned error: %v", err)
+	}
+	if created {
+		t.Fatalf("duplicate createPendingRequest created=%v, want false", created)
 	}
 	if second.ID != first.ID {
 		t.Fatalf("duplicate ID = %d, want existing %d", second.ID, first.ID)
@@ -396,8 +402,9 @@ func TestCreatePendingRequestConcurrentDifferentKeysRespectPendingLimit(t *testi
 	}
 
 	type result struct {
-		row queries.DiscoverySubscriptionRequest
-		err error
+		row     queries.DiscoverySubscriptionRequest
+		created bool
+		err     error
 	}
 	results := make(chan result, 2)
 	for _, tmdbID := range []string{"608", "609"} {
@@ -409,8 +416,8 @@ func TestCreatePendingRequestConcurrentDifferentKeysRespectPendingLimit(t *testi
 				results <- result{err: keyErr}
 				return
 			}
-			row, createErr := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
-			results <- result{row: row, err: createErr}
+			row, created, createErr := fixture.svc.createPendingRequest(ctx, mediaActor("u1"), fixture.policy, target, media, "zh-CN", "", "", key)
+			results <- result{row: row, created: created, err: createErr}
 		}()
 	}
 
@@ -419,6 +426,9 @@ func TestCreatePendingRequestConcurrentDifferentKeysRespectPendingLimit(t *testi
 	for i := 0; i < 2; i++ {
 		got := <-results
 		if got.err == nil && got.row.ID != 0 {
+			if !got.created {
+				t.Fatalf("createPendingRequest success created=%v, want true", got.created)
+			}
 			successes++
 			continue
 		}
@@ -893,6 +903,146 @@ func TestApproveRequestReusesCanonicalSubscriptionAcrossUsers(t *testing.T) {
 	if !user2.SeasonFilterJson.Valid || user2.SeasonFilterJson.String != `[3]` || user2.SeasonFilterKey != testSeasonFilterKey(`[3]`) {
 		t.Fatalf("u2 season filter/key = %+v/%q, want normalized [3]", user2.SeasonFilterJson, user2.SeasonFilterKey)
 	}
+}
+
+func TestApproveRequestAdminReviewDowngradesExistingDispatchableMatches(t *testing.T) {
+	ctx := context.Background()
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	seedMediaUser(t, st, "u2")
+	deps := seedMediaTargetDeps(t, st)
+	autoPolicy := createMediaPolicy(t, st, "auto policy", "u1", 1, 100, "approval_required", 1)
+	autoTarget := createMediaTargetWithMatchMode(t, st, deps, autoPolicy.ID, "Auto Target", "movie", 1, "auto_dispatch")
+	reviewPolicy := createMediaPolicy(t, st, "review policy", "u2", 1, 100, "approval_required", 1)
+	reviewTarget := createMediaTargetWithMatchMode(t, st, deps, reviewPolicy.ID, "Review Target", "movie", 1, "admin_review")
+	fake := newFakeMetadataClient()
+	fake.details["movie:7021"] = tmdb.Media{
+		TMDBID:    "7021",
+		MediaType: "movie",
+		Title:     "Mode Merge Movie",
+		RawJSON:   `{}`,
+	}
+	svc := Service{Store: st, TMDB: fake, Now: mediaNow}
+
+	req1, err := svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "7021",
+		MediaType: "movie",
+		TargetID:  autoTarget.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u1 returned error: %v", err)
+	}
+	approved1, err := svc.ApproveRequest(ctx, adminMediaActor(), req1.ID, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest u1 returned error: %v", err)
+	}
+	matchID := seedMediaDispatchableSubscriptionMatch(t, st, approved1.SubscriptionID, deps.RuleProfileID)
+	assertMediaDispatchableMatches(t, st, matchID)
+
+	req2, err := svc.CreateRequest(ctx, mediaActor("u2"), CreateRequestInput{
+		TMDBID:    "7021",
+		MediaType: "movie",
+		TargetID:  reviewTarget.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u2 returned error: %v", err)
+	}
+	approved2, err := svc.ApproveRequest(ctx, adminMediaActor(), req2.ID, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest u2 returned error: %v", err)
+	}
+	if approved2.SubscriptionID != approved1.SubscriptionID {
+		t.Fatalf("subscription ids = %d/%d, want reused canonical", approved1.SubscriptionID, approved2.SubscriptionID)
+	}
+	canonical := getDiscoverySubscriptionByID(t, st, approved1.SubscriptionID)
+	if canonical.MatchMode != "admin_review" {
+		t.Fatalf("canonical match_mode = %q, want admin_review", canonical.MatchMode)
+	}
+	match, err := st.GetSubscriptionMatch(ctx, queries.GetSubscriptionMatchParams{ID: matchID})
+	if err != nil {
+		t.Fatalf("get downgraded match: %v", err)
+	}
+	if match.Decision != "review" || match.Reason != "admin_review" || match.DispatchState != "none" || match.DecidedAt.Valid {
+		t.Fatalf("match state = decision:%s reason:%s dispatch:%s decided:%v, want review/admin_review/none/undecided", match.Decision, match.Reason, match.DispatchState, match.DecidedAt)
+	}
+	assertMediaDispatchableMatches(t, st)
+
+	if _, err := st.AdminAcceptSubscriptionMatch(ctx, queries.AdminAcceptSubscriptionMatchParams{
+		UpdatedAt: mediaTestNow + 10,
+		ID:        matchID,
+	}); err != nil {
+		t.Fatalf("admin accept downgraded match: %v", err)
+	}
+	assertMediaDispatchableMatches(t, st, matchID)
+}
+
+func TestApproveRequestAdminReviewKeepsAdminAcceptedDispatchableMatches(t *testing.T) {
+	ctx := context.Background()
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	seedMediaUser(t, st, "u2")
+	deps := seedMediaTargetDeps(t, st)
+	autoPolicy := createMediaPolicy(t, st, "auto policy", "u1", 1, 100, "approval_required", 1)
+	autoTarget := createMediaTargetWithMatchMode(t, st, deps, autoPolicy.ID, "Auto Target", "movie", 1, "auto_dispatch")
+	reviewPolicy := createMediaPolicy(t, st, "review policy", "u2", 1, 100, "approval_required", 1)
+	reviewTarget := createMediaTargetWithMatchMode(t, st, deps, reviewPolicy.ID, "Review Target", "movie", 1, "admin_review")
+	fake := newFakeMetadataClient()
+	fake.details["movie:7022"] = tmdb.Media{
+		TMDBID:    "7022",
+		MediaType: "movie",
+		Title:     "Admin Accepted Movie",
+		RawJSON:   `{}`,
+	}
+	svc := Service{Store: st, TMDB: fake, Now: mediaNow}
+
+	req1, err := svc.CreateRequest(ctx, mediaActor("u1"), CreateRequestInput{
+		TMDBID:    "7022",
+		MediaType: "movie",
+		TargetID:  autoTarget.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u1 returned error: %v", err)
+	}
+	approved1, err := svc.ApproveRequest(ctx, adminMediaActor(), req1.ID, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest u1 returned error: %v", err)
+	}
+	matchID := seedMediaDispatchableSubscriptionMatch(t, st, approved1.SubscriptionID, deps.RuleProfileID)
+	if _, err := st.AdminAcceptSubscriptionMatch(ctx, queries.AdminAcceptSubscriptionMatchParams{
+		UpdatedAt: mediaTestNow + 10,
+		ID:        matchID,
+	}); err != nil {
+		t.Fatalf("admin accept dispatchable match: %v", err)
+	}
+	assertMediaDispatchableMatches(t, st, matchID)
+
+	req2, err := svc.CreateRequest(ctx, mediaActor("u2"), CreateRequestInput{
+		TMDBID:    "7022",
+		MediaType: "movie",
+		TargetID:  reviewTarget.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest u2 returned error: %v", err)
+	}
+	approved2, err := svc.ApproveRequest(ctx, adminMediaActor(), req2.ID, "")
+	if err != nil {
+		t.Fatalf("ApproveRequest u2 returned error: %v", err)
+	}
+	if approved2.SubscriptionID != approved1.SubscriptionID {
+		t.Fatalf("subscription ids = %d/%d, want reused canonical", approved1.SubscriptionID, approved2.SubscriptionID)
+	}
+	canonical := getDiscoverySubscriptionByID(t, st, approved1.SubscriptionID)
+	if canonical.MatchMode != "admin_review" {
+		t.Fatalf("canonical match_mode = %q, want admin_review", canonical.MatchMode)
+	}
+	match, err := st.GetSubscriptionMatch(ctx, queries.GetSubscriptionMatchParams{ID: matchID})
+	if err != nil {
+		t.Fatalf("get admin accepted match: %v", err)
+	}
+	if match.Decision != "accept" || match.Reason != "admin_accept" || match.DispatchState != "none" {
+		t.Fatalf("match state = decision:%s reason:%s dispatch:%s, want accept/admin_accept/none", match.Decision, match.Reason, match.DispatchState)
+	}
+	assertMediaDispatchableMatches(t, st, matchID)
 }
 
 func TestApproveRequestConcurrentCallsReturnSingleCanonicalSubscription(t *testing.T) {
@@ -1444,6 +1594,88 @@ func countUserMediaSubscriptions(t *testing.T, st *store.Store) int64 {
 		t.Fatalf("count user media subscriptions: %v", err)
 	}
 	return count
+}
+
+func seedMediaDispatchableSubscriptionMatch(t *testing.T, st *store.Store, subscriptionID, ruleProfileID int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	source, err := st.CreateDiscoverySource(ctx, queries.CreateDiscoverySourceParams{
+		Kind:          "manual",
+		Name:          "dispatchable source",
+		Enabled:       1,
+		ConfigJson:    "{}",
+		SecretRef:     sql.NullString{},
+		RateLimitJson: sql.NullString{},
+		NextRunAt:     sql.NullInt64{},
+		CreatedAt:     mediaTestNow,
+		UpdatedAt:     mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("create discovery source: %v", err)
+	}
+	resource, err := st.UpsertDiscoveredResource(ctx, queries.UpsertDiscoveredResourceParams{
+		SourceID:         source.ID,
+		Provider:         "115",
+		LinkKind:         "115_share",
+		ExternalKey:      "dispatchable-resource",
+		TmdbID:           sql.NullString{String: "7021", Valid: true},
+		MediaType:        sql.NullString{String: "movie", Valid: true},
+		Title:            sql.NullString{String: "Mode Merge Movie", Valid: true},
+		SeasonNumber:     sql.NullInt64{},
+		EpisodeStart:     sql.NullInt64{},
+		EpisodeEnd:       sql.NullInt64{},
+		ShareCode:        sql.NullString{String: "share", Valid: true},
+		ReceiveCode:      sql.NullString{String: "pass", Valid: true},
+		ShareUrlRedacted: sql.NullString{String: "https://115.example/s/share?password=[REDACTED]", Valid: true},
+		RawTextRedacted:  sql.NullString{String: "Mode Merge Movie", Valid: true},
+		RawTextRef:       sql.NullString{},
+		ParsedJson:       "{}",
+		FeatureJson:      "{}",
+		Status:           "candidate",
+		FirstSeenAt:      mediaTestNow,
+		LastSeenAt:       mediaTestNow,
+	})
+	if err != nil {
+		t.Fatalf("upsert discovered resource: %v", err)
+	}
+	match, err := st.CreateSubscriptionMatch(ctx, queries.CreateSubscriptionMatchParams{
+		SubscriptionID:     subscriptionID,
+		ResourceID:         resource.ID,
+		RuleProfileID:      ruleProfileID,
+		RuleProfileVersion: 1,
+		SeasonNumber:       sql.NullInt64{},
+		EpisodeStart:       sql.NullInt64{},
+		EpisodeEnd:         sql.NullInt64{},
+		ScoreJson:          `{"score":1}`,
+		PreviousScoreJson:  sql.NullString{},
+		Decision:           "accept",
+		Reason:             "rule accept",
+		DispatchState:      "none",
+		IdempotencyKey:     "dispatchable-match",
+		CreatedAt:          mediaTestNow,
+		UpdatedAt:          mediaTestNow,
+		DecidedAt:          sql.NullInt64{Int64: mediaTestNow, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create subscription match: %v", err)
+	}
+	return match.ID
+}
+
+func assertMediaDispatchableMatches(t *testing.T, st *store.Store, want ...int64) {
+	t.Helper()
+	got, err := st.ListDueDiscoveryDispatchMatches(context.Background(), queries.ListDueDiscoveryDispatchMatchesParams{Limit: 10})
+	if err != nil {
+		t.Fatalf("list due discovery dispatch matches: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("dispatchable matches = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dispatchable matches = %v, want %v", got, want)
+		}
+	}
 }
 
 func tmdbMediaExists(t *testing.T, st *store.Store, tmdbID, mediaType, language string) bool {

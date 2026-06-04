@@ -27,8 +27,35 @@ func (q *Queries) CountActiveUserMediaSubscriptions(ctx context.Context, arg Cou
 	return count, err
 }
 
+const downgradeDispatchableSubscriptionMatchesForAdminReview = `-- name: DowngradeDispatchableSubscriptionMatchesForAdminReview :exec
+UPDATE subscription_matches
+SET decision = 'review',
+    reason = 'admin_review',
+    dispatch_state = 'none',
+    queued_job_id = NULL,
+    failure_kind = NULL,
+    failure_message = NULL,
+    decided_at = NULL,
+    finished_at = NULL,
+    updated_at = ?1
+WHERE subscription_id = ?2
+  AND decision IN ('accept','queue')
+  AND dispatch_state IN ('none','failed')
+  AND reason != 'admin_accept'
+`
+
+type DowngradeDispatchableSubscriptionMatchesForAdminReviewParams struct {
+	UpdatedAt      int64 `json:"updated_at"`
+	SubscriptionID int64 `json:"subscription_id"`
+}
+
+func (q *Queries) DowngradeDispatchableSubscriptionMatchesForAdminReview(ctx context.Context, arg DowngradeDispatchableSubscriptionMatchesForAdminReviewParams) error {
+	_, err := q.db.ExecContext(ctx, downgradeDispatchableSubscriptionMatchesForAdminReview, arg.UpdatedAt, arg.SubscriptionID)
+	return err
+}
+
 const findCanonicalDiscoverySubscriptionForMediaRequest = `-- name: FindCanonicalDiscoverySubscriptionForMediaRequest :one
-SELECT id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at FROM discovery_subscriptions
+SELECT id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode FROM discovery_subscriptions
 WHERE tmdb_id = ?1
   AND media_type = ?2
   AND owner_id = ?3
@@ -72,6 +99,7 @@ func (q *Queries) FindCanonicalDiscoverySubscriptionForMediaRequest(ctx context.
 		&i.LastErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MatchMode,
 	)
 	return i, err
 }
@@ -184,6 +212,15 @@ LEFT JOIN subscription_matches AS lm ON lm.id = (
   SELECT sm.id
   FROM subscription_matches AS sm
   WHERE sm.subscription_id = ds.id
+    AND (
+      ums.season_filter_json IS NULL
+      OR TRIM(ums.season_filter_json) = ''
+      OR EXISTS (
+        SELECT 1
+        FROM json_each(ums.season_filter_json) AS season_filter
+        WHERE CAST(season_filter.value AS INTEGER) = sm.season_number
+      )
+    )
   ORDER BY sm.updated_at DESC, sm.id DESC
   LIMIT 1
 )
@@ -311,17 +348,27 @@ const upsertDiscoverySubscriptionForMediaRequest = `-- name: UpsertDiscoverySubs
 INSERT INTO discovery_subscriptions (
   owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id,
   producer_profile_id, rule_profile_id, status, season_filter_json,
-  next_check_at, created_at, updated_at
+  next_check_at, created_at, updated_at, match_mode
 ) VALUES (
   ?1, ?2, ?3,
   ?4, ?5, ?6,
   ?7, ?8, ?9,
   ?10, ?11, ?12,
-  ?13
+  ?13, ?14
 )
 ON CONFLICT(tmdb_id, media_type, owner_id, library_id) DO UPDATE SET
-  updated_at = discovery_subscriptions.updated_at
-RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at
+  match_mode = CASE
+    WHEN discovery_subscriptions.match_mode = 'admin_review'
+      OR excluded.match_mode = 'admin_review'
+    THEN 'admin_review'
+    ELSE 'auto_dispatch'
+  END,
+  updated_at = CASE
+    WHEN discovery_subscriptions.match_mode = excluded.match_mode
+    THEN discovery_subscriptions.updated_at
+    ELSE excluded.updated_at
+  END
+RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode
 `
 
 type UpsertDiscoverySubscriptionForMediaRequestParams struct {
@@ -338,6 +385,7 @@ type UpsertDiscoverySubscriptionForMediaRequestParams struct {
 	NextCheckAt       sql.NullInt64  `json:"next_check_at"`
 	CreatedAt         int64          `json:"created_at"`
 	UpdatedAt         int64          `json:"updated_at"`
+	MatchMode         string         `json:"match_mode"`
 }
 
 func (q *Queries) UpsertDiscoverySubscriptionForMediaRequest(ctx context.Context, arg UpsertDiscoverySubscriptionForMediaRequestParams) (DiscoverySubscription, error) {
@@ -355,6 +403,7 @@ func (q *Queries) UpsertDiscoverySubscriptionForMediaRequest(ctx context.Context
 		arg.NextCheckAt,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.MatchMode,
 	)
 	var i DiscoverySubscription
 	err := row.Scan(
@@ -379,6 +428,7 @@ func (q *Queries) UpsertDiscoverySubscriptionForMediaRequest(ctx context.Context
 		&i.LastErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MatchMode,
 	)
 	return i, err
 }

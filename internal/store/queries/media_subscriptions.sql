@@ -2,17 +2,43 @@
 INSERT INTO discovery_subscriptions (
   owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id,
   producer_profile_id, rule_profile_id, status, season_filter_json,
-  next_check_at, created_at, updated_at
+  next_check_at, created_at, updated_at, match_mode
 ) VALUES (
   sqlc.arg(owner_id), sqlc.arg(tmdb_id), sqlc.arg(media_type),
   sqlc.arg(tmdb_language), sqlc.arg(title_snapshot), sqlc.arg(library_id),
   sqlc.arg(producer_profile_id), sqlc.arg(rule_profile_id), sqlc.arg(status),
   sqlc.arg(season_filter_json), sqlc.arg(next_check_at), sqlc.arg(created_at),
-  sqlc.arg(updated_at)
+  sqlc.arg(updated_at), sqlc.arg(match_mode)
 )
 ON CONFLICT(tmdb_id, media_type, owner_id, library_id) DO UPDATE SET
-  updated_at = discovery_subscriptions.updated_at
+  match_mode = CASE
+    WHEN discovery_subscriptions.match_mode = 'admin_review'
+      OR excluded.match_mode = 'admin_review'
+    THEN 'admin_review'
+    ELSE 'auto_dispatch'
+  END,
+  updated_at = CASE
+    WHEN discovery_subscriptions.match_mode = excluded.match_mode
+    THEN discovery_subscriptions.updated_at
+    ELSE excluded.updated_at
+  END
 RETURNING *;
+
+-- name: DowngradeDispatchableSubscriptionMatchesForAdminReview :exec
+UPDATE subscription_matches
+SET decision = 'review',
+    reason = 'admin_review',
+    dispatch_state = 'none',
+    queued_job_id = NULL,
+    failure_kind = NULL,
+    failure_message = NULL,
+    decided_at = NULL,
+    finished_at = NULL,
+    updated_at = sqlc.arg(updated_at)
+WHERE subscription_id = sqlc.arg(subscription_id)
+  AND decision IN ('accept','queue')
+  AND dispatch_state IN ('none','failed')
+  AND reason != 'admin_accept';
 
 -- name: FindCanonicalDiscoverySubscriptionForMediaRequest :one
 SELECT * FROM discovery_subscriptions
@@ -94,6 +120,15 @@ LEFT JOIN subscription_matches AS lm ON lm.id = (
   SELECT sm.id
   FROM subscription_matches AS sm
   WHERE sm.subscription_id = ds.id
+    AND (
+      ums.season_filter_json IS NULL
+      OR TRIM(ums.season_filter_json) = ''
+      OR EXISTS (
+        SELECT 1
+        FROM json_each(ums.season_filter_json) AS season_filter
+        WHERE CAST(season_filter.value AS INTEGER) = sm.season_number
+      )
+    )
   ORDER BY sm.updated_at DESC, sm.id DESC
   LIMIT 1
 )

@@ -67,7 +67,7 @@ INSERT INTO discovery_subscriptions (
   producer_profile_id, rule_profile_id, status, season_filter_json,
   next_check_at, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at
+RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode
 `
 
 type CreateDiscoverySubscriptionParams struct {
@@ -125,12 +125,13 @@ func (q *Queries) CreateDiscoverySubscription(ctx context.Context, arg CreateDis
 		&i.LastErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MatchMode,
 	)
 	return i, err
 }
 
 const getDiscoverySubscription = `-- name: GetDiscoverySubscription :one
-SELECT id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at FROM discovery_subscriptions WHERE id = ?
+SELECT id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode FROM discovery_subscriptions WHERE id = ?
 `
 
 type GetDiscoverySubscriptionParams struct {
@@ -162,6 +163,7 @@ func (q *Queries) GetDiscoverySubscription(ctx context.Context, arg GetDiscovery
 		&i.LastErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MatchMode,
 	)
 	return i, err
 }
@@ -177,7 +179,7 @@ WHERE id IN (
   ORDER BY COALESCE(ds.next_check_at, 0), ds.id
   LIMIT ?
 )
-RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at
+RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode
 `
 
 type LeaseDueDiscoverySubscriptionsParams struct {
@@ -225,6 +227,7 @@ func (q *Queries) LeaseDueDiscoverySubscriptions(ctx context.Context, arg LeaseD
 			&i.LastErrorMessage,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.MatchMode,
 		); err != nil {
 			return nil, err
 		}
@@ -240,7 +243,7 @@ func (q *Queries) LeaseDueDiscoverySubscriptions(ctx context.Context, arg LeaseD
 }
 
 const listDiscoverySubscriptions = `-- name: ListDiscoverySubscriptions :many
-SELECT id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at FROM discovery_subscriptions ORDER BY created_at DESC LIMIT ? OFFSET ?
+SELECT id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode FROM discovery_subscriptions ORDER BY created_at DESC LIMIT ? OFFSET ?
 `
 
 type ListDiscoverySubscriptionsParams struct {
@@ -279,6 +282,7 @@ func (q *Queries) ListDiscoverySubscriptions(ctx context.Context, arg ListDiscov
 			&i.LastErrorMessage,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.MatchMode,
 		); err != nil {
 			return nil, err
 		}
@@ -298,7 +302,7 @@ UPDATE discovery_subscriptions
 SET library_id = ?, producer_profile_id = ?, rule_profile_id = ?,
     status = ?, season_filter_json = ?, next_check_at = ?, updated_at = ?
 WHERE id = ?
-RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at
+RETURNING id, owner_id, tmdb_id, media_type, tmdb_language, title_snapshot, library_id, producer_profile_id, rule_profile_id, status, season_filter_json, current_best_match_id, current_best_score_json, next_check_at, locked_until, last_checked_at, failure_count, last_error_kind, last_error_message, created_at, updated_at, match_mode
 `
 
 type UpdateDiscoverySubscriptionParams struct {
@@ -346,6 +350,7 @@ func (q *Queries) UpdateDiscoverySubscription(ctx context.Context, arg UpdateDis
 		&i.LastErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MatchMode,
 	)
 	return i, err
 }

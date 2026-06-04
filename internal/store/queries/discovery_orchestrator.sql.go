@@ -18,6 +18,7 @@ SELECT
   s.library_id,
   s.producer_profile_id,
   s.rule_profile_id,
+  s.match_mode,
   rp.version AS rule_profile_version,
   rp.rules_json AS rule_profile_json
 FROM discovery_subscriptions s
@@ -36,6 +37,7 @@ type GetDiscoverySubscriptionBundleRow struct {
 	LibraryID          int64  `json:"library_id"`
 	ProducerProfileID  int64  `json:"producer_profile_id"`
 	RuleProfileID      int64  `json:"rule_profile_id"`
+	MatchMode          string `json:"match_mode"`
 	RuleProfileVersion int64  `json:"rule_profile_version"`
 	RuleProfileJson    string `json:"rule_profile_json"`
 }
@@ -50,6 +52,7 @@ func (q *Queries) GetDiscoverySubscriptionBundle(ctx context.Context, arg GetDis
 		&i.LibraryID,
 		&i.ProducerProfileID,
 		&i.RuleProfileID,
+		&i.MatchMode,
 		&i.RuleProfileVersion,
 		&i.RuleProfileJson,
 	)

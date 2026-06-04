@@ -186,6 +186,7 @@ func (s *Store) GetSubscriptionBundle(ctx context.Context, subscriptionID int64)
 		LibraryID:          row.LibraryID,
 		ProducerProfileID:  row.ProducerProfileID,
 		RuleProfileID:      row.RuleProfileID,
+		MatchMode:          row.MatchMode,
 		RuleProfileVersion: row.RuleProfileVersion,
 		RuleProfileJSON:    row.RuleProfileJson,
 	}, nil
@@ -317,6 +318,7 @@ func (s *Store) LeaseDueSubscriptions(ctx context.Context, now, lockedUntil time
 			LibraryID:          bundle.LibraryID,
 			ProducerProfileID:  bundle.ProducerProfileID,
 			RuleProfileID:      bundle.RuleProfileID,
+			MatchMode:          bundle.MatchMode,
 			RuleProfileVersion: bundle.RuleProfileVersion,
 			RuleProfileJSON:    bundle.RuleProfileJson,
 		})

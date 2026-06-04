@@ -192,7 +192,7 @@ func TestUserMediaCreateRequestReturnsExistingDuplicate(t *testing.T) {
 	user := mediaHTTPUser("u1")
 
 	first := postMediaRequest(t, deps, user, body)
-	second := postMediaRequest(t, deps, user, body)
+	second := postMediaRequestExpectStatus(t, deps, user, body, http.StatusOK)
 	if second.ID != first.ID {
 		t.Fatalf("duplicate id=%d, want existing id %d", second.ID, first.ID)
 	}
@@ -201,6 +201,120 @@ func TestUserMediaCreateRequestReturnsExistingDuplicate(t *testing.T) {
 	}
 	if fake.detailCalls() != 1 {
 		t.Fatalf("metadata detail calls=%d, want 1 duplicate-safe fetch", fake.detailCalls())
+	}
+}
+
+func TestUserMediaCreateDuplicateBypassesRequestCreateRateLimit(t *testing.T) {
+	st, deps, fake, target := newMediaHTTPCreateFixture(t, "u1", "approval_required")
+	fake.movies["609"] = tmdb.Media{
+		TMDBID:    "609",
+		MediaType: "movie",
+		Title:     "Duplicate Movie",
+		RawJSON:   `{"id":609}`,
+	}
+	limiter := newFakeMediaLimiter()
+	deps.Media.Limiter = limiter
+	body := `{"tmdb_id":"609","media_type":"movie","tmdb_language":"zh-CN","target_id":` + itoa(target.ID) + `}`
+	user := mediaHTTPUser("u1")
+
+	first := postMediaRequest(t, deps, user, body)
+	limiter.deny["request-create:user:u1"] = true
+	second := postMediaRequestExpectStatus(t, deps, user, body, http.StatusOK)
+	if second.ID != first.ID {
+		t.Fatalf("duplicate id=%d, want existing id %d", second.ID, first.ID)
+	}
+	if got := countMediaHTTPRequestsForUser(t, st, "u1"); got != 1 {
+		t.Fatalf("request count=%d, want 1", got)
+	}
+	if fake.detailCalls() != 1 {
+		t.Fatalf("metadata detail calls=%d, want no duplicate fetch after limiter deny", fake.detailCalls())
+	}
+}
+
+func TestUserMediaCreateConcurrentDuplicateReturnsOneCreated(t *testing.T) {
+	st, deps, fake, target := newMediaHTTPCreateFixture(t, "u1", "approval_required")
+	fake.movies["610"] = tmdb.Media{
+		TMDBID:    "610",
+		MediaType: "movie",
+		Title:     "Concurrent Duplicate",
+		RawJSON:   `{"id":610}`,
+	}
+	releaseDetails := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseDetails)
+		})
+	}
+	defer release()
+	fake.detailRelease = releaseDetails
+	body := `{"tmdb_id":"610","media_type":"movie","tmdb_language":"zh-CN","target_id":` + itoa(target.ID) + `}`
+	user := mediaHTTPUser("u1")
+
+	type result struct {
+		status int
+		body   string
+		dto    media.RequestDTO
+	}
+	const callers = 8
+	start := make(chan struct{})
+	results := make(chan result, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := doReqAs(t, http.MethodPost, "/api/me/discovery/requests", body, user, func(r chi.Router) {
+				deps.MountMedia(r)
+			})
+			got := result{status: rec.Code, body: rec.Body.String()}
+			if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
+				decodeBody(t, rec, &got.dto)
+			}
+			results <- got
+		}()
+	}
+	close(start)
+	waitForMediaHTTPDetailCalls(t, fake, 1)
+	duplicateFetch := waitForMediaHTTPDetailCallsWithin(fake, 2, 100*time.Millisecond)
+	release()
+	wg.Wait()
+	close(results)
+
+	created := 0
+	ok := 0
+	var requestID int64
+	for got := range results {
+		switch got.status {
+		case http.StatusCreated:
+			created++
+		case http.StatusOK:
+			ok++
+		default:
+			t.Fatalf("concurrent create status=%d body=%s, want 201 or 200", got.status, got.body)
+		}
+		if got.dto.ID == 0 {
+			t.Fatalf("concurrent create returned zero id with status %d body=%s", got.status, got.body)
+		}
+		if requestID == 0 {
+			requestID = got.dto.ID
+		}
+		if got.dto.ID != requestID {
+			t.Fatalf("concurrent create id=%d, want shared id %d", got.dto.ID, requestID)
+		}
+	}
+	if created != 1 || ok != callers-1 {
+		t.Fatalf("status counts created=%d ok=%d, want 1/%d", created, ok, callers-1)
+	}
+	if duplicateFetch {
+		t.Fatalf("metadata detail calls reached %d before first create completed, want one in-flight fetch for duplicate request", fake.detailCalls())
+	}
+	if got := countMediaHTTPRequestsForUser(t, st, "u1"); got != 1 {
+		t.Fatalf("request count=%d, want 1", got)
+	}
+	if fake.detailCalls() != 1 {
+		t.Fatalf("metadata detail calls=%d, want one duplicate-safe fetch", fake.detailCalls())
 	}
 }
 
@@ -638,12 +752,13 @@ func TestHXRequestDoesNotBypassDiscoveryScope(t *testing.T) {
 }
 
 type fakeMediaMetadataClient struct {
-	mu       sync.Mutex
-	searches map[string][]tmdb.Media
-	movies   map[string]tmdb.Media
-	tv       map[string]tmdb.Media
-	search   int
-	details  int
+	mu            sync.Mutex
+	searches      map[string][]tmdb.Media
+	movies        map[string]tmdb.Media
+	tv            map[string]tmdb.Media
+	search        int
+	details       int
+	detailRelease <-chan struct{}
 }
 
 func newFakeMediaMetadataClient() *fakeMediaMetadataClient {
@@ -663,9 +778,13 @@ func (f *fakeMediaMetadataClient) Search(_ context.Context, query, mediaType str
 
 func (f *fakeMediaMetadataClient) MovieDetails(_ context.Context, tmdbID string) (tmdb.Media, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.details++
+	release := f.detailRelease
 	item, ok := f.movies[tmdbID]
+	f.mu.Unlock()
+	if release != nil {
+		<-release
+	}
 	if !ok {
 		return tmdb.Media{}, media.ErrMetadataUnavailable
 	}
@@ -674,9 +793,13 @@ func (f *fakeMediaMetadataClient) MovieDetails(_ context.Context, tmdbID string)
 
 func (f *fakeMediaMetadataClient) TVDetails(_ context.Context, tmdbID string) (tmdb.Media, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.details++
+	release := f.detailRelease
 	item, ok := f.tv[tmdbID]
+	f.mu.Unlock()
+	if release != nil {
+		<-release
+	}
 	if !ok {
 		return tmdb.Media{}, media.ErrMetadataUnavailable
 	}
@@ -693,6 +816,25 @@ func (f *fakeMediaMetadataClient) searchCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.search
+}
+
+func waitForMediaHTTPDetailCalls(t *testing.T, fake *fakeMediaMetadataClient, min int) {
+	t.Helper()
+	if waitForMediaHTTPDetailCallsWithin(fake, min, 2*time.Second) {
+		return
+	}
+	t.Fatalf("metadata detail calls=%d, want at least %d", fake.detailCalls(), min)
+}
+
+func waitForMediaHTTPDetailCallsWithin(fake *fakeMediaMetadataClient, min int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fake.detailCalls() >= min {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fake.detailCalls() >= min
 }
 
 func newMediaHTTPDeps(st *store.Store, tmdbClient media.MetadataClient) APIDeps {
@@ -856,11 +998,16 @@ func seedMediaHTTPTarget(t *testing.T, st *store.Store, deps mediaHTTPTargetDeps
 
 func postMediaRequest(t *testing.T, deps APIDeps, user auth.UserContext, body string) media.RequestDTO {
 	t.Helper()
+	return postMediaRequestExpectStatus(t, deps, user, body, http.StatusCreated)
+}
+
+func postMediaRequestExpectStatus(t *testing.T, deps APIDeps, user auth.UserContext, body string, wantStatus int) media.RequestDTO {
+	t.Helper()
 	rec := doReqAs(t, http.MethodPost, "/api/me/discovery/requests", body, user, func(r chi.Router) {
 		deps.MountMedia(r)
 	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create request status=%d body=%s, want 201", rec.Code, rec.Body.String())
+	if rec.Code != wantStatus {
+		t.Fatalf("create request status=%d body=%s, want %d", rec.Code, rec.Body.String(), wantStatus)
 	}
 	assertNoStore(t, rec)
 	var got media.RequestDTO

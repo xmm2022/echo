@@ -151,6 +151,63 @@ func TestListUserSubscriptionsProjectsLatestSafeState(t *testing.T) {
 	}
 }
 
+func TestListUserSubscriptionsFiltersLatestMatchBySeason(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSubscriptionFixture(t)
+	u1Season, u1Key, err := ValidateSeasonFilterForMedia("tv", "[1]")
+	if err != nil {
+		t.Fatalf("normalize u1 season filter: %v", err)
+	}
+	u2Season, u2Key, err := ValidateSeasonFilterForMedia("tv", "[2]")
+	if err != nil {
+		t.Fatalf("normalize u2 season filter: %v", err)
+	}
+	if _, err := fixture.st.DB.ExecContext(ctx, `
+UPDATE user_media_subscriptions
+SET season_filter_json = ?, season_filter_key = ?
+WHERE id = ?`, u1Season, u1Key, fixture.userSubscription.ID); err != nil {
+		t.Fatalf("update u1 season filter: %v", err)
+	}
+	u2Sub, err := fixture.st.UpsertUserMediaSubscription(ctx, queries.UpsertUserMediaSubscriptionParams{
+		EchoUserID:              "u2",
+		RequestID:               sql.NullInt64{},
+		DiscoverySubscriptionID: fixture.subscription.ID,
+		TmdbID:                  fixture.subscription.TmdbID,
+		MediaType:               fixture.subscription.MediaType,
+		SeasonFilterJson:        sql.NullString{String: u2Season, Valid: true},
+		SeasonFilterKey:         u2Key,
+		Status:                  "active",
+		CreatedAt:               mediaTestNow,
+		UpdatedAt:               mediaTestNow + 1,
+	})
+	if err != nil {
+		t.Fatalf("create u2 user subscription: %v", err)
+	}
+	seedSensitiveSubscriptionMatchForSeason(t, fixture.st, fixture.subscription.ID, fixture.deps.RuleProfileID, 2, "season-2-latest", 200)
+
+	u1Rows, err := fixture.svc.ListSubscriptions(ctx, mediaActor("u1"), 10, 0)
+	if err != nil {
+		t.Fatalf("ListSubscriptions u1 returned error: %v", err)
+	}
+	if len(u1Rows) != 1 {
+		t.Fatalf("len(u1Rows) = %d, want 1", len(u1Rows))
+	}
+	if u1Rows[0].LatestState != "pending" {
+		t.Fatalf("u1 latest state = %q, want pending when only season 2 matched", u1Rows[0].LatestState)
+	}
+
+	u2Rows, err := fixture.svc.ListSubscriptions(ctx, mediaActor("u2"), 10, 0)
+	if err != nil {
+		t.Fatalf("ListSubscriptions u2 returned error: %v", err)
+	}
+	if len(u2Rows) != 1 || u2Rows[0].ID != u2Sub.ID {
+		t.Fatalf("u2 rows = %+v, want subscription %d", u2Rows, u2Sub.ID)
+	}
+	if u2Rows[0].LatestState != "failed" {
+		t.Fatalf("u2 latest state = %q, want failed for season 2 match", u2Rows[0].LatestState)
+	}
+}
+
 func TestListUserSubscriptionsDoesNotExposeRawDiscoveryFields(t *testing.T) {
 	ctx := context.Background()
 	fixture := newSubscriptionFixture(t)
@@ -277,6 +334,30 @@ func seedSensitiveSubscriptionMatch(
 	externalKey string,
 	updatedAt int64,
 ) queries.SubscriptionMatch {
+	return seedSensitiveSubscriptionMatchWithSeason(t, st, subscriptionID, ruleProfileID, sql.NullInt64{}, externalKey, updatedAt)
+}
+
+func seedSensitiveSubscriptionMatchForSeason(
+	t *testing.T,
+	st *store.Store,
+	subscriptionID,
+	ruleProfileID,
+	seasonNumber int64,
+	externalKey string,
+	updatedAt int64,
+) queries.SubscriptionMatch {
+	return seedSensitiveSubscriptionMatchWithSeason(t, st, subscriptionID, ruleProfileID, sql.NullInt64{Int64: seasonNumber, Valid: true}, externalKey, updatedAt)
+}
+
+func seedSensitiveSubscriptionMatchWithSeason(
+	t *testing.T,
+	st *store.Store,
+	subscriptionID,
+	ruleProfileID int64,
+	seasonNumber sql.NullInt64,
+	externalKey string,
+	updatedAt int64,
+) queries.SubscriptionMatch {
 	t.Helper()
 	ctx := context.Background()
 	source, err := st.CreateDiscoverySource(ctx, queries.CreateDiscoverySourceParams{
@@ -301,7 +382,7 @@ func seedSensitiveSubscriptionMatch(
 		TmdbID:           sql.NullString{String: "777", Valid: true},
 		MediaType:        sql.NullString{String: "tv", Valid: true},
 		Title:            sql.NullString{String: "Projected Show", Valid: true},
-		SeasonNumber:     sql.NullInt64{},
+		SeasonNumber:     seasonNumber,
 		EpisodeStart:     sql.NullInt64{},
 		EpisodeEnd:       sql.NullInt64{},
 		ShareCode:        sql.NullString{String: "secret-share", Valid: true},
@@ -323,7 +404,7 @@ func seedSensitiveSubscriptionMatch(
 		ResourceID:         resource.ID,
 		RuleProfileID:      ruleProfileID,
 		RuleProfileVersion: 1,
-		SeasonNumber:       sql.NullInt64{},
+		SeasonNumber:       seasonNumber,
 		EpisodeStart:       sql.NullInt64{},
 		EpisodeEnd:         sql.NullInt64{},
 		ScoreJson:          `{"score":1}`,

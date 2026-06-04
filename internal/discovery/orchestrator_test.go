@@ -411,6 +411,81 @@ WHERE id = ?`, fixture.SubscriptionID).Scan(&lockedUntil, &nextCheckAt); err != 
 	}
 }
 
+func TestRunSubscriptionCheckHonorsAdminReviewMatchMode(t *testing.T) {
+	st := openDiscoveryTestStore(t)
+	ds := NewStore(st)
+	fixture := seedDiscoveryFixture(t, st)
+	seedAcceptingDiscoveryRule(t, st, fixture.RuleProfileID)
+	seedAcceptingDiscoveredResourceTitle(t, st, fixture.ResourceID)
+	if _, err := st.DB.ExecContext(context.Background(), `
+UPDATE discovery_subscriptions
+SET match_mode = 'admin_review'
+WHERE id = ?`, fixture.SubscriptionID); err != nil {
+		t.Fatal(err)
+	}
+
+	orch := NewOrchestrator(Deps{
+		Store: ds,
+		Now:   func() time.Time { return time.Unix(100, 0) },
+	})
+	if err := orch.RunSubscriptionCheck(context.Background(), SubscriptionCheckPayload{SubscriptionID: fixture.SubscriptionID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var decision, reason string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT decision, reason
+FROM subscription_matches
+WHERE subscription_id = ? AND resource_id = ?`, fixture.SubscriptionID, fixture.ResourceID).Scan(&decision, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if decision != "review" || reason != "admin_review" {
+		t.Fatalf("match decision/reason = %q/%q, want review/admin_review", decision, reason)
+	}
+	dispatchable, err := st.ListDueDiscoveryDispatchMatches(context.Background(), storeq.ListDueDiscoveryDispatchMatchesParams{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatchable) != 0 {
+		t.Fatalf("dispatchable matches = %v, want none for admin_review", dispatchable)
+	}
+}
+
+func TestRunSubscriptionCheckAutoDispatchModeKeepsAcceptDecision(t *testing.T) {
+	st := openDiscoveryTestStore(t)
+	ds := NewStore(st)
+	fixture := seedDiscoveryFixture(t, st)
+	seedAcceptingDiscoveryRule(t, st, fixture.RuleProfileID)
+	seedAcceptingDiscoveredResourceTitle(t, st, fixture.ResourceID)
+
+	orch := NewOrchestrator(Deps{
+		Store: ds,
+		Now:   func() time.Time { return time.Unix(100, 0) },
+	})
+	if err := orch.RunSubscriptionCheck(context.Background(), SubscriptionCheckPayload{SubscriptionID: fixture.SubscriptionID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var matchID int64
+	var decision string
+	if err := st.DB.QueryRowContext(context.Background(), `
+SELECT id, decision
+FROM subscription_matches
+WHERE subscription_id = ? AND resource_id = ?`, fixture.SubscriptionID, fixture.ResourceID).Scan(&matchID, &decision); err != nil {
+		t.Fatal(err)
+	}
+	if decision != "accept" {
+		t.Fatalf("match decision = %q, want accept", decision)
+	}
+	dispatchable, err := st.ListDueDiscoveryDispatchMatches(context.Background(), storeq.ListDueDiscoveryDispatchMatchesParams{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatchable) != 1 || dispatchable[0] != matchID {
+		t.Fatalf("dispatchable matches = %v, want [%d]", dispatchable, matchID)
+	}
+}
+
 func TestRunSubscriptionCheckMarksUnsupportedCandidateStatus(t *testing.T) {
 	st := openDiscoveryTestStore(t)
 	ds := NewStore(st)

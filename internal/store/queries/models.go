@@ -227,6 +227,7 @@ type DiscoverySubscription struct {
 	LastErrorMessage     sql.NullString `json:"last_error_message"`
 	CreatedAt            int64          `json:"created_at"`
 	UpdatedAt            int64          `json:"updated_at"`
+	MatchMode            string         `json:"match_mode"`
 }
 
 type DiscoverySubscriptionRequest struct {

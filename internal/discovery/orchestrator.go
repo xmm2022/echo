@@ -206,6 +206,9 @@ func (o *Orchestrator) RunSubscriptionCheck(ctx context.Context, payload Subscri
 			if err := o.deps.Store.MarkDiscoveredResourceStatus(ctx, candidate.ID, "unsupported_provider", now); err != nil {
 				return o.failSubscriptionCheck(ctx, runID, payload.SubscriptionID, err)
 			}
+		} else if bundle.MatchMode == "admin_review" && (matchDecision == "accept" || matchDecision == "queue") {
+			matchDecision = "review"
+			reason = "admin_review"
 		}
 		if _, err := o.deps.Store.CreateOrGetMatch(ctx, AcceptMatchParams{
 			SubscriptionID:     bundle.SubscriptionID,

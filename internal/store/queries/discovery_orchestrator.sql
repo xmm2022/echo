@@ -6,6 +6,7 @@ SELECT
   s.library_id,
   s.producer_profile_id,
   s.rule_profile_id,
+  s.match_mode,
   rp.version AS rule_profile_version,
   rp.rules_json AS rule_profile_json
 FROM discovery_subscriptions s
