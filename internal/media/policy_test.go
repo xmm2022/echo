@@ -1,0 +1,86 @@
+package media
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func TestResolvePolicyFailsClosedWithoutEnabledPolicy(t *testing.T) {
+	st := openMediaTestStore(t)
+	svc := Service{Store: st}
+
+	_, err := svc.ResolvePolicy(context.Background(), "u1")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ResolvePolicy error = %v, want %v", err, ErrPolicyDenied)
+	}
+}
+
+func TestResolvePolicyHigherPriorityWins(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	createMediaPolicy(t, st, "default allow", "", 1, 10, "auto_approve", 1)
+	createMediaPolicy(t, st, "default disabled", "", 0, 20, "auto_approve", 1)
+	svc := Service{Store: st}
+
+	_, err := svc.ResolvePolicy(context.Background(), "u1")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ResolvePolicy error = %v, want %v", err, ErrPolicyDenied)
+	}
+}
+
+func TestResolvePolicyPrefersUserPolicyOverDefaultAtSamePriority(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	createMediaPolicy(t, st, "default policy", "", 1, 100, "approval_required", 1)
+	userPolicy := createMediaPolicy(t, st, "u1 policy", "u1", 1, 100, "auto_approve", 1)
+	svc := Service{Store: st}
+
+	got, err := svc.ResolvePolicy(context.Background(), "u1")
+	if err != nil {
+		t.Fatalf("ResolvePolicy returned error: %v", err)
+	}
+	if got.ID != userPolicy.ID {
+		t.Fatalf("ResolvePolicy ID = %d, want user policy %d", got.ID, userPolicy.ID)
+	}
+}
+
+func TestResolvePolicyRejectsSearchWhenCanSearchFalse(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	createMediaPolicy(t, st, "no search", "", 1, 100, "auto_approve", 0)
+	svc := Service{Store: st}
+
+	err := svc.SearchAllowed(context.Background(), "u1")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("SearchAllowed error = %v, want %v", err, ErrPolicyDenied)
+	}
+}
+
+func TestResolveTargetRejectsDisabledOrWrongMediaType(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	policy := createMediaPolicy(t, st, "default allow", "", 1, 100, "auto_approve", 1)
+	otherPolicy := createMediaPolicy(t, st, "other allow", "u1", 1, 90, "auto_approve", 1)
+	deps := seedMediaTargetDeps(t, st)
+	disabledTarget := createMediaTarget(t, st, deps, policy.ID, "disabled tv", "tv", 0)
+	movieTarget := createMediaTarget(t, st, deps, policy.ID, "movie only", "movie", 1)
+	otherTarget := createMediaTarget(t, st, deps, otherPolicy.ID, "other policy", "tv", 1)
+	svc := Service{Store: st}
+
+	for _, tc := range []struct {
+		name     string
+		targetID int64
+	}{
+		{name: "disabled", targetID: disabledTarget.ID},
+		{name: "wrong media type", targetID: movieTarget.ID},
+		{name: "policy mismatch", targetID: otherTarget.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.ResolveTarget(context.Background(), policy, tc.targetID, "tv")
+			if !errors.Is(err, ErrPolicyDenied) {
+				t.Fatalf("ResolveTarget error = %v, want %v", err, ErrPolicyDenied)
+			}
+		})
+	}
+}
