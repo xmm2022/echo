@@ -154,3 +154,212 @@ func TestGetHashConflict(t *testing.T) {
 		t.Fatalf("get missing conflict err = %v, want sql.ErrNoRows", err)
 	}
 }
+
+func TestProjectUserMediaSubscriptionStatusListsLatestSafeMatch(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	q := st.Queries
+
+	seed := seedDiscoveryDispatchTest(t, ctx, q)
+	subscription, err := q.GetDiscoverySubscription(ctx, queries.GetDiscoverySubscriptionParams{ID: seed.SubscriptionID})
+	if err != nil {
+		t.Fatalf("get seeded subscription: %v", err)
+	}
+	secondSubscription, err := q.CreateDiscoverySubscription(ctx, queries.CreateDiscoverySubscriptionParams{
+		OwnerID:           "admin",
+		TmdbID:            "456",
+		MediaType:         "movie",
+		TmdbLanguage:      "zh-CN",
+		TitleSnapshot:     "Second Movie",
+		LibraryID:         subscription.LibraryID,
+		ProducerProfileID: subscription.ProducerProfileID,
+		RuleProfileID:     subscription.RuleProfileID,
+		Status:            "active",
+		SeasonFilterJson:  sql.NullString{},
+		NextCheckAt:       sql.NullInt64{},
+		CreatedAt:         2,
+		UpdatedAt:         2,
+	})
+	if err != nil {
+		t.Fatalf("create second subscription: %v", err)
+	}
+
+	firstUserSub, err := q.UpsertUserMediaSubscription(ctx, queries.UpsertUserMediaSubscriptionParams{
+		EchoUserID:              "admin",
+		RequestID:               sql.NullInt64{},
+		DiscoverySubscriptionID: subscription.ID,
+		TmdbID:                  subscription.TmdbID,
+		MediaType:               subscription.MediaType,
+		SeasonFilterJson:        sql.NullString{},
+		SeasonFilterKey:         "all",
+		Status:                  "active",
+		CreatedAt:               10,
+		UpdatedAt:               30,
+	})
+	if err != nil {
+		t.Fatalf("upsert first user media subscription: %v", err)
+	}
+	secondUserSub, err := q.UpsertUserMediaSubscription(ctx, queries.UpsertUserMediaSubscriptionParams{
+		EchoUserID:              "admin",
+		RequestID:               sql.NullInt64{},
+		DiscoverySubscriptionID: secondSubscription.ID,
+		TmdbID:                  secondSubscription.TmdbID,
+		MediaType:               secondSubscription.MediaType,
+		SeasonFilterJson:        sql.NullString{},
+		SeasonFilterKey:         "all",
+		Status:                  "active",
+		CreatedAt:               20,
+		UpdatedAt:               20,
+	})
+	if err != nil {
+		t.Fatalf("upsert second user media subscription: %v", err)
+	}
+
+	createProjectionSubscriptionMatch(t, ctx, q, seed.SourceID, subscription.ID, seed.RuleProfileID, "older", 10)
+	newer := createProjectionSubscriptionMatch(t, ctx, q, seed.SourceID, subscription.ID, seed.RuleProfileID, "newer", 40)
+
+	blob := createBlob(t, ctx, q, 4096)
+	entry, err := q.UpsertLibraryEntry(ctx, queries.UpsertLibraryEntryParams{
+		LibraryID:   subscription.LibraryID,
+		RelPath:     "projection/movie.mkv",
+		Name:        "movie.mkv",
+		BlobID:      blob.ID,
+		EchoWritten: 1,
+		CreatedAt:   41,
+		UpdatedAt:   41,
+	})
+	if err != nil {
+		t.Fatalf("create result library entry: %v", err)
+	}
+	copyRow, err := q.InsertFileCopy(ctx, queries.InsertFileCopyParams{
+		BlobID:       blob.ID,
+		Provider:     "115",
+		AccountID:    "dispatch-115",
+		SidecarID:    "default",
+		StorageMount: "/dispatch-115",
+		RemotePath:   "/projection/movie.mkv",
+		Status:       "live",
+		LastSeen:     41,
+	})
+	if err != nil {
+		t.Fatalf("create result file copy: %v", err)
+	}
+	if err := q.UpdateSubscriptionMatchResult(ctx, queries.UpdateSubscriptionMatchResultParams{
+		Decision:             "imported",
+		DispatchState:        "succeeded",
+		ResultLibraryEntryID: sql.NullInt64{Int64: entry.ID, Valid: true},
+		ResultBlobID:         sql.NullInt64{Int64: blob.ID, Valid: true},
+		ResultCopyID:         sql.NullInt64{Int64: copyRow.ID, Valid: true},
+		FailureKind:          sql.NullString{},
+		FailureMessage:       sql.NullString{},
+		UpdatedAt:            50,
+		FinishedAt:           sql.NullInt64{Int64: 45, Valid: true},
+		ID:                   newer.ID,
+	}); err != nil {
+		t.Fatalf("mark latest match imported: %v", err)
+	}
+
+	rows, err := q.ProjectUserMediaSubscriptionStatus(ctx, queries.ProjectUserMediaSubscriptionStatusParams{
+		EchoUserID: "admin",
+		Limit:      10,
+		Offset:     0,
+	})
+	if err != nil {
+		t.Fatalf("project user media subscription status: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2", len(rows))
+	}
+	if rows[0].UserMediaSubscriptionID != firstUserSub.ID || rows[1].UserMediaSubscriptionID != secondUserSub.ID {
+		t.Fatalf("rows order = [%d,%d], want updated_at desc [%d,%d]",
+			rows[0].UserMediaSubscriptionID, rows[1].UserMediaSubscriptionID, firstUserSub.ID, secondUserSub.ID)
+	}
+	if !rows[0].MatchID.Valid || rows[0].MatchID.Int64 != newer.ID {
+		t.Fatalf("latest match id = %+v, want %d", rows[0].MatchID, newer.ID)
+	}
+	if !rows[0].MatchDecision.Valid || rows[0].MatchDecision.String != "imported" {
+		t.Fatalf("match decision = %+v, want imported", rows[0].MatchDecision)
+	}
+	if !rows[0].MatchDispatchState.Valid || rows[0].MatchDispatchState.String != "succeeded" {
+		t.Fatalf("match dispatch state = %+v, want succeeded", rows[0].MatchDispatchState)
+	}
+	if !rows[0].MatchResultLibraryEntryID.Valid || rows[0].MatchResultLibraryEntryID.Int64 != entry.ID {
+		t.Fatalf("match result entry id = %+v, want %d", rows[0].MatchResultLibraryEntryID, entry.ID)
+	}
+	if !rows[0].MatchResultBlobID.Valid || rows[0].MatchResultBlobID.Int64 != blob.ID {
+		t.Fatalf("match result blob id = %+v, want %d", rows[0].MatchResultBlobID, blob.ID)
+	}
+	if !rows[0].MatchResultCopyID.Valid || rows[0].MatchResultCopyID.Int64 != copyRow.ID {
+		t.Fatalf("match result copy id = %+v, want %d", rows[0].MatchResultCopyID, copyRow.ID)
+	}
+	if !rows[0].MatchFinishedAt.Valid || rows[0].MatchFinishedAt.Int64 != 45 {
+		t.Fatalf("match finished_at = %+v, want 45", rows[0].MatchFinishedAt)
+	}
+	if !rows[0].MatchUpdatedAt.Valid || rows[0].MatchUpdatedAt.Int64 != 50 {
+		t.Fatalf("match updated_at = %+v, want 50", rows[0].MatchUpdatedAt)
+	}
+	if rows[1].MatchID.Valid {
+		t.Fatalf("second subscription match id = %+v, want NULL from left join", rows[1].MatchID)
+	}
+}
+
+func createProjectionSubscriptionMatch(
+	t *testing.T,
+	ctx context.Context,
+	q *queries.Queries,
+	sourceID int64,
+	subscriptionID int64,
+	ruleProfileID int64,
+	externalKey string,
+	updatedAt int64,
+) queries.SubscriptionMatch {
+	t.Helper()
+
+	resource, err := q.UpsertDiscoveredResource(ctx, queries.UpsertDiscoveredResourceParams{
+		SourceID:         sourceID,
+		Provider:         "115",
+		LinkKind:         "115_share",
+		ExternalKey:      "projection-" + externalKey,
+		TmdbID:           sql.NullString{String: "123", Valid: true},
+		MediaType:        sql.NullString{String: "movie", Valid: true},
+		Title:            sql.NullString{String: "Movie", Valid: true},
+		SeasonNumber:     sql.NullInt64{},
+		EpisodeStart:     sql.NullInt64{},
+		EpisodeEnd:       sql.NullInt64{},
+		ShareCode:        sql.NullString{String: "secret-share", Valid: true},
+		ReceiveCode:      sql.NullString{String: "secret-receive", Valid: true},
+		ShareUrlRedacted: sql.NullString{String: "https://115.example/s/redacted", Valid: true},
+		RawTextRedacted:  sql.NullString{String: "redacted", Valid: true},
+		RawTextRef:       sql.NullString{String: "raw-ref-secret", Valid: true},
+		ParsedJson:       "{}",
+		FeatureJson:      "{}",
+		Status:           "accepted",
+		FirstSeenAt:      updatedAt,
+		LastSeenAt:       updatedAt,
+	})
+	if err != nil {
+		t.Fatalf("upsert projection resource %s: %v", externalKey, err)
+	}
+	match, err := q.CreateSubscriptionMatch(ctx, queries.CreateSubscriptionMatchParams{
+		SubscriptionID:     subscriptionID,
+		ResourceID:         resource.ID,
+		RuleProfileID:      ruleProfileID,
+		RuleProfileVersion: 1,
+		SeasonNumber:       sql.NullInt64{},
+		EpisodeStart:       sql.NullInt64{},
+		EpisodeEnd:         sql.NullInt64{},
+		ScoreJson:          "{}",
+		PreviousScoreJson:  sql.NullString{},
+		Decision:           "queue",
+		Reason:             "projection-test",
+		DispatchState:      "queued",
+		IdempotencyKey:     "projection-match-" + externalKey,
+		CreatedAt:          updatedAt,
+		UpdatedAt:          updatedAt,
+		DecidedAt:          sql.NullInt64{Int64: updatedAt, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create projection match %s: %v", externalKey, err)
+	}
+	return match
+}

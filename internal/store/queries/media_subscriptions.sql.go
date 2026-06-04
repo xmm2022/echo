@@ -154,7 +154,7 @@ func (q *Queries) ListUserMediaSubscriptionsForUser(ctx context.Context, arg Lis
 	return items, nil
 }
 
-const projectUserMediaSubscriptionStatus = `-- name: ProjectUserMediaSubscriptionStatus :one
+const projectUserMediaSubscriptionStatus = `-- name: ProjectUserMediaSubscriptionStatus :many
 SELECT
   ums.id AS user_media_subscription_id,
   ums.status AS user_subscription_status,
@@ -166,18 +166,36 @@ SELECT
   ds.title_snapshot AS title_snapshot,
   l.id AS target_library_id,
   l.name AS target_library_name,
+  lm.id AS match_id,
+  lm.decision AS match_decision,
+  lm.dispatch_state AS match_dispatch_state,
+  lm.result_library_entry_id AS match_result_library_entry_id,
+  lm.result_blob_id AS match_result_blob_id,
+  lm.result_copy_id AS match_result_copy_id,
+  lm.failure_kind AS match_failure_kind,
+  lm.finished_at AS match_finished_at,
+  lm.updated_at AS match_updated_at,
   ums.created_at AS created_at,
   ums.updated_at AS updated_at
 FROM user_media_subscriptions AS ums
 JOIN discovery_subscriptions AS ds ON ds.id = ums.discovery_subscription_id
 JOIN libraries AS l ON l.id = ds.library_id
-WHERE ums.id = ?1
-  AND ums.echo_user_id = ?2
+LEFT JOIN subscription_matches AS lm ON lm.id = (
+  SELECT sm.id
+  FROM subscription_matches AS sm
+  WHERE sm.subscription_id = ds.id
+  ORDER BY sm.updated_at DESC, sm.id DESC
+  LIMIT 1
+)
+WHERE ums.echo_user_id = ?1
+ORDER BY ums.updated_at DESC, ums.id DESC
+LIMIT ?3 OFFSET ?2
 `
 
 type ProjectUserMediaSubscriptionStatusParams struct {
-	ID         int64  `json:"id"`
 	EchoUserID string `json:"echo_user_id"`
+	Offset     int64  `json:"offset"`
+	Limit      int64  `json:"limit"`
 }
 
 type ProjectUserMediaSubscriptionStatusRow struct {
@@ -191,28 +209,62 @@ type ProjectUserMediaSubscriptionStatusRow struct {
 	TitleSnapshot               string         `json:"title_snapshot"`
 	TargetLibraryID             int64          `json:"target_library_id"`
 	TargetLibraryName           string         `json:"target_library_name"`
+	MatchID                     sql.NullInt64  `json:"match_id"`
+	MatchDecision               sql.NullString `json:"match_decision"`
+	MatchDispatchState          sql.NullString `json:"match_dispatch_state"`
+	MatchResultLibraryEntryID   sql.NullInt64  `json:"match_result_library_entry_id"`
+	MatchResultBlobID           sql.NullInt64  `json:"match_result_blob_id"`
+	MatchResultCopyID           sql.NullInt64  `json:"match_result_copy_id"`
+	MatchFailureKind            sql.NullString `json:"match_failure_kind"`
+	MatchFinishedAt             sql.NullInt64  `json:"match_finished_at"`
+	MatchUpdatedAt              sql.NullInt64  `json:"match_updated_at"`
 	CreatedAt                   int64          `json:"created_at"`
 	UpdatedAt                   int64          `json:"updated_at"`
 }
 
-func (q *Queries) ProjectUserMediaSubscriptionStatus(ctx context.Context, arg ProjectUserMediaSubscriptionStatusParams) (ProjectUserMediaSubscriptionStatusRow, error) {
-	row := q.db.QueryRowContext(ctx, projectUserMediaSubscriptionStatus, arg.ID, arg.EchoUserID)
-	var i ProjectUserMediaSubscriptionStatusRow
-	err := row.Scan(
-		&i.UserMediaSubscriptionID,
-		&i.UserSubscriptionStatus,
-		&i.TmdbID,
-		&i.MediaType,
-		&i.SeasonFilterJson,
-		&i.DiscoverySubscriptionStatus,
-		&i.TmdbLanguage,
-		&i.TitleSnapshot,
-		&i.TargetLibraryID,
-		&i.TargetLibraryName,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
+func (q *Queries) ProjectUserMediaSubscriptionStatus(ctx context.Context, arg ProjectUserMediaSubscriptionStatusParams) ([]ProjectUserMediaSubscriptionStatusRow, error) {
+	rows, err := q.db.QueryContext(ctx, projectUserMediaSubscriptionStatus, arg.EchoUserID, arg.Offset, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProjectUserMediaSubscriptionStatusRow
+	for rows.Next() {
+		var i ProjectUserMediaSubscriptionStatusRow
+		if err := rows.Scan(
+			&i.UserMediaSubscriptionID,
+			&i.UserSubscriptionStatus,
+			&i.TmdbID,
+			&i.MediaType,
+			&i.SeasonFilterJson,
+			&i.DiscoverySubscriptionStatus,
+			&i.TmdbLanguage,
+			&i.TitleSnapshot,
+			&i.TargetLibraryID,
+			&i.TargetLibraryName,
+			&i.MatchID,
+			&i.MatchDecision,
+			&i.MatchDispatchState,
+			&i.MatchResultLibraryEntryID,
+			&i.MatchResultBlobID,
+			&i.MatchResultCopyID,
+			&i.MatchFailureKind,
+			&i.MatchFinishedAt,
+			&i.MatchUpdatedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateUserMediaSubscriptionStatus = `-- name: UpdateUserMediaSubscriptionStatus :one

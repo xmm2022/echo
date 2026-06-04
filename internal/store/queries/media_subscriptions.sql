@@ -64,7 +64,7 @@ WHERE id = sqlc.arg(id)
   AND echo_user_id = sqlc.arg(echo_user_id)
 RETURNING *;
 
--- name: ProjectUserMediaSubscriptionStatus :one
+-- name: ProjectUserMediaSubscriptionStatus :many
 SELECT
   ums.id AS user_media_subscription_id,
   ums.status AS user_subscription_status,
@@ -76,10 +76,27 @@ SELECT
   ds.title_snapshot AS title_snapshot,
   l.id AS target_library_id,
   l.name AS target_library_name,
+  lm.id AS match_id,
+  lm.decision AS match_decision,
+  lm.dispatch_state AS match_dispatch_state,
+  lm.result_library_entry_id AS match_result_library_entry_id,
+  lm.result_blob_id AS match_result_blob_id,
+  lm.result_copy_id AS match_result_copy_id,
+  lm.failure_kind AS match_failure_kind,
+  lm.finished_at AS match_finished_at,
+  lm.updated_at AS match_updated_at,
   ums.created_at AS created_at,
   ums.updated_at AS updated_at
 FROM user_media_subscriptions AS ums
 JOIN discovery_subscriptions AS ds ON ds.id = ums.discovery_subscription_id
 JOIN libraries AS l ON l.id = ds.library_id
-WHERE ums.id = sqlc.arg(id)
-  AND ums.echo_user_id = sqlc.arg(echo_user_id);
+LEFT JOIN subscription_matches AS lm ON lm.id = (
+  SELECT sm.id
+  FROM subscription_matches AS sm
+  WHERE sm.subscription_id = ds.id
+  ORDER BY sm.updated_at DESC, sm.id DESC
+  LIMIT 1
+)
+WHERE ums.echo_user_id = sqlc.arg(echo_user_id)
+ORDER BY ums.updated_at DESC, ums.id DESC
+LIMIT sqlc.arg(limit) OFFSET sqlc.arg(offset);
