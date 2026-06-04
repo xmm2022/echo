@@ -315,6 +315,48 @@ func TestDiscoveryAdminPolicyCRUDUsesAdminBoundary(t *testing.T) {
 	}
 }
 
+func TestDiscoveryAdminPolicyAndTargetRejectTrailingJSON(t *testing.T) {
+	st := newAPIStore(t)
+	deps := discoveryStoreDeps(st)
+	fixture := seedDiscoveryAPIFixture(t, st)
+	admin := auth.UserContext{UserID: "admin", Scopes: []string{"admin"}}
+
+	policyBody := `{"name":"Trailing Policy","enabled":true,"priority":10,"subject_user_id":null,"request_mode":"approval_required","can_search":true,"max_pending_requests":null,"max_active_subscriptions":null,"request_cooldown_seconds":null}{"extra":true}`
+	rec := doReqAs(t, http.MethodPost, "/api/discovery/access-policies", policyBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("trailing policy json status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid request body") {
+		t.Fatalf("trailing policy json body=%s, want invalid request body", rec.Body.String())
+	}
+
+	policy, err := st.CreateDiscoveryAccessPolicy(context.Background(), queries.CreateDiscoveryAccessPolicyParams{
+		Name:        "Target Policy",
+		Enabled:     1,
+		Priority:    10,
+		RequestMode: "approval_required",
+		CanSearch:   1,
+		CreatedBy:   sql.NullString{String: "admin", Valid: true},
+		CreatedAt:   1000,
+		UpdatedAt:   1000,
+	})
+	if err != nil {
+		t.Fatalf("create target policy: %v", err)
+	}
+	targetBody := `{"label":"Trailing Target","library_id":` + itoa(fixture.libraryID) + `,"producer_profile_id":` + itoa(fixture.producerProfileID) + `,"rule_profile_id":` + itoa(fixture.ruleProfileID) + `,"pipeline_owner_id":"admin","media_type":"movie","match_mode":"admin_review","grant_playback_on_approval":true,"enabled":true,"default_target":true}{"extra":true}`
+	rec = doReqAs(t, http.MethodPost, "/api/discovery/access-policies/"+itoa(policy.ID)+"/targets", targetBody, admin, func(r chi.Router) {
+		deps.MountDiscovery(r)
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("trailing target json status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid request body") {
+		t.Fatalf("trailing target json body=%s, want invalid request body", rec.Body.String())
+	}
+}
+
 func TestDiscoveryAdminApproveCreatesCanonicalSubscription(t *testing.T) {
 	st, deps, fake, target := newMediaHTTPCreateFixture(t, "u1", "approval_required")
 	fake.movies["800"] = tmdb.Media{

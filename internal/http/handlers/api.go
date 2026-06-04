@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -129,6 +130,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return false
 	}
