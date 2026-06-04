@@ -16,6 +16,25 @@ func TestResolvePolicyFailsClosedWithoutEnabledPolicy(t *testing.T) {
 	}
 }
 
+func TestResolvePolicyFailsClosedWithoutStore(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		svc  *Service
+	}{
+		{name: "nil service", svc: nil},
+		{name: "nil store", svc: &Service{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.svc.ResolvePolicy(ctx, "u1")
+			if !errors.Is(err, ErrPolicyDenied) {
+				t.Fatalf("ResolvePolicy error = %v, want %v", err, ErrPolicyDenied)
+			}
+		})
+	}
+}
+
 func TestResolvePolicyHigherPriorityWins(t *testing.T) {
 	st := openMediaTestStore(t)
 	seedMediaUser(t, st, "u1")
@@ -45,6 +64,18 @@ func TestResolvePolicyPrefersUserPolicyOverDefaultAtSamePriority(t *testing.T) {
 	}
 }
 
+func TestResolvePolicyRejectsDisabledRequestMode(t *testing.T) {
+	st := openMediaTestStore(t)
+	seedMediaUser(t, st, "u1")
+	createMediaPolicy(t, st, "disabled mode", "", 1, 100, "disabled", 1)
+	svc := Service{Store: st}
+
+	_, err := svc.ResolvePolicy(context.Background(), "u1")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ResolvePolicy error = %v, want %v", err, ErrPolicyDenied)
+	}
+}
+
 func TestResolvePolicyRejectsSearchWhenCanSearchFalse(t *testing.T) {
 	st := openMediaTestStore(t)
 	seedMediaUser(t, st, "u1")
@@ -54,6 +85,25 @@ func TestResolvePolicyRejectsSearchWhenCanSearchFalse(t *testing.T) {
 	err := svc.SearchAllowed(context.Background(), "u1")
 	if !errors.Is(err, ErrPolicyDenied) {
 		t.Fatalf("SearchAllowed error = %v, want %v", err, ErrPolicyDenied)
+	}
+}
+
+func TestSearchAllowedFailsClosedWithoutStore(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		svc  *Service
+	}{
+		{name: "nil service", svc: nil},
+		{name: "nil store", svc: &Service{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.svc.SearchAllowed(ctx, "u1")
+			if !errors.Is(err, ErrPolicyDenied) {
+				t.Fatalf("SearchAllowed error = %v, want %v", err, ErrPolicyDenied)
+			}
+		})
 	}
 }
 
@@ -82,5 +132,16 @@ func TestResolveTargetRejectsDisabledOrWrongMediaType(t *testing.T) {
 				t.Fatalf("ResolveTarget error = %v, want %v", err, ErrPolicyDenied)
 			}
 		})
+	}
+}
+
+func TestResolveTargetFailsClosedForMissingTarget(t *testing.T) {
+	st := openMediaTestStore(t)
+	policy := createMediaPolicy(t, st, "default allow", "", 1, 100, "auto_approve", 1)
+	svc := Service{Store: st}
+
+	_, err := svc.ResolveTarget(context.Background(), policy, 999, "tv")
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("ResolveTarget error = %v, want %v", err, ErrPolicyDenied)
 	}
 }

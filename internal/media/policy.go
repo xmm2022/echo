@@ -52,7 +52,7 @@ func (s *Service) ResolveTarget(ctx context.Context, policy queries.DiscoveryAcc
 
 	row, err := s.Store.LoadDiscoveryPolicyTargetBundle(ctx, queries.LoadDiscoveryPolicyTargetBundleParams{ID: targetID})
 	if errors.Is(err, sql.ErrNoRows) {
-		return queries.LoadDiscoveryPolicyTargetBundleRow{}, ErrNotFound
+		return queries.LoadDiscoveryPolicyTargetBundleRow{}, ErrPolicyDenied
 	}
 	if err != nil {
 		return queries.LoadDiscoveryPolicyTargetBundleRow{}, err
