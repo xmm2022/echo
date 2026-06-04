@@ -29,7 +29,7 @@ discovery remains an optional operator gate.
 ### Reproducibility tuple
 
 - Echo version: `v0.1.0`
-- Echo source commit: `TBD-final-release-commit`
+- Echo source commit: release tag target (`v0.1.0`)
 - Echo Docker build arg: `ECHO_VERSION=v0.1.0`
 - Echo Docker image tag: `echo:dev`
 - Echo Docker image id/local digest:
