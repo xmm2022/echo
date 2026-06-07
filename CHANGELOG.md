@@ -7,6 +7,7 @@
 - Added browser username/password login backed by existing Echo users.
 - Added server-side web sessions, HttpOnly session cookies, and CSRF enforcement for cookie-auth mutations.
 - Added bootstrap admin password setup while preserving DB-backed Bearer API tokens for automation.
+- Added a full-path fake browser auth integration gate (`TestBrowserAuthFakeFullPath`) covering admin password bootstrap, login/session, CSRF, and Bearer compatibility.
 - Removed browser localStorage token inputs from the admin and user shells.
 
 ### v0.4 media requests
