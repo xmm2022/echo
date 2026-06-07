@@ -2,6 +2,7 @@ server:
   bind: ":8080"
   read_timeout: 30s
   write_timeout: 60s
+  trust_proxy_headers: false
 
 database:
   path: /data/echo.db
@@ -15,6 +16,10 @@ auth:
   # compatibility only — not a long-term management credential. Manage access
   # via DB-backed API tokens minted through the bootstrap endpoint.
   # admin_token: "${ECHO_ADMIN_TOKEN}"
+  session_cookie_name: echo_session
+  session_ttl: 168h
+  session_touch_interval: 5m
+  secure_cookies: auto
 
 sidecar:
   default:

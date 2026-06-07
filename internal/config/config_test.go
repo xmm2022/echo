@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadPathAppliesEnvAndValidatesRoots(t *testing.T) {
@@ -273,6 +274,158 @@ discovery:
 	}
 }
 
+func TestSessionAuthDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfig(t, path, workdir, secrets)
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.SessionCookieName != "echo_session" {
+		t.Fatalf("session cookie name = %q, want echo_session", cfg.Auth.SessionCookieName)
+	}
+	if cfg.Auth.SessionTTL.Duration != 7*24*time.Hour {
+		t.Fatalf("session ttl = %s, want 168h", cfg.Auth.SessionTTL.Duration)
+	}
+	if cfg.Auth.SessionTouchInterval.Duration != 5*time.Minute {
+		t.Fatalf("session touch interval = %s, want 5m", cfg.Auth.SessionTouchInterval.Duration)
+	}
+	if cfg.Auth.SecureCookies != "auto" {
+		t.Fatalf("secure cookies = %q, want auto", cfg.Auth.SecureCookies)
+	}
+	if cfg.Server.TrustProxyHeaders {
+		t.Fatal("trust_proxy_headers must default false")
+	}
+}
+
+func TestSessionAuthEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+	t.Setenv("ECHO_SERVER_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("ECHO_AUTH_SESSION_COOKIE_NAME", "browser_session")
+	t.Setenv("ECHO_AUTH_SESSION_TTL", "24h")
+	t.Setenv("ECHO_AUTH_SESSION_TOUCH_INTERVAL", "30m")
+	t.Setenv("ECHO_AUTH_SECURE_COOKIES", "always")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfig(t, path, workdir, secrets)
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.TrustProxyHeaders {
+		t.Fatal("trust_proxy_headers = false, want true")
+	}
+	if cfg.Auth.SessionCookieName != "browser_session" {
+		t.Fatalf("session cookie name = %q, want browser_session", cfg.Auth.SessionCookieName)
+	}
+	if cfg.Auth.SessionTTL.Duration != 24*time.Hour {
+		t.Fatalf("session ttl = %s, want 24h", cfg.Auth.SessionTTL.Duration)
+	}
+	if cfg.Auth.SessionTouchInterval.Duration != 30*time.Minute {
+		t.Fatalf("session touch interval = %s, want 30m", cfg.Auth.SessionTouchInterval.Duration)
+	}
+	if cfg.Auth.SecureCookies != "always" {
+		t.Fatalf("secure cookies = %q, want always", cfg.Auth.SecureCookies)
+	}
+}
+
+func TestSessionAuthRejectsInvalidSecureCookieMode(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfigWithAuthSuffix(t, path, workdir, secrets, `
+  secure_cookies: maybe
+`, "")
+
+	_, err := LoadPath(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "auth.secure_cookies") {
+		t.Fatalf("error = %v, want auth.secure_cookies", err)
+	}
+}
+
+func TestSessionAuthRejectsNonPositiveDurations(t *testing.T) {
+	cases := []struct {
+		name      string
+		authExtra string
+		wantErr   string
+	}{
+		{
+			name: "negative session ttl",
+			authExtra: `
+  session_ttl: -1s
+`,
+			wantErr: "auth.session_ttl must be a positive duration",
+		},
+		{
+			name: "negative touch interval",
+			authExtra: `
+  session_touch_interval: -1s
+`,
+			wantErr: "auth.session_touch_interval must be a positive duration",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			workdir := filepath.Join(tmp, "work")
+			secrets := filepath.Join(tmp, "secrets")
+			for _, dir := range []string{workdir, secrets} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+			path := filepath.Join(tmp, "config.yaml")
+			writeConfigWithAuthSuffix(t, path, workdir, secrets, tt.authExtra, "")
+
+			_, err := LoadPath(path)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadPathRejectsRelativeManualImportRoot(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "work")
@@ -458,6 +611,11 @@ func writeConfig(t *testing.T, path, workdir, secrets string) {
 
 func writeConfigWithSuffix(t *testing.T, path, workdir, secrets, suffix string) {
 	t.Helper()
+	writeConfigWithAuthSuffix(t, path, workdir, secrets, "", suffix)
+}
+
+func writeConfigWithAuthSuffix(t *testing.T, path, workdir, secrets, authSuffix, suffix string) {
+	t.Helper()
 	body := fmt.Sprintf(`
 server:
   bind: ":8080"
@@ -468,6 +626,7 @@ database:
 auth:
   admin_token: "${ECHO_ADMIN_TOKEN}"
   bootstrap_admin_token: "${ECHO_BOOTSTRAP_ADMIN_TOKEN}"
+%s
 sidecar:
   default:
     base_url: http://sidecar:5244
@@ -493,7 +652,7 @@ echo_output_defaults:
 log:
   level: info
   format: json
-%s`, filepath.Join(filepath.Dir(workdir), "echo.db"), workdir, secrets, filepath.Join(filepath.Dir(workdir), "output"), suffix)
+%s`, filepath.Join(filepath.Dir(workdir), "echo.db"), authSuffix, workdir, secrets, filepath.Join(filepath.Dir(workdir), "output"), suffix)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

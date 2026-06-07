@@ -131,9 +131,10 @@ type EmbyPathMappingConfig struct {
 }
 
 type ServerConfig struct {
-	Bind         string   `yaml:"bind"`
-	ReadTimeout  Duration `yaml:"read_timeout"`
-	WriteTimeout Duration `yaml:"write_timeout"`
+	Bind              string   `yaml:"bind"`
+	ReadTimeout       Duration `yaml:"read_timeout"`
+	WriteTimeout      Duration `yaml:"write_timeout"`
+	TrustProxyHeaders bool     `yaml:"trust_proxy_headers"`
 }
 
 type DatabaseConfig struct {
@@ -141,8 +142,12 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	AdminToken          string `yaml:"admin_token"`
-	BootstrapAdminToken string `yaml:"bootstrap_admin_token"`
+	AdminToken           string   `yaml:"admin_token"`
+	BootstrapAdminToken  string   `yaml:"bootstrap_admin_token"`
+	SessionCookieName    string   `yaml:"session_cookie_name"`
+	SessionTTL           Duration `yaml:"session_ttl"`
+	SessionTouchInterval Duration `yaml:"session_touch_interval"`
+	SecureCookies        string   `yaml:"secure_cookies"`
 }
 
 type SidecarConfig struct {
@@ -218,6 +223,8 @@ func (c *Config) expandEnv() {
 	c.Database.Path = os.ExpandEnv(c.Database.Path)
 	c.Auth.AdminToken = os.ExpandEnv(c.Auth.AdminToken)
 	c.Auth.BootstrapAdminToken = os.ExpandEnv(c.Auth.BootstrapAdminToken)
+	c.Auth.SessionCookieName = os.ExpandEnv(c.Auth.SessionCookieName)
+	c.Auth.SecureCookies = os.ExpandEnv(c.Auth.SecureCookies)
 	c.Sidecar.Default.BaseURL = os.ExpandEnv(c.Sidecar.Default.BaseURL)
 	c.Sidecar.Default.AuthTokenEnv = os.ExpandEnv(c.Sidecar.Default.AuthTokenEnv)
 	c.Sidecar.Default.MinVersion = os.ExpandEnv(c.Sidecar.Default.MinVersion)
@@ -263,9 +270,20 @@ func (c *Config) applyEnvOverrides() error {
 	if err := setDuration("ECHO_SERVER_WRITE_TIMEOUT", &c.Server.WriteTimeout); err != nil {
 		return err
 	}
+	if err := setBool("ECHO_SERVER_TRUST_PROXY_HEADERS", &c.Server.TrustProxyHeaders); err != nil {
+		return err
+	}
 	setString("ECHO_DATABASE_PATH", &c.Database.Path)
 	setString("ECHO_ADMIN_TOKEN", &c.Auth.AdminToken)
 	setString("ECHO_BOOTSTRAP_ADMIN_TOKEN", &c.Auth.BootstrapAdminToken)
+	setString("ECHO_AUTH_SESSION_COOKIE_NAME", &c.Auth.SessionCookieName)
+	if err := setDuration("ECHO_AUTH_SESSION_TTL", &c.Auth.SessionTTL); err != nil {
+		return err
+	}
+	if err := setDuration("ECHO_AUTH_SESSION_TOUCH_INTERVAL", &c.Auth.SessionTouchInterval); err != nil {
+		return err
+	}
+	setString("ECHO_AUTH_SECURE_COOKIES", &c.Auth.SecureCookies)
 	setString("ECHO_SIDECAR_DEFAULT_BASE_URL", &c.Sidecar.Default.BaseURL)
 	setString("ECHO_SIDECAR_DEFAULT_AUTH_TOKEN_ENV", &c.Sidecar.Default.AuthTokenEnv)
 	setString("ECHO_SIDECAR_DEFAULT_MIN_VERSION", &c.Sidecar.Default.MinVersion)
@@ -333,6 +351,29 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.BootstrapAdminToken == "" {
 		return fieldRequired("auth.bootstrap_admin_token")
+	}
+	if c.Auth.SessionCookieName == "" {
+		c.Auth.SessionCookieName = "echo_session"
+	}
+	if c.Auth.SessionTTL.Duration == 0 {
+		c.Auth.SessionTTL.Duration = 7 * 24 * time.Hour
+	}
+	if c.Auth.SessionTouchInterval.Duration == 0 {
+		c.Auth.SessionTouchInterval.Duration = 5 * time.Minute
+	}
+	if c.Auth.SessionTTL.Duration <= 0 {
+		return fieldPositiveDuration("auth.session_ttl")
+	}
+	if c.Auth.SessionTouchInterval.Duration <= 0 {
+		return fieldPositiveDuration("auth.session_touch_interval")
+	}
+	if c.Auth.SecureCookies == "" {
+		c.Auth.SecureCookies = "auto"
+	}
+	switch c.Auth.SecureCookies {
+	case "auto", "always", "never":
+	default:
+		return fmt.Errorf("auth.secure_cookies must be auto, always, or never, got %q", c.Auth.SecureCookies)
 	}
 
 	sidecar := c.Sidecar.Default
@@ -604,6 +645,19 @@ func setString(env string, dst *string) {
 	if value, ok := os.LookupEnv(env); ok {
 		*dst = value
 	}
+}
+
+func setBool(env string, dst *bool) error {
+	value, ok := os.LookupEnv(env)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a boolean: %w", env, err)
+	}
+	*dst = parsed
+	return nil
 }
 
 func setDuration(env string, dst *Duration) error {
