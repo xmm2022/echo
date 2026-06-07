@@ -12,7 +12,7 @@ templ Login(next string) {
 		<body>
 			<main>
 				<h1>Echo</h1>
-				<form id="login-form" data-next={ next }>
+				<form id="login-form" method="post" action="/api/session/login" data-next={ next }>
 					<p>
 						<label for="login-username">Username</label>
 						<input id="login-username" name="username" type="text" autocomplete="username" required autofocus/>

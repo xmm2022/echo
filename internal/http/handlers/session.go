@@ -225,13 +225,6 @@ func (d APIDeps) SetBootstrapAdminPassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		d.logger().Error("bootstrap password: hash", "err", err)
-		writeAPIError(w, http.StatusInternalServerError, "internal-error")
-		return
-	}
-	now := d.now().Unix()
 	tx, q, err := d.Store.BeginImmediateTx(r.Context())
 	if err != nil {
 		d.logger().Error("bootstrap password: begin tx", "err", err)
@@ -245,6 +238,24 @@ func (d APIDeps) SetBootstrapAdminPassword(w http.ResponseWriter, r *http.Reques
 		}
 	}()
 
+	admin, err := q.GetUser(r.Context(), queries.GetUserParams{ID: "admin"})
+	if err != nil {
+		d.logger().Error("bootstrap password: get admin", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal-error")
+		return
+	}
+	if admin.PasswordHash.Valid {
+		writeAPIError(w, http.StatusConflict, "admin password already initialized")
+		return
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		d.logger().Error("bootstrap password: hash", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal-error")
+		return
+	}
+	now := d.now().Unix()
 	if err := q.UpdateUserPasswordHash(r.Context(), queries.UpdateUserPasswordHashParams{
 		PasswordHash: sql.NullString{String: hash, Valid: true},
 		UpdatedAt:    now,

@@ -73,6 +73,53 @@ func TestBootstrapAdminPasswordSetsHashAndRevokesSessions(t *testing.T) {
 	}
 }
 
+func TestBootstrapAdminPasswordRejectsSecondSetupWithoutSideEffects(t *testing.T) {
+	st := newAPIStore(t)
+	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger(), BootstrapAdminToken: "boot"}
+	setUserPassword(t, st, "admin", "OldPassword123")
+	if err := st.CreateWebSession(context.Background(), queries.CreateWebSessionParams{
+		Selector:   "admin-session",
+		UserID:     "admin",
+		SecretHash: auth.HashToken("secret"),
+		CsrfHash:   auth.HashToken("csrf"),
+		Scopes:     `["admin"]`,
+		CreatedAt:  1,
+		LastSeenAt: 1,
+		ExpiresAt:  9999,
+	}); err != nil {
+		t.Fatalf("create web session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/bootstrap/admin-password", strings.NewReader(`{"password":"NewPassword123"}`))
+	req.Header.Set("Authorization", "Bearer boot")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r := chi.NewRouter()
+	deps.MountBootstrap(r)
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	admin, err := st.GetUser(context.Background(), queries.GetUserParams{ID: "admin"})
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	if !admin.PasswordHash.Valid || !auth.VerifyPassword("OldPassword123", admin.PasswordHash.String) || auth.VerifyPassword("NewPassword123", admin.PasswordHash.String) {
+		t.Fatalf("admin password hash changed on second bootstrap")
+	}
+	if admin.UpdatedAt != 1 {
+		t.Fatalf("admin updated_at=%d, want unchanged 1", admin.UpdatedAt)
+	}
+	session, err := st.GetWebSession(context.Background(), queries.GetWebSessionParams{Selector: "admin-session"})
+	if err != nil {
+		t.Fatalf("get web session: %v", err)
+	}
+	if session.RevokedAt.Valid {
+		t.Fatalf("session was revoked on second bootstrap: %v", session.RevokedAt)
+	}
+}
+
 func TestBootstrapAdminPasswordRejectsWeakOrTrimmedPassword(t *testing.T) {
 	st := newAPIStore(t)
 	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger(), BootstrapAdminToken: "boot"}
@@ -628,7 +675,6 @@ func TestDummyPasswordHashIsValidAndNotAccepted(t *testing.T) {
 func TestBootstrapAdminPasswordTransactionRollbackOnRevokeFailure(t *testing.T) {
 	st := newAPIStore(t)
 	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger(), BootstrapAdminToken: "boot"}
-	setUserPassword(t, st, "admin", "OldPassword123")
 	if err := st.CreateWebSession(context.Background(), queries.CreateWebSessionParams{
 		Selector:   "admin-session",
 		UserID:     "admin",
@@ -666,8 +712,8 @@ END;
 	if err != nil {
 		t.Fatalf("get admin: %v", err)
 	}
-	if !admin.PasswordHash.Valid || !auth.VerifyPassword("OldPassword123", admin.PasswordHash.String) || auth.VerifyPassword("NewPassword123", admin.PasswordHash.String) {
-		t.Fatalf("admin password was not rolled back")
+	if admin.PasswordHash.Valid {
+		t.Fatalf("admin password hash was not rolled back: %v", admin.PasswordHash)
 	}
 	session, err := st.GetWebSession(context.Background(), queries.GetWebSessionParams{Selector: "admin-session"})
 	if err != nil {

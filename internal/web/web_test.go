@@ -107,6 +107,8 @@ func TestLoginRendersFormWithSafeNext(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`id="login-form"`,
+		`method="post"`,
+		`action="/api/session/login"`,
 		`data-next="/app"`,
 		`id="login-username"`,
 		`name="username"`,
