@@ -1,47 +1,97 @@
-// app.js - Echo admin dashboard and user app glue.
+// app.js - Echo admin dashboard and user app session glue.
 (function () {
   "use strict";
-  var ADMIN_KEY = "echo_admin_token";
-  var APP_KEY = "echo_app_token";
 
-  if (window.htmx) {
-    window.htmx.config.allowScriptTags = false;
+  var csrfToken = "";
+
+  disableHTMXScripting();
+
+  function disableHTMXScripting() {
+    if (window.htmx) {
+      var htmx = window.htmx;
+      htmx.config.allowScriptTags = false;
+    }
   }
 
-  function tokenForPath(path) {
-    if (path.indexOf("/static/") === 0) {
-      return "";
-    }
-    if (path.indexOf("/api/me/") === 0 || path.indexOf("/app/") === 0) {
-      return (localStorage.getItem(APP_KEY) || "").trim();
-    }
-    if (path.indexOf("/ui/") === 0 || path.indexOf("/api/") === 0) {
-      return (localStorage.getItem(ADMIN_KEY) || "").trim();
-    }
-    return "";
+  function redirectToLogin() {
+    window.location.href = "/login";
   }
 
-  function sameOriginPath(url) {
+  function refreshSession() {
+    return fetch("/api/session/me", { credentials: "same-origin" })
+      .then(function (resp) {
+        if (resp.status === 401) {
+          redirectToLogin();
+          return null;
+        }
+        if (!resp.ok) {
+          return null;
+        }
+        return resp.json();
+      })
+      .then(function (data) {
+        if (!data || !data.authenticated) {
+          csrfToken = "";
+          return null;
+        }
+        csrfToken = data.csrf_token || "";
+        return data;
+      })
+      .catch(function () {
+        csrfToken = "";
+      });
+  }
+
+  function sameOriginURL(url) {
     if (!url) {
-      return "";
+      return null;
     }
     try {
       var parsed = new URL(url, window.location.origin);
       if (parsed.origin !== window.location.origin) {
-        return "";
+        return null;
       }
-      return parsed.pathname;
+      return parsed;
     } catch (err) {
-      return "";
+      return null;
     }
   }
 
-  // Attach a bearer token only to same-origin htmx requests owned by one shell.
+  function sameOriginPath(url) {
+    var parsed = sameOriginURL(url);
+    return parsed ? parsed.pathname : "";
+  }
+
+  function safeMethod(method) {
+    switch ((method || "GET").toUpperCase()) {
+      case "GET":
+      case "HEAD":
+      case "OPTIONS":
+      case "TRACE":
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  function addCSRFHeader(headers, method, url) {
+    if (!csrfToken || safeMethod(method) || !sameOriginURL(url)) {
+      return;
+    }
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+
   document.addEventListener("htmx:configRequest", function (evt) {
-    var path = sameOriginPath(evt.detail.path);
-    var t = tokenForPath(path);
-    if (t) {
-      evt.detail.headers["Authorization"] = "Bearer " + t;
+    if (!evt.detail.headers) {
+      evt.detail.headers = {};
+    }
+    var method = evt.detail.verb || evt.detail.method || "GET";
+    addCSRFHeader(evt.detail.headers, method, evt.detail.path);
+  });
+
+  document.addEventListener("htmx:responseError", function (evt) {
+    if (evt.detail && evt.detail.xhr && evt.detail.xhr.status === 401) {
+      redirectToLogin();
     }
   });
 
@@ -57,11 +107,10 @@
     });
   }
 
-  // serializeForm turns a v0.2 management form into the typed JSON object its
-  // endpoint decodes (strict JSON, DisallowUnknownFields). Checkboxes coerce to
-  // booleans, number inputs to numbers, everything else to strings. An empty number
-  // input is omitted entirely so optional *int64 body fields decode as JSON null
-  // rather than failing on a "" string.
+  // serializeForm turns management and user forms into the typed JSON object their
+  // endpoints decode. Checkboxes coerce to booleans, number inputs to numbers,
+  // everything else to strings. Empty number inputs are omitted entirely so
+  // optional numeric body fields decode as JSON null.
   function serializeForm(form) {
     var obj = {};
     var fields = form.querySelectorAll("input, select, textarea");
@@ -80,7 +129,6 @@
       if (type === "number" || el.getAttribute("data-type") === "number") {
         var raw = el.value.trim();
         if (raw === "") {
-          // Leave the key unset: optional numeric fields become JSON null.
           continue;
         }
         obj[key] = Number(raw);
@@ -91,10 +139,6 @@
     return obj;
   }
 
-  // managementTarget reads the URL + HTTP method off a form's hx-post / hx-patch
-  // attribute, but only for the /api/ management routes this serializer owns. Any
-  // other form (or a form with no such attribute) returns null so the default htmx
-  // / browser handling is left untouched.
   function managementTarget(form) {
     var url = form.getAttribute("hx-post");
     var method = "POST";
@@ -121,15 +165,32 @@
     return { url: url, path: path, method: "POST" };
   }
 
-  // Intercept submits of the v0.2 management forms in the capture phase, before
-  // htmx's own form handling runs, and resubmit them as typed JSON with the bearer
-  // token. The forms KEEP their hx-post/hx-patch attributes (the Go tests assert
-  // their presence and we read the URL+method from them).
+  function logoutTarget(form) {
+    var url = form.getAttribute("hx-post");
+    if (!url || sameOriginPath(url) !== "/api/session/logout") {
+      return null;
+    }
+    return { url: url, method: "POST" };
+  }
+
   document.addEventListener(
     "submit",
     function (evt) {
       var form = evt.target;
       if (!form || form.tagName !== "FORM") {
+        return;
+      }
+      if (isLoginForm(form)) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        submitLogin(form);
+        return;
+      }
+      var logout = logoutTarget(form);
+      if (logout) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        submitLogout(logout);
         return;
       }
       var userTarget = userMediaTarget(form);
@@ -155,18 +216,122 @@
     true
   );
 
-  function submitJSONForm(form, target, onOK) {
-    var headers = { "Content-Type": "application/json" };
-    var t = tokenForPath(target.path || sameOriginPath(target.url));
-    if (t) {
-      headers["Authorization"] = "Bearer " + t;
-    }
+  function isLoginForm(form) {
+    return form.id === "login-form" || form.getAttribute("id") === "login-form";
+  }
+
+  function submitLogin(form) {
+    setLoginError(false);
+    fetch("/api/session/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(serializeForm(form)),
+    })
+      .then(function (resp) {
+        if (!resp.ok) {
+          throw new Error("login failed");
+        }
+        return resp.json();
+      })
+      .then(function (data) {
+        csrfToken = data.csrf_token || "";
+        var next = safeRelativeNext(form.getAttribute("data-next") || "");
+        if (!next) {
+          next = isAdminUser(data.user) ? "/" : "/app";
+        }
+        window.location.href = next;
+      })
+      .catch(function () {
+        setLoginError(true);
+      });
+  }
+
+  function submitLogout(target) {
+    var headers = {};
+    addCSRFHeader(headers, target.method, target.url);
     fetch(target.url, {
       method: target.method,
+      credentials: "same-origin",
+      headers: headers,
+    })
+      .then(function (resp) {
+        if (resp.status === 401) {
+          redirectToLogin();
+          return;
+        }
+        if (resp.ok) {
+          csrfToken = "";
+          redirectToLogin();
+          return;
+        }
+        return resp.text().then(function (body) {
+          alert("Sign out failed (" + resp.status + "): " + body);
+        });
+      })
+      .catch(function (err) {
+        alert("Sign out failed: " + err);
+      });
+  }
+
+  function setLoginError(visible) {
+    var error = document.getElementById("login-error");
+    if (!error) {
+      return;
+    }
+    error.hidden = !visible;
+    if (visible) {
+      error.textContent = "Sign in failed.";
+    }
+  }
+
+  function safeRelativeNext(next) {
+    next = (next || "").trim();
+    if (
+      !next ||
+      next.charAt(0) !== "/" ||
+      next.indexOf("//") === 0 ||
+      next.indexOf("\\") !== -1 ||
+      next.toLowerCase().indexOf("%5c") !== -1
+    ) {
+      return "";
+    }
+    if (!sameOriginURL(next)) {
+      return "";
+    }
+    return next;
+  }
+
+  function isAdminUser(user) {
+    if (!user) {
+      return false;
+    }
+    if (user.role === "admin") {
+      return true;
+    }
+    var scopes = user.scopes || [];
+    for (var i = 0; i < scopes.length; i++) {
+      if (scopes[i] === "admin") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function submitJSONForm(form, target, onOK) {
+    var headers = { "Content-Type": "application/json" };
+    addCSRFHeader(headers, target.method, target.url);
+    fetch(target.url, {
+      method: target.method,
+      credentials: "same-origin",
       headers: headers,
       body: JSON.stringify(serializeForm(form)),
     })
       .then(function (resp) {
+        if (resp.status === 401) {
+          redirectToLogin();
+          return;
+        }
         if (resp.ok) {
           onOK();
           return;
@@ -190,37 +355,7 @@
       window.htmx.trigger(target, "reload");
       return;
     }
-    location.reload();
-  }
-
-  document.addEventListener("DOMContentLoaded", function () {
-    if (window.htmx) {
-      window.htmx.config.allowScriptTags = false;
-    }
-    bindTokenInput("admin-token", ADMIN_KEY);
-    bindTokenInput("app-token", APP_KEY);
-  });
-
-  function bindTokenInput(id, key) {
-    var input = document.getElementById(id);
-    if (!input) {
-      return;
-    }
-    input.value = localStorage.getItem(key) || "";
-    input.addEventListener("change", function () {
-      localStorage.setItem(key, input.value.trim());
-      reloadPanels();
-    });
-  }
-
-  function reloadPanels() {
-    if (!window.htmx) {
-      return;
-    }
-    var panels = document.querySelectorAll("[data-reload]");
-    for (var i = 0; i < panels.length; i++) {
-      window.htmx.trigger(panels[i], "reload");
-    }
+    window.location.reload();
   }
 
   function reloadAppPanels() {
@@ -234,4 +369,9 @@
       window.htmx.trigger(panels[i], "reload");
     }
   }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    disableHTMXScripting();
+    refreshSession();
+  });
 })();

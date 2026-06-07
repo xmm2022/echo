@@ -228,9 +228,7 @@ func TestPublicRoutesAreOpen(t *testing.T) {
 	cases := map[string]int{
 		"/healthz":            http.StatusOK,
 		"/readyz":             http.StatusServiceUnavailable,
-		"/":                   http.StatusOK,
 		"/login":              http.StatusOK,
-		"/app":                http.StatusOK,
 		"/static/htmx.min.js": http.StatusOK,
 	}
 	for path, want := range cases {
@@ -239,6 +237,21 @@ func TestPublicRoutesAreOpen(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != want {
 			t.Fatalf("%s = %d, want %d (public, no auth)", path, rec.Code, want)
+		}
+	}
+
+	redirects := map[string]string{
+		"/":    "/login?next=/",
+		"/app": "/login?next=/app",
+	}
+	for path, wantLocation := range redirects {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("%s = %d, want 303 (browser shell, no auth)", path, rec.Code)
+		}
+		if got := rec.Header().Get("Location"); got != wantLocation {
+			t.Fatalf("%s Location = %q, want %q", path, got, wantLocation)
 		}
 	}
 }
@@ -295,11 +308,25 @@ func TestAppRoutesUsePublicShellAndAuthenticatedDiscoveryFragments(t *testing.T)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/app", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("/app without token status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("/app without token status=%d body=%s, want 303", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/login?next=/app" {
+		t.Fatalf("/app without token Location=%q, want /login?next=/app", got)
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("/app Cache-Control=%q, want no-store", rec.Header().Get("Cache-Control"))
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/app", nil)
+	req.Header.Set("Authorization", "Bearer discover")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/app discovery token status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("/app discovery Cache-Control=%q, want no-store", rec.Header().Get("Cache-Control"))
 	}
 
 	rec = httptest.NewRecorder()
@@ -309,7 +336,7 @@ func TestAppRoutesUsePublicShellAndAuthenticatedDiscoveryFragments(t *testing.T)
 	}
 
 	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/app/discover", nil)
+	req = httptest.NewRequest(http.MethodGet, "/app/discover", nil)
 	req.Header.Set("Authorization", "Bearer discover")
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

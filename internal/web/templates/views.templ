@@ -7,10 +7,9 @@ import (
 	"github.com/xmm2022/echo/internal/store/queries"
 )
 
-// Index is the public dashboard shell (spec §12: templ + htmx). It carries no
-// data itself — an admin pastes the bearer token into the box, app.js stores it
-// and attaches it to the htmx panel requests (/ui/jobs, /ui/conflicts), which are
-// behind the auth middleware.
+// Index is the admin dashboard shell (spec §12: templ + htmx). It carries no data
+// itself; the browser session loads the htmx panel requests (/ui/jobs,
+// /ui/conflicts), which are behind the auth middleware.
 templ Index() {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -22,12 +21,11 @@ templ Index() {
 			<script src="/static/app.js"></script>
 		</head>
 		<body>
-			<h1>Echo Admin</h1>
+			<header>
+				<h1>Echo Admin</h1>
+				<form hx-post="/api/session/logout" hx-swap="none"><button type="submit">Sign out</button></form>
+			</header>
 			<p>v0.3 discovery — 资源池、Emby playback proxy 与自动订阅管理后台。</p>
-			<p>
-				<label for="admin-token">Admin token</label>
-				<input id="admin-token" type="password" autocomplete="off" placeholder="paste ADMIN_TOKEN"/>
-			</p>
 			<section>
 				<h2>Jobs</h2>
 				<div data-reload="true" hx-get="/ui/jobs" hx-trigger="load, reload" hx-target="this">Loading…</div>

@@ -100,7 +100,7 @@ func HandlerWithDeps(deps Deps) http.Handler {
 	if deps.Web != nil {
 		r.Group(func(r chi.Router) {
 			r.Use(authmw.OptionalAuth(deps.AuthCheck))
-			r.Get("/login", loginShellHandler(deps.Web))
+			r.Get("/login", deps.Web.Login)
 			r.Get("/", deps.Web.Index)
 			r.Get("/app", deps.Web.App)
 			r.Handle("/static/*", web.Static())
@@ -159,17 +159,6 @@ func HandlerWithDeps(deps Deps) http.Handler {
 	})
 
 	return requestLogger(logger, r)
-}
-
-type loginShell interface {
-	Login(http.ResponseWriter, *http.Request)
-}
-
-func loginShellHandler(deps *web.Deps) http.HandlerFunc {
-	if h, ok := any(deps).(loginShell); ok {
-		return h.Login
-	}
-	return deps.Index
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

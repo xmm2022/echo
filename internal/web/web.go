@@ -1,7 +1,6 @@
-// Package web serves Echo's minimal admin dashboard (spec §12: templ + htmx).
-// v0.1 is read-only oversight: list jobs and open hash conflicts, plus a dismiss
-// action. The dashboard shell at "/" is public and data-free; the HTML fragments
-// it loads (/ui/*) and the JSON API are behind the auth middleware.
+// Package web serves Echo's browser shells and htmx fragments. The shells are
+// session-gated and data-free; the fragment and JSON routes remain behind the
+// auth middleware.
 package web
 
 import (
@@ -11,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -49,8 +49,18 @@ func (d Deps) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// Index serves GET / — the public dashboard shell.
+// Index serves GET / — the admin dashboard shell.
 func (d Deps) Index(w http.ResponseWriter, r *http.Request) {
+	setAppHeaders(w)
+	user := auth.FromContext(r.Context())
+	if user.UserID == "" {
+		redirectToLogin(w, r)
+		return
+	}
+	if !user.HasScope("admin") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Index().Render(r.Context(), w); err != nil {
 		d.logger().Error("web: render index", "err", err)
@@ -64,11 +74,60 @@ func setAppHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", appCSP)
 }
 
-// App serves GET /app — the public, data-free user media shell. The shell only
-// contains token storage and htmx panel placeholders; every panel request below
-// still requires an authenticated user with discovery scope.
+// Login serves GET /login — the data-free browser session login shell.
+func (d Deps) Login(w http.ResponseWriter, r *http.Request) {
+	setAppHeaders(w)
+	user := auth.FromContext(r.Context())
+	if user.UserID != "" {
+		if user.HasScope("admin") {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/app", http.StatusSeeOther)
+		return
+	}
+
+	next := safeRelativeNext(r.URL.Query().Get("next"))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.Login(next).Render(r.Context(), w); err != nil {
+		d.logger().Error("web: render login", "err", err)
+	}
+}
+
+func safeRelativeNext(next string) string {
+	next = strings.TrimSpace(next)
+	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, "\\") {
+		return ""
+	}
+	parsed, err := url.Parse(next)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" {
+		return ""
+	}
+	return next
+}
+
+func redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	next := safeRelativeNext(r.URL.RequestURI())
+	if next == "" {
+		next = "/"
+	}
+	escaped := strings.ReplaceAll(url.QueryEscape(next), "%2F", "/")
+	http.Redirect(w, r, "/login?next="+escaped, http.StatusSeeOther)
+}
+
+// App serves GET /app — the user media shell. It is data-free, but only
+// authenticated discovery users may load it and its htmx panels.
 func (d Deps) App(w http.ResponseWriter, r *http.Request) {
 	setAppHeaders(w)
+	user := auth.FromContext(r.Context())
+	if user.UserID == "" {
+		redirectToLogin(w, r)
+		return
+	}
+	if !user.HasScope("discovery") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.AppShell().Render(r.Context(), w); err != nil {
 		d.logger().Error("web: render app shell", "err", err)

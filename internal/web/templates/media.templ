@@ -75,8 +75,7 @@ templ AppShell() {
 		<body>
 			<header>
 				<h1>Echo App</h1>
-				<label for="app-token">Token</label>
-				<input id="app-token" type="password" autocomplete="off" placeholder="Bearer token"/>
+				<form hx-post="/api/session/logout" hx-swap="none"><button type="submit">Sign out</button></form>
 			</header>
 			<main>
 				<section aria-labelledby="media-discover-heading">
