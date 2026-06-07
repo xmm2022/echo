@@ -94,7 +94,7 @@ DB-backed Bearer API token 继续用于 CLI / 自动化并兼容 `/api/*`；Bear
 - Emby 客户端把服务器地址填成 `https://echo.example.com/emby`（本地测试用 `http://localhost:8080/emby`），其余请求透传到上游 Emby。
 - 命中库映射的 PlaybackInfo 源会被改写成 `/emby/stream/{token}` 或 `/emby/error/{token}`，上游 Emby 的真实 stream URL、签名 URL 与鉴权头一律不下发给客户端。
 - `/api/restore/{file_id}` 与 `/api/stream/{file_id}` 仍是 Echo 的管理 / v0.1 兼容 API，**不是** Emby PlaybackInfo 的改写目标，不要把它们填进 Emby。
-- `auth.bootstrap_admin_token` 只用于找回 / 签发 admin token；日常管理请求走 DB 里的 API token，而非这个 bootstrap 凭据。
+- `auth.bootstrap_admin_token` 只用于初始化 admin 浏览器密码（`/api/bootstrap/admin-password`）和找回 / 签发 DB-backed admin API token（`/api/bootstrap/admin-token`）；日常浏览器管理请求走登录后的 cookie session，CLI / 自动化管理请求走 DB 里的 Bearer API token，而非这个 bootstrap 凭据。
 - 上游 Emby API key 通过 `emby_proxy.upstream.api_key_ref` 引用，支持 `env:NAME`（如 `env:EMBY_API_KEY`）或 `ref:relative/path`（相对 `secrets_root` 的常规文件，禁止绝对路径 / `..` / 软链逃逸）。
 
 ### v0.3 Discovery 自动订阅
