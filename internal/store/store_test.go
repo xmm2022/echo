@@ -96,7 +96,7 @@ func TestMigrationUpDownClean(t *testing.T) {
 		"quota_usage", "playback_events", "accounts", "libraries", "blobs", "library_entries",
 		"blob_hashes", "file_copies", "hash_conflicts", "jobs", "producer_runs",
 		"emby_servers", "emby_user_links", "playback_sessions", "playback_error_tokens",
-		"emby_library_mappings", "emby_item_mappings",
+		"emby_library_mappings", "emby_item_mappings", "web_sessions",
 	} {
 		if tableExists(t, db, name) {
 			t.Fatalf("%s table still exists after migrate down", name)

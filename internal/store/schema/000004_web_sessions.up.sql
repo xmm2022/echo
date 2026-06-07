@@ -1,7 +1,7 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE web_sessions (
-  selector       TEXT PRIMARY KEY,
+  selector       TEXT NOT NULL PRIMARY KEY,
   user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   secret_hash    TEXT NOT NULL,
   csrf_hash      TEXT NOT NULL,
