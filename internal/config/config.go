@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -355,6 +356,11 @@ func (c *Config) validate() error {
 	if c.Auth.SessionCookieName == "" {
 		c.Auth.SessionCookieName = "echo_session"
 	}
+	if err := (&http.Cookie{Name: c.Auth.SessionCookieName, Value: "x"}).Valid(); err != nil {
+		return fmt.Errorf("auth.session_cookie_name must be a valid HTTP cookie name: %w", err)
+	}
+	// Zero is the "not configured" sentinel for these optional durations, so
+	// omitted YAML and explicit "0s" both resolve to the runtime defaults.
 	if c.Auth.SessionTTL.Duration == 0 {
 		c.Auth.SessionTTL.Duration = 7 * 24 * time.Hour
 	}

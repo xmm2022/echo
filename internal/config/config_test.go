@@ -310,6 +310,36 @@ func TestSessionAuthDefaults(t *testing.T) {
 	}
 }
 
+func TestSessionAuthZeroDurationsUseDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfigWithAuthSuffix(t, path, workdir, secrets, `
+  session_ttl: 0s
+  session_touch_interval: 0s
+`, "")
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.SessionTTL.Duration != 7*24*time.Hour {
+		t.Fatalf("session ttl = %s, want 168h", cfg.Auth.SessionTTL.Duration)
+	}
+	if cfg.Auth.SessionTouchInterval.Duration != 5*time.Minute {
+		t.Fatalf("session touch interval = %s, want 5m", cfg.Auth.SessionTouchInterval.Duration)
+	}
+}
+
 func TestSessionAuthEnvOverrides(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "work")
@@ -348,6 +378,53 @@ func TestSessionAuthEnvOverrides(t *testing.T) {
 	}
 	if cfg.Auth.SecureCookies != "always" {
 		t.Fatalf("secure cookies = %q, want always", cfg.Auth.SecureCookies)
+	}
+}
+
+func TestSessionAuthRejectsInvalidCookieNames(t *testing.T) {
+	cases := []struct {
+		name       string
+		cookieName string
+	}{
+		{
+			name:       "space",
+			cookieName: "bad name",
+		},
+		{
+			name:       "semicolon",
+			cookieName: "bad;name",
+		},
+		{
+			name:       "control character",
+			cookieName: "bad\x01name",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			workdir := filepath.Join(tmp, "work")
+			secrets := filepath.Join(tmp, "secrets")
+			for _, dir := range []string{workdir, secrets} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+			t.Setenv("ECHO_AUTH_SESSION_COOKIE_NAME", tt.cookieName)
+
+			path := filepath.Join(tmp, "config.yaml")
+			writeConfig(t, path, workdir, secrets)
+
+			_, err := LoadPath(path)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), "auth.session_cookie_name") {
+				t.Fatalf("error = %v, want auth.session_cookie_name", err)
+			}
+		})
 	}
 }
 
@@ -423,6 +500,58 @@ func TestSessionAuthRejectsNonPositiveDurations(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestServerTrustProxyHeadersRejectsInvalidEnvBool(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+	t.Setenv("ECHO_SERVER_TRUST_PROXY_HEADERS", "maybe")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfig(t, path, workdir, secrets)
+
+	_, err := LoadPath(path)
+	if err == nil {
+		t.Fatal("expected env override error")
+	}
+	if !strings.Contains(err.Error(), "ECHO_SERVER_TRUST_PROXY_HEADERS") {
+		t.Fatalf("error = %v, want ECHO_SERVER_TRUST_PROXY_HEADERS", err)
+	}
+}
+
+func TestServerTrustProxyHeadersEnvOverridesConfigFalse(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "work")
+	secrets := filepath.Join(tmp, "secrets")
+	for _, dir := range []string{workdir, secrets} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("ECHO_BOOTSTRAP_ADMIN_TOKEN", "boot")
+	t.Setenv("ECHO_SERVER_TRUST_PROXY_HEADERS", "false")
+
+	path := filepath.Join(tmp, "config.yaml")
+	writeConfigWithServerSuffix(t, path, workdir, secrets, `
+  trust_proxy_headers: true
+`, "")
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.TrustProxyHeaders {
+		t.Fatal("trust_proxy_headers = true, want false from env override")
 	}
 }
 
@@ -611,16 +740,27 @@ func writeConfig(t *testing.T, path, workdir, secrets string) {
 
 func writeConfigWithSuffix(t *testing.T, path, workdir, secrets, suffix string) {
 	t.Helper()
-	writeConfigWithAuthSuffix(t, path, workdir, secrets, "", suffix)
+	writeConfigWithServerAuthSuffix(t, path, workdir, secrets, "", "", suffix)
+}
+
+func writeConfigWithServerSuffix(t *testing.T, path, workdir, secrets, serverSuffix, suffix string) {
+	t.Helper()
+	writeConfigWithServerAuthSuffix(t, path, workdir, secrets, serverSuffix, "", suffix)
 }
 
 func writeConfigWithAuthSuffix(t *testing.T, path, workdir, secrets, authSuffix, suffix string) {
+	t.Helper()
+	writeConfigWithServerAuthSuffix(t, path, workdir, secrets, "", authSuffix, suffix)
+}
+
+func writeConfigWithServerAuthSuffix(t *testing.T, path, workdir, secrets, serverSuffix, authSuffix, suffix string) {
 	t.Helper()
 	body := fmt.Sprintf(`
 server:
   bind: ":8080"
   read_timeout: 30s
   write_timeout: 60s
+%s
 database:
   path: %s
 auth:
@@ -652,7 +792,7 @@ echo_output_defaults:
 log:
   level: info
   format: json
-%s`, filepath.Join(filepath.Dir(workdir), "echo.db"), authSuffix, workdir, secrets, filepath.Join(filepath.Dir(workdir), "output"), suffix)
+%s`, serverSuffix, filepath.Join(filepath.Dir(workdir), "echo.db"), authSuffix, workdir, secrets, filepath.Join(filepath.Dir(workdir), "output"), suffix)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
