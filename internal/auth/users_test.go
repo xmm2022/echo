@@ -212,10 +212,11 @@ func TestAuthenticatorAuthenticateDenialMatrix(t *testing.T) {
 			header: "Bearer secret",
 			store:  &fakeTokenStore{token: validToken, user: validUser},
 			want: UserContext{
-				UserID: "admin",
-				Role:   "admin",
-				Scopes: []string{"admin", "read"},
-				Now:    now,
+				UserID:           "admin",
+				Role:             "admin",
+				Scopes:           []string{"admin", "read"},
+				Now:              now,
+				CredentialSource: CredentialBearer,
 			},
 			wantOK:      true,
 			wantTouched: true,
@@ -229,10 +230,11 @@ func TestAuthenticatorAuthenticateDenialMatrix(t *testing.T) {
 				touchErr: errors.New("boom"),
 			},
 			want: UserContext{
-				UserID: "admin",
-				Role:   "admin",
-				Scopes: []string{"admin", "read"},
-				Now:    now,
+				UserID:           "admin",
+				Role:             "admin",
+				Scopes:           []string{"admin", "read"},
+				Now:              now,
+				CredentialSource: CredentialBearer,
 			},
 			wantOK:      true,
 			wantTouched: true,
@@ -249,7 +251,13 @@ func TestAuthenticatorAuthenticateDenialMatrix(t *testing.T) {
 			if ok != tt.wantOK {
 				t.Fatalf("Authenticate ok = %v, want %v", ok, tt.wantOK)
 			}
-			if got.UserID != tt.want.UserID || got.Role != tt.want.Role || !slices.Equal(got.Scopes, tt.want.Scopes) || !got.Now.Equal(tt.want.Now) {
+			if got.UserID != tt.want.UserID ||
+				got.Role != tt.want.Role ||
+				!slices.Equal(got.Scopes, tt.want.Scopes) ||
+				!got.Now.Equal(tt.want.Now) ||
+				got.CredentialSource != tt.want.CredentialSource ||
+				got.SessionSelector != tt.want.SessionSelector ||
+				got.CSRFHash != tt.want.CSRFHash {
 				t.Fatalf("Authenticate user = %#v, want %#v", got, tt.want)
 			}
 			if tt.store.touched != tt.wantTouched {

@@ -37,10 +37,13 @@ var validScopes = map[string]struct{}{
 // UserContext carries the authenticated identity and scopes for a request;
 // Now is the evaluation time used for token expiry checks in later phases.
 type UserContext struct {
-	UserID string
-	Role   string
-	Scopes []string
-	Now    time.Time
+	UserID           string
+	Role             string
+	Scopes           []string
+	Now              time.Time
+	CredentialSource string
+	SessionSelector  string
+	CSRFHash         string
 }
 
 type contextKey struct{}
@@ -118,7 +121,13 @@ func (a *Authenticator) Authenticate(r *http.Request) (UserContext, bool) {
 		LastUsedAt: sql.NullInt64{Int64: nowUnix, Valid: true},
 		ID:         token.ID,
 	})
-	return UserContext{UserID: user.ID, Role: user.Role, Scopes: scopes, Now: now}, true
+	return UserContext{
+		UserID:           user.ID,
+		Role:             user.Role,
+		Scopes:           scopes,
+		Now:              now,
+		CredentialSource: CredentialBearer,
+	}, true
 }
 
 func (u UserContext) HasScope(scope string) bool {

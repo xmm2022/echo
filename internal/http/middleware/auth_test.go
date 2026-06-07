@@ -29,8 +29,12 @@ func TestAuthBearer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			called := false
-			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
+				user := auth.FromContext(r.Context())
+				if user.CredentialSource != auth.CredentialBearer {
+					t.Fatalf("credential source = %q, want %q", user.CredentialSource, auth.CredentialBearer)
+				}
 				w.WriteHeader(http.StatusOK)
 			})
 			h := Auth(tt.token)(next)
