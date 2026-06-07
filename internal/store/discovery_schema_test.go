@@ -53,6 +53,37 @@ func TestMediaRequestMigrationCreatesV04Tables(t *testing.T) {
 	}
 }
 
+func TestWebSessionMigrationCreatesV05Tables(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	var name string
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT name FROM sqlite_master WHERE type='table' AND name='web_sessions'`).Scan(&name); err != nil {
+		t.Fatalf("missing web_sessions table: %v", err)
+	}
+
+	var fkCount int
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_foreign_key_list('web_sessions')
+WHERE "table" = 'users' AND "from" = 'user_id'`).Scan(&fkCount); err != nil {
+		t.Fatal(err)
+	}
+	if fkCount != 1 {
+		t.Fatalf("web_sessions user FK count=%d, want 1", fkCount)
+	}
+
+	var indexCount int
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_index_list('web_sessions')
+WHERE name IN ('idx_web_sessions_user','idx_web_sessions_expiry')`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 2 {
+		t.Fatalf("web_sessions index count=%d, want 2", indexCount)
+	}
+}
+
 func TestMediaRequestMigrationEnforcesV04Constraints(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

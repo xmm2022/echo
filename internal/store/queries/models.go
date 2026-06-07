@@ -619,3 +619,17 @@ type UserMediaSubscription struct {
 	CreatedAt               int64          `json:"created_at"`
 	UpdatedAt               int64          `json:"updated_at"`
 }
+
+type WebSession struct {
+	Selector   string         `json:"selector"`
+	UserID     string         `json:"user_id"`
+	SecretHash string         `json:"secret_hash"`
+	CsrfHash   string         `json:"csrf_hash"`
+	Scopes     string         `json:"scopes"`
+	UserAgent  sql.NullString `json:"user_agent"`
+	IpHint     sql.NullString `json:"ip_hint"`
+	CreatedAt  int64          `json:"created_at"`
+	LastSeenAt int64          `json:"last_seen_at"`
+	ExpiresAt  int64          `json:"expires_at"`
+	RevokedAt  sql.NullInt64  `json:"revoked_at"`
+}
