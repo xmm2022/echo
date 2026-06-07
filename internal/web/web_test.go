@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,9 +199,10 @@ func TestUIConflictsRendersOpenOnly(t *testing.T) {
 	st := newWebStore(t)
 	a, _ := st.CreateBlob(ctx, queries.CreateBlobParams{Size: 1, OwnerID: "admin", CreatedAt: 1, UpdatedAt: 1})
 	b, _ := st.CreateBlob(ctx, queries.CreateBlobParams{Size: 2, OwnerID: "admin", CreatedAt: 1, UpdatedAt: 1})
-	if _, err := st.InsertHashConflict(ctx, queries.InsertHashConflictParams{
+	conflict, err := st.InsertHashConflict(ctx, queries.InsertHashConflictParams{
 		BlobIDA: a.ID, BlobIDB: b.ID, Reason: "hash_multi_blob", Detail: "{}", ObservedAt: 1, Status: "open",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	d := Deps{Store: st}
@@ -213,8 +215,17 @@ func TestUIConflictsRendersOpenOnly(t *testing.T) {
 	if !strings.Contains(body, "hash_multi_blob") {
 		t.Fatalf("conflicts fragment missing conflict: %s", body)
 	}
-	if !strings.Contains(body, "/api/conflicts/") || !strings.Contains(body, `hx-swap="delete"`) {
-		t.Fatalf("conflicts fragment missing dismiss button: %s", body)
+	dismissPath := "/api/conflicts/" + strconv.FormatInt(conflict.ID, 10) + "/dismiss"
+	for _, want := range []string{`<form`, `hx-post="` + dismissPath + `"`, `hx-swap="none"`, `<button type="submit">Dismiss</button>`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("conflicts fragment missing form-based dismiss control %q: %s", want, body)
+		}
+	}
+	if !strings.Contains(body, "/api/conflicts/") {
+		t.Fatalf("conflicts fragment missing dismiss route: %s", body)
+	}
+	if strings.Contains(body, `hx-swap="delete"`) {
+		t.Fatalf("conflicts fragment still uses direct htmx row delete: %s", body)
 	}
 }
 

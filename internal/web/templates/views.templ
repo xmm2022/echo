@@ -63,9 +63,8 @@ templ JobsTable(jobs []queries.Job) {
 	}
 }
 
-// ConflictsTable renders the open hash-conflict fragment. The Dismiss button POSTs
-// to the API; hx-swap="delete" removes the row on a 2xx without rendering the JSON
-// response body.
+// ConflictsTable renders the open hash-conflict fragment. The Dismiss form POSTs
+// to the API through app.js's fetch-based JSON submit path.
 templ ConflictsTable(conflicts []queries.HashConflict) {
 	if len(conflicts) == 0 {
 		<p>No open conflicts.</p>
@@ -82,11 +81,9 @@ templ ConflictsTable(conflicts []queries.HashConflict) {
 						<td>{ strconv.FormatInt(c.BlobIDA, 10) }</td>
 						<td>{ strconv.FormatInt(c.BlobIDB, 10) }</td>
 						<td>
-							<button
-								hx-post={ "/api/conflicts/" + strconv.FormatInt(c.ID, 10) + "/dismiss" }
-								hx-target="closest tr"
-								hx-swap="delete"
-							>Dismiss</button>
+							<form hx-post={ "/api/conflicts/" + strconv.FormatInt(c.ID, 10) + "/dismiss" } hx-swap="none">
+								<button type="submit">Dismiss</button>
+							</form>
 						</td>
 					</tr>
 				}
