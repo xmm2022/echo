@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### v0.5 browser auth foundation
+
+- Added browser username/password login backed by existing Echo users.
+- Added server-side web sessions, HttpOnly session cookies, and CSRF enforcement for cookie-auth mutations.
+- Added bootstrap admin password setup while preserving DB-backed Bearer API tokens for automation.
+- Removed browser localStorage token inputs from the admin and user shells.
+
 ### v0.4 media requests
 
 - Added media request schema for access policies, policy targets, request
