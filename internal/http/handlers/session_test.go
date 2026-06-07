@@ -107,8 +107,7 @@ func TestSessionLoginMeLogout(t *testing.T) {
 	setUserPassword(t, st, "admin", "ValidPassword123")
 	cfg := SessionHTTPConfig{CookieName: "echo_session", TTL: time.Hour, SecureCookies: "never"}
 
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/session/login", strings.NewReader(`{"username":" admin ","password":"ValidPassword123"}`))
-	loginReq.Host = "app.example"
+	loginReq := httptest.NewRequest(http.MethodPost, "https://app.example/api/session/login", strings.NewReader(`{"username":" admin ","password":"ValidPassword123"}`))
 	loginReq.Header.Set("Origin", "https://app.example")
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginReq.Header.Set("User-Agent", "EchoBrowser/1.0")
@@ -286,6 +285,64 @@ func TestSessionLoginDenialMatrix(t *testing.T) {
 	}
 }
 
+func TestSessionLoginBadCredentialsUseSame401Body(t *testing.T) {
+	wrongPasswordStore := newAPIStore(t)
+	setUserPassword(t, wrongPasswordStore, "admin", "ValidPassword123")
+
+	cases := []struct {
+		name string
+		st   *store.Store
+		body string
+	}{
+		{
+			name: "unknown user",
+			st:   newAPIStore(t),
+			body: `{"username":"missing","password":"ValidPassword123"}`,
+		},
+		{
+			name: "wrong password",
+			st:   wrongPasswordStore,
+			body: `{"username":"admin","password":"WrongPassword123"}`,
+		},
+	}
+
+	var wantBody string
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := APIDeps{Store: tc.st, Now: apiClock(), Logger: apiLogger()}
+			rec := sessionLoginRequest(t, deps, SessionHTTPConfig{}, tc.body)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+			}
+			if wantBody == "" {
+				wantBody = rec.Body.String()
+				return
+			}
+			if rec.Body.String() != wantBody {
+				t.Fatalf("401 body = %q, want same body %q", rec.Body.String(), wantBody)
+			}
+		})
+	}
+}
+
+func TestSessionLoginStoreErrorReturns500(t *testing.T) {
+	st := newAPIStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger()}
+	rec := sessionLoginRequest(t, deps, SessionHTTPConfig{}, `{"username":"admin","password":"ValidPassword123"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := singleCookieOrNil(rec, "echo_session"); got != nil {
+		t.Fatalf("store-error login set cookie: %#v", got)
+	}
+	if !strings.Contains(rec.Body.String(), "internal-error") {
+		t.Fatalf("500 body = %q, want generic internal-error", rec.Body.String())
+	}
+}
+
 func TestSessionMeBearerHasNoCSRF(t *testing.T) {
 	st := newAPIStore(t)
 	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger()}
@@ -355,6 +412,29 @@ func TestSessionMeFailClosedForMissingOrDisabledUser(t *testing.T) {
 	}
 }
 
+func TestLogoutSessionRevokeFailureReturns500(t *testing.T) {
+	st := newAPIStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger()}
+	rec := doSessionReqAs(t, http.MethodPost, "/api/session/logout", "", auth.UserContext{
+		UserID:           "admin",
+		Role:             "admin",
+		Scopes:           []string{"admin"},
+		CredentialSource: auth.CredentialSession,
+		SessionSelector:  "selector",
+	}, func(r chi.Router) {
+		r.Post("/api/session/logout", deps.LogoutSession(SessionHTTPConfig{}))
+	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := singleCookieOrNil(rec, "echo_session"); got != nil {
+		t.Fatalf("failed logout cleared cookie: %#v", got)
+	}
+}
+
 func TestSecureCookiePolicy(t *testing.T) {
 	if !secureCookie(httptest.NewRequest(http.MethodGet, "/", nil), SessionHTTPConfig{SecureCookies: "always"}) {
 		t.Fatal("always policy = false, want true")
@@ -377,6 +457,140 @@ func TestSecureCookiePolicy(t *testing.T) {
 	}
 	if secureCookie(httptest.NewRequest(http.MethodGet, "/", nil), SessionHTTPConfig{}) {
 		t.Fatal("auto/default plain HTTP policy = true, want false")
+	}
+}
+
+func TestSameOriginWrite(t *testing.T) {
+	tests := []struct {
+		name   string
+		req    func() *http.Request
+		cfg    SessionHTTPConfig
+		wantOK bool
+	}{
+		{
+			name: "empty origin allowed",
+			req: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "http://example.com/api/session/login", nil)
+			},
+			wantOK: true,
+		},
+		{
+			name: "https request rejects http origin",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "http://example.com")
+				return req
+			},
+			wantOK: false,
+		},
+		{
+			name: "http request rejects https origin",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "https://example.com")
+				return req
+			},
+			wantOK: false,
+		},
+		{
+			name: "trusted forwarded https matches https origin",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "https://example.com")
+				req.Header.Set("X-Forwarded-Proto", "https")
+				return req
+			},
+			cfg:    SessionHTTPConfig{TrustProxyHeaders: true},
+			wantOK: true,
+		},
+		{
+			name: "untrusted forwarded https still uses request scheme",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "https://example.com")
+				req.Header.Set("X-Forwarded-Proto", "https")
+				return req
+			},
+			wantOK: false,
+		},
+		{
+			name: "https default port normalizes",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "https://example.com:443")
+				return req
+			},
+			wantOK: true,
+		},
+		{
+			name: "http default port normalizes",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "http://example.com:80")
+				return req
+			},
+			wantOK: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameOriginWrite(tc.req(), tc.cfg); got != tc.wantOK {
+				t.Fatalf("sameOriginWrite = %v, want %v", got, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestBootstrapAdminPasswordTransactionRollbackOnRevokeFailure(t *testing.T) {
+	st := newAPIStore(t)
+	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger(), BootstrapAdminToken: "boot"}
+	setUserPassword(t, st, "admin", "OldPassword123")
+	if err := st.CreateWebSession(context.Background(), queries.CreateWebSessionParams{
+		Selector:   "admin-session",
+		UserID:     "admin",
+		SecretHash: auth.HashToken("secret"),
+		CsrfHash:   auth.HashToken("csrf"),
+		Scopes:     `["admin"]`,
+		CreatedAt:  1,
+		LastSeenAt: 1,
+		ExpiresAt:  9999,
+	}); err != nil {
+		t.Fatalf("create web session: %v", err)
+	}
+	if _, err := st.DB.ExecContext(context.Background(), `
+CREATE TRIGGER fail_web_session_revoke
+BEFORE UPDATE OF revoked_at ON web_sessions
+BEGIN
+  SELECT RAISE(FAIL, 'fail revoke');
+END;
+`); err != nil {
+		t.Fatalf("create fail trigger: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/bootstrap/admin-password", strings.NewReader(`{"password":"NewPassword123"}`))
+	req.Header.Set("Authorization", "Bearer boot")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r := chi.NewRouter()
+	deps.MountBootstrap(r)
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+
+	admin, err := st.GetUser(context.Background(), queries.GetUserParams{ID: "admin"})
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	if !admin.PasswordHash.Valid || !auth.VerifyPassword("OldPassword123", admin.PasswordHash.String) || auth.VerifyPassword("NewPassword123", admin.PasswordHash.String) {
+		t.Fatalf("admin password was not rolled back")
+	}
+	session, err := st.GetWebSession(context.Background(), queries.GetWebSessionParams{Selector: "admin-session"})
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.RevokedAt.Valid {
+		t.Fatalf("session revoke unexpectedly persisted: %v", session.RevokedAt)
 	}
 }
 
@@ -431,6 +645,17 @@ func singleCookieOrNil(rec *httptest.ResponseRecorder, name string) *http.Cookie
 		}
 	}
 	return nil
+}
+
+func sessionLoginRequest(t *testing.T, deps APIDeps, cfg SessionHTTPConfig, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/session/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r := chi.NewRouter()
+	r.Post("/api/session/login", deps.LoginSession(cfg))
+	r.ServeHTTP(rec, req)
+	return rec
 }
 
 func TestGetSessionMeUnauthenticated(t *testing.T) {

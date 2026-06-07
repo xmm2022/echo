@@ -17,6 +17,7 @@ import (
 const (
 	defaultSessionCookieName = "echo_session"
 	defaultSessionTTL        = 7 * 24 * time.Hour
+	dummyPasswordHash        = "argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$TlSv8OgAsb0JTRrO7aFk/PPVafXgJMh8znf0ilxw5oE"
 )
 
 type SessionHTTPConfig struct {
@@ -51,7 +52,7 @@ type bootstrapAdminPasswordRequest struct {
 func (d APIDeps) LoginSession(cfg SessionHTTPConfig) http.HandlerFunc {
 	cfg = normalizeSessionHTTPConfig(cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !sameOriginWrite(r) {
+		if !sameOriginWrite(r, cfg) {
 			writeAPIError(w, http.StatusForbidden, "forbidden")
 			return
 		}
@@ -61,7 +62,12 @@ func (d APIDeps) LoginSession(cfg SessionHTTPConfig) http.HandlerFunc {
 			return
 		}
 
-		user, scopes, ok := d.authenticateLogin(r, strings.TrimSpace(req.Username), req.Password)
+		user, scopes, ok, err := d.authenticateLogin(r, strings.TrimSpace(req.Username), req.Password)
+		if err != nil {
+			d.logger().Error("session login: get user", "err", err)
+			writeAPIError(w, http.StatusInternalServerError, "internal-error")
+			return
+		}
 		if !ok {
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -186,6 +192,8 @@ func (d APIDeps) LogoutSession(cfg SessionHTTPConfig) http.HandlerFunc {
 				Selector:  userCtx.SessionSelector,
 			}); err != nil {
 				d.logger().Error("session logout: revoke", "err", err)
+				writeAPIError(w, http.StatusInternalServerError, "internal-error")
+				return
 			}
 		}
 		http.SetCookie(w, &http.Cookie{
@@ -224,7 +232,20 @@ func (d APIDeps) SetBootstrapAdminPassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	now := d.now().Unix()
-	if err := d.Store.UpdateUserPasswordHash(r.Context(), queries.UpdateUserPasswordHashParams{
+	tx, q, err := d.Store.BeginImmediateTx(r.Context())
+	if err != nil {
+		d.logger().Error("bootstrap password: begin tx", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal-error")
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(r.Context())
+		}
+	}()
+
+	if err := q.UpdateUserPasswordHash(r.Context(), queries.UpdateUserPasswordHashParams{
 		PasswordHash: sql.NullString{String: hash, Valid: true},
 		UpdatedAt:    now,
 		ID:           "admin",
@@ -233,7 +254,7 @@ func (d APIDeps) SetBootstrapAdminPassword(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, http.StatusInternalServerError, "internal-error")
 		return
 	}
-	if err := d.Store.RevokeWebSessionsForUser(r.Context(), queries.RevokeWebSessionsForUserParams{
+	if err := q.RevokeWebSessionsForUser(r.Context(), queries.RevokeWebSessionsForUserParams{
 		RevokedAt: sql.NullInt64{Int64: now, Valid: true},
 		UserID:    "admin",
 	}); err != nil {
@@ -241,6 +262,12 @@ func (d APIDeps) SetBootstrapAdminPassword(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, http.StatusInternalServerError, "internal-error")
 		return
 	}
+	if err := tx.Commit(r.Context()); err != nil {
+		d.logger().Error("bootstrap password: commit", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal-error")
+		return
+	}
+	committed = true
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -257,34 +284,47 @@ func secureCookie(r *http.Request, cfg SessionHTTPConfig) bool {
 	return cfg.TrustProxyHeaders && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func sameOriginWrite(r *http.Request) bool {
+func sameOriginWrite(r *http.Request, cfg SessionHTTPConfig) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
 	u, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	reqScheme := effectiveRequestScheme(r, cfg)
+	return strings.EqualFold(u.Scheme, reqScheme) &&
+		strings.EqualFold(normalizeOriginHost(u.Scheme, u.Host), normalizeOriginHost(reqScheme, requestHost(r)))
 }
 
-func (d APIDeps) authenticateLogin(r *http.Request, username, password string) (queries.User, []string, bool) {
+func (d APIDeps) authenticateLogin(r *http.Request, username, password string) (queries.User, []string, bool, error) {
 	if username == "" || password == "" {
-		return queries.User{}, nil, false
+		_ = auth.VerifyPassword(password, dummyPasswordHash)
+		return queries.User{}, nil, false, nil
 	}
 	user, err := d.Store.GetUserByUsername(r.Context(), queries.GetUserByUsernameParams{Username: username})
-	if err != nil || user.Status != "active" || !user.PasswordHash.Valid {
-		return queries.User{}, nil, false
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			_ = auth.VerifyPassword(password, dummyPasswordHash)
+			return queries.User{}, nil, false, nil
+		}
+		return queries.User{}, nil, false, err
 	}
-	if !auth.VerifyPassword(password, user.PasswordHash.String) {
-		return queries.User{}, nil, false
+
+	passwordHash := dummyPasswordHash
+	if user.PasswordHash.Valid {
+		passwordHash = user.PasswordHash.String
+	}
+	passwordOK := auth.VerifyPassword(password, passwordHash)
+	if user.Status != "active" || !user.PasswordHash.Valid || !passwordOK {
+		return queries.User{}, nil, false, nil
 	}
 	scopes, ok := auth.ScopesForRole(user.Role)
 	if !ok {
-		return queries.User{}, nil, false
+		return queries.User{}, nil, false, nil
 	}
-	return user, scopes, true
+	return user, scopes, true, nil
 }
 
 func normalizeSessionHTTPConfig(cfg SessionHTTPConfig) SessionHTTPConfig {
@@ -333,4 +373,53 @@ func ipHint(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func effectiveRequestScheme(r *http.Request, cfg SessionHTTPConfig) string {
+	if cfg.TrustProxyHeaders {
+		switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))) {
+		case "https":
+			return "https"
+		case "http":
+			return "http"
+		}
+	}
+	if r.TLS != nil || strings.EqualFold(r.URL.Scheme, "https") {
+		return "https"
+	}
+	return "http"
+}
+
+func requestHost(r *http.Request) string {
+	if r.Host != "" {
+		return r.Host
+	}
+	return r.URL.Host
+}
+
+func normalizeOriginHost(scheme, host string) string {
+	hostname, port, err := net.SplitHostPort(host)
+	if err != nil {
+		hostname = host
+		port = ""
+	}
+	if port == defaultPortForScheme(scheme) {
+		port = ""
+	}
+	hostname = strings.ToLower(hostname)
+	if port == "" {
+		return hostname
+	}
+	return hostname + ":" + port
+}
+
+func defaultPortForScheme(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
