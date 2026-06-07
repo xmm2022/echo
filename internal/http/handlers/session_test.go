@@ -435,6 +435,43 @@ func TestLogoutSessionRevokeFailureReturns500(t *testing.T) {
 	}
 }
 
+func TestLogoutSessionBearerDoesNotRevokeAPIToken(t *testing.T) {
+	st := newAPIStore(t)
+	deps := APIDeps{Store: st, Now: apiClock(), Logger: apiLogger()}
+	tokenHash := auth.HashToken("bearer-logout-token")
+	if err := st.CreateAPIToken(context.Background(), queries.CreateAPITokenParams{
+		ID:        "tok_bearer_logout",
+		UserID:    "admin",
+		Name:      "bearer logout",
+		TokenHash: tokenHash,
+		Scopes:    `["admin"]`,
+		ExpiresAt: sql.NullInt64{},
+		CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("create api token: %v", err)
+	}
+
+	rec := doSessionReqAs(t, http.MethodPost, "/api/session/logout", "", auth.UserContext{
+		UserID:           "admin",
+		Role:             "admin",
+		Scopes:           []string{"admin"},
+		CredentialSource: auth.CredentialBearer,
+	}, func(r chi.Router) {
+		r.Post("/api/session/logout", deps.LogoutSession(SessionHTTPConfig{}))
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	token, err := st.GetAPITokenByHash(context.Background(), queries.GetAPITokenByHashParams{TokenHash: tokenHash})
+	if err != nil {
+		t.Fatalf("get api token: %v", err)
+	}
+	if token.RevokedAt.Valid {
+		t.Fatalf("bearer logout revoked api token: %v", token.RevokedAt)
+	}
+}
+
 func TestSecureCookiePolicy(t *testing.T) {
 	if !secureCookie(httptest.NewRequest(http.MethodGet, "/", nil), SessionHTTPConfig{SecureCookies: "always"}) {
 		t.Fatal("always policy = false, want true")
