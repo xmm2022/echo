@@ -106,13 +106,12 @@ func (tx *ImmediateTx) Commit(ctx context.Context) error {
 	if tx.done {
 		return sql.ErrTxDone
 	}
-	tx.done = true
 	_, err := tx.conn.ExecContext(ctx, "COMMIT")
-	closeErr := tx.conn.Close()
 	if err != nil {
 		return err
 	}
-	return closeErr
+	tx.done = true
+	return tx.conn.Close()
 }
 
 func (tx *ImmediateTx) Rollback(ctx context.Context) error {

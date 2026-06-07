@@ -766,6 +766,37 @@ func TestBeginImmediateTxSerializesConcurrentFileCopyUpserts(t *testing.T) {
 	}
 }
 
+func TestImmediateTxCommitFailureAllowsRollback(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	tx, _, err := st.BeginImmediateTx(ctx)
+	if err != nil {
+		t.Fatalf("begin immediate tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatalf("force transaction inactive: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err == nil {
+		t.Fatal("commit unexpectedly succeeded after transaction was already rolled back")
+	}
+	if err := tx.Rollback(ctx); errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("rollback after failed commit returned ErrTxDone; commit marked tx done too early")
+	}
+	if err := tx.Rollback(ctx); !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("second rollback err=%v, want ErrTxDone", err)
+	}
+
+	tx2, _, err := st.BeginImmediateTx(ctx)
+	if err != nil {
+		t.Fatalf("begin immediate tx after failed commit rollback: %v", err)
+	}
+	if err := tx2.Rollback(ctx); err != nil {
+		t.Fatalf("rollback second tx: %v", err)
+	}
+}
+
 func TestOpenEnforcesConnectionPragmasOnNewConnections(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(plainTestDSN(t))

@@ -285,8 +285,11 @@ func secureCookie(r *http.Request, cfg SessionHTTPConfig) bool {
 }
 
 func sameOriginWrite(r *http.Request, cfg SessionHTTPConfig) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
+	origin, ok := headerValue(r.Header, "Origin")
+	if !ok {
+		origin, ok = headerValue(r.Header, "Referer")
+	}
+	if !ok {
 		return true
 	}
 	u, err := url.Parse(origin)
@@ -376,15 +379,10 @@ func ipHint(r *http.Request) string {
 }
 
 func effectiveRequestScheme(r *http.Request, cfg SessionHTTPConfig) string {
-	if cfg.TrustProxyHeaders {
-		switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))) {
-		case "https":
-			return "https"
-		case "http":
-			return "http"
-		}
+	if r.TLS != nil {
+		return "https"
 	}
-	if r.TLS != nil || strings.EqualFold(r.URL.Scheme, "https") {
+	if cfg.TrustProxyHeaders && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
 		return "https"
 	}
 	return "http"
@@ -422,4 +420,15 @@ func defaultPortForScheme(scheme string) string {
 	default:
 		return ""
 	}
+}
+
+func headerValue(header http.Header, name string) (string, bool) {
+	values, ok := header[http.CanonicalHeaderKey(name)]
+	if !ok {
+		return "", false
+	}
+	if len(values) == 0 {
+		return "", true
+	}
+	return values[0], true
 }

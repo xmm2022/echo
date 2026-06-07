@@ -475,6 +475,34 @@ func TestSameOriginWrite(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "no origin cross-site referer rejects",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
+				req.Header.Set("Referer", "https://evil.example/form")
+				return req
+			},
+			wantOK: false,
+		},
+		{
+			name: "no origin same-site referer allows",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
+				req.Header.Set("Referer", "https://example.com/settings")
+				return req
+			},
+			wantOK: true,
+		},
+		{
+			name: "empty origin header does not fall back to referer",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "")
+				req.Header.Set("Referer", "https://example.com/settings")
+				return req
+			},
+			wantOK: false,
+		},
+		{
 			name: "https request rejects http origin",
 			req: func() *http.Request {
 				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
@@ -487,6 +515,16 @@ func TestSameOriginWrite(t *testing.T) {
 			name: "http request rejects https origin",
 			req: func() *http.Request {
 				req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session/login", nil)
+				req.Header.Set("Origin", "https://example.com")
+				return req
+			},
+			wantOK: false,
+		},
+		{
+			name: "absolute form https url over non tls is not https",
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "https://example.com/api/session/login", nil)
+				req.TLS = nil
 				req.Header.Set("Origin", "https://example.com")
 				return req
 			},
@@ -538,6 +576,15 @@ func TestSameOriginWrite(t *testing.T) {
 				t.Fatalf("sameOriginWrite = %v, want %v", got, tc.wantOK)
 			}
 		})
+	}
+}
+
+func TestDummyPasswordHashIsValidAndNotAccepted(t *testing.T) {
+	if !auth.VerifyPassword("dummy-password-not-used", dummyPasswordHash) {
+		t.Fatal("dummy password hash no longer parses as the fixed valid Argon2id hash")
+	}
+	if auth.VerifyPassword("wrong", dummyPasswordHash) {
+		t.Fatal("wrong password verified against dummy hash")
 	}
 }
 
