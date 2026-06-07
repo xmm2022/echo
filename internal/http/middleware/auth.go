@@ -49,6 +49,47 @@ func AuthFunc(check CheckFunc) func(http.Handler) http.Handler {
 	}
 }
 
+func OptionalAuth(check CheckFunc) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if check != nil {
+				if user, ok := check(r); ok {
+					r = r.WithContext(auth.NewContext(r.Context(), user))
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func CSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if csrfSafeMethod(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		user := auth.FromContext(r.Context())
+		if user.CredentialSource != auth.CredentialSession {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !auth.VerifyTokenHash(r.Header.Get("X-CSRF-Token"), user.CSRFHash) {
+			writeCSRFForbidden(w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func csrfSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
 func validBearer(header, token string) bool {
 	got := auth.BearerToken(header)
 	if got == "" || token == "" {
@@ -67,4 +108,10 @@ func writeUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+}
+
+func writeCSRFForbidden(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "csrf-token-invalid"})
 }

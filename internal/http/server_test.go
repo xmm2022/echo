@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +157,65 @@ func TestAuthedRoutesRequireToken(t *testing.T) {
 	}
 }
 
+func TestControlPlaneCSRFSkipsBearerAndRejectsSessionMutations(t *testing.T) {
+	st := openServerTestStore(t)
+	bearerConflict := seedServerHashConflict(t, st, "bearer")
+	sessionConflict := seedServerHashConflict(t, st, "session")
+	authCheck := func(r *http.Request) (auth.UserContext, bool) {
+		if auth.BearerToken(r.Header.Get("Authorization")) == "api" {
+			return auth.UserContext{
+				UserID:           "admin",
+				Role:             "admin",
+				Scopes:           []string{"admin"},
+				CredentialSource: auth.CredentialBearer,
+			}, true
+		}
+		if r.Header.Get("X-Test-Session") == "1" {
+			return auth.UserContext{
+				UserID:           "admin",
+				Role:             "admin",
+				Scopes:           []string{"admin"},
+				CredentialSource: auth.CredentialSession,
+				SessionSelector:  "session-selector",
+				CSRFHash:         auth.HashToken("csrf"),
+			}, true
+		}
+		return auth.UserContext{}, false
+	}
+	deps := Deps{
+		Logger:    discardLogger(),
+		AuthCheck: authCheck,
+		API:       &handlers.APIDeps{Store: st, Logger: discardLogger()},
+	}
+	h := HandlerWithDeps(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/conflicts/"+strconv.FormatInt(bearerConflict.ID, 10)+"/dismiss", nil)
+	req.Header.Set("Authorization", "Bearer api")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bearer POST without CSRF status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/conflicts/"+strconv.FormatInt(sessionConflict.ID, 10)+"/dismiss", nil)
+	req.Header.Set("X-Test-Session", "1")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("session POST without CSRF status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "csrf-token-invalid") {
+		t.Fatalf("session POST without CSRF body=%q, want csrf-token-invalid", rec.Body.String())
+	}
+	got, err := st.GetHashConflict(context.Background(), queries.GetHashConflictParams{ID: sessionConflict.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("session conflict status = %q, want open after CSRF rejection", got.Status)
+	}
+}
+
 func TestPublicRoutesAreOpen(t *testing.T) {
 	st := openServerTestStore(t)
 	deps := Deps{
@@ -168,6 +229,8 @@ func TestPublicRoutesAreOpen(t *testing.T) {
 		"/healthz":            http.StatusOK,
 		"/readyz":             http.StatusServiceUnavailable,
 		"/":                   http.StatusOK,
+		"/login":              http.StatusOK,
+		"/app":                http.StatusOK,
 		"/static/htmx.min.js": http.StatusOK,
 	}
 	for path, want := range cases {
@@ -177,6 +240,31 @@ func TestPublicRoutesAreOpen(t *testing.T) {
 		if rec.Code != want {
 			t.Fatalf("%s = %d, want %d (public, no auth)", path, rec.Code, want)
 		}
+	}
+}
+
+func TestSessionRoutesAreMountedForBrowserAuth(t *testing.T) {
+	st := openServerTestStore(t)
+	deps := Deps{
+		Logger:  discardLogger(),
+		API:     &handlers.APIDeps{Store: st, Logger: discardLogger()},
+		Session: handlers.SessionHTTPConfig{CookieName: "echo_session", TTL: time.Hour, SecureCookies: "never"},
+	}
+	h := HandlerWithDeps(deps)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/session/login", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("/api/session/login without auth status=%d body=%s, want 400 from public handler", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/session/me", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/session/me without auth status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"authenticated":false`) {
+		t.Fatalf("/api/session/me body=%q, want unauthenticated response", rec.Body.String())
 	}
 }
 
@@ -301,6 +389,26 @@ func seedServerAppUser(t *testing.T, st *store.Store, id string) {
 	}); err != nil {
 		t.Fatalf("create user %s: %v", id, err)
 	}
+}
+
+func seedServerHashConflict(t *testing.T, st *store.Store, reason string) queries.HashConflict {
+	t.Helper()
+	ctx := context.Background()
+	a, err := st.CreateBlob(ctx, queries.CreateBlobParams{Size: 1, OwnerID: "admin", CreatedAt: 1, UpdatedAt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.CreateBlob(ctx, queries.CreateBlobParams{Size: 2, OwnerID: "admin", CreatedAt: 1, UpdatedAt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := st.InsertHashConflict(ctx, queries.InsertHashConflictParams{
+		BlobIDA: a.ID, BlobIDB: b.ID, Reason: reason, Detail: `{"k":"v"}`, ObservedAt: 5, Status: "open",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func seedServerAppPolicy(t *testing.T, st *store.Store, userID string) queries.DiscoveryAccessPolicy {

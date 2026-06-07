@@ -218,7 +218,14 @@ func runServe(args []string) error {
 	// Restore/stream plane.
 	resolver := restore.NewResolver(st.Queries, nil)
 	cache := restore.NewLinkCache(nil)
-	authenticator := &auth.Authenticator{Store: st}
+	authenticator := &auth.Authenticator{
+		Store:        st,
+		SessionStore: st,
+		SessionConfig: auth.SessionConfig{
+			CookieName:    cfg.Auth.SessionCookieName,
+			TouchInterval: cfg.Auth.SessionTouchInterval.Duration,
+		},
+	}
 
 	// Seed the configured Emby upstream + library mappings into the DB before the proxy
 	// reads them; config_sync governs seed-if-missing vs overwrite-on-startup. No-op when
@@ -245,11 +252,17 @@ func runServe(args []string) error {
 		Restore:    &handlers.RestoreDeps{Resolver: resolver, Sidecar: sidecar, Cache: cache, Logger: logger, Metrics: m},
 		Stream:     &handlers.StreamDeps{Resolver: resolver, Sidecar: sidecar, Logger: logger, Metrics: m},
 		API:        &apiDeps,
-		Bootstrap:  &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
-		Web:        &webDeps,
-		Ready:      buildReadyChecker(cfg, st.DB, rawSidecar, version),
-		Registry:   registry,
-		Emby:       embyDeps,
+		Session: handlers.SessionHTTPConfig{
+			CookieName:        cfg.Auth.SessionCookieName,
+			TTL:               cfg.Auth.SessionTTL.Duration,
+			SecureCookies:     cfg.Auth.SecureCookies,
+			TrustProxyHeaders: cfg.Server.TrustProxyHeaders,
+		},
+		Bootstrap: &handlers.APIDeps{Store: st, BootstrapAdminToken: cfg.Auth.BootstrapAdminToken, Logger: logger},
+		Web:       &webDeps,
+		Ready:     buildReadyChecker(cfg, st.DB, rawSidecar, version),
+		Registry:  registry,
+		Emby:      embyDeps,
 	}
 
 	srv := httpserver.New(cfg, deps)
