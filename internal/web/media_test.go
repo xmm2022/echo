@@ -154,11 +154,19 @@ const document = {
   querySelectorAll: function () { return []; }
 };
 const locationState = { origin: "https://echo.test", href: "https://echo.test/login" };
+const alerts = [];
+const reloadEvents = [];
 const window = {
   location: locationState,
-  htmx: { config: { allowScriptTags: true }, trigger: function () {} }
+  htmx: {
+    config: { allowScriptTags: true },
+    trigger: function (target, name) { reloadEvents.push({ target: target, name: name }); }
+  }
 };
 const fetchCalls = [];
+let sessionMeCalls = 0;
+let managementCalls = 0;
+let logoutCalls = 0;
 function response(status, body) {
   return {
     ok: status >= 200 && status < 300,
@@ -169,18 +177,34 @@ function response(status, body) {
 }
 const context = {
   URL: URL,
-  alert: function (msg) { throw new Error(msg); },
+  alert: function (msg) { alerts.push(msg); },
   console: console,
   document: document,
   fetch: function (url, opts) {
     opts = opts || {};
     fetchCalls.push({ url: url, opts: opts });
     if (url === "/api/session/me") {
+      sessionMeCalls++;
+      const csrfTokens = ["csrf-session", "csrf-refresh", "csrf-logout"];
       return Promise.resolve(response(200, {
         authenticated: true,
-        csrf_token: "csrf-session",
+        csrf_token: csrfTokens[Math.min(sessionMeCalls - 1, csrfTokens.length - 1)],
         user: { id: "u1", role: "user", scopes: ["discovery"] }
       }));
+    }
+    if (url === "/api/emby/servers") {
+      managementCalls++;
+      if (managementCalls === 1) {
+        return Promise.resolve(response(403, { error: "csrf-token-invalid" }));
+      }
+      return Promise.resolve(response(204, {}));
+    }
+    if (url === "/api/session/logout") {
+      logoutCalls++;
+      if (logoutCalls === 1) {
+        return Promise.resolve(response(403, { error: "csrf-token-invalid" }));
+      }
+      return Promise.resolve(response(204, {}));
     }
     if (url === "/api/session/login") {
       const body = JSON.parse(opts.body || "{}");
@@ -222,6 +246,44 @@ function loginForm(next, username) {
     querySelectorAll: function () {
       return [input("username", username, "text"), input("password", "pw", "password")];
     },
+    closest: function () { return null; }
+  };
+}
+
+function managementForm() {
+  return {
+    tagName: "FORM",
+    id: "management-form",
+    getAttribute: function (name) {
+      if (name === "id") return "management-form";
+      if (name === "hx-post") return "/api/emby/servers";
+      return "";
+    },
+    querySelectorAll: function () {
+      return [input("name", "Main", "text")];
+    },
+    closest: function (selector) {
+      if (selector !== "section") return null;
+      return {
+        querySelector: function (query) {
+          if (query === "[data-reload]") return { id: "management-panel" };
+          return null;
+        }
+      };
+    }
+  };
+}
+
+function logoutForm() {
+  return {
+    tagName: "FORM",
+    id: "logout-form",
+    getAttribute: function (name) {
+      if (name === "id") return "logout-form";
+      if (name === "hx-post") return "/api/session/logout";
+      return "";
+    },
+    querySelectorAll: function () { return []; },
     closest: function () { return null; }
   };
 }
@@ -269,6 +331,67 @@ function tick() {
     }
   }
 
+  const beforeSaveCalls = fetchCalls.length;
+  dispatch("submit", {
+    target: managementForm(),
+    preventDefault: function () {},
+    stopPropagation: function () {}
+  });
+  await tick();
+  await tick();
+  await tick();
+  await tick();
+
+  const afterSaveCalls = fetchCalls.slice(beforeSaveCalls);
+  const saveCalls = afterSaveCalls.filter(function (call) { return call.url === "/api/emby/servers"; });
+  if (saveCalls.length !== 2) {
+    throw new Error("management save calls=" + saveCalls.length + ", want stale attempt plus retry");
+  }
+  const firstCSRF = saveCalls[0].opts.headers["X-CSRF-Token"] || "";
+  const retryCSRF = saveCalls[1].opts.headers["X-CSRF-Token"] || "";
+  if (firstCSRF !== "csrf-session") {
+    throw new Error("first save CSRF=" + JSON.stringify(firstCSRF) + ", want csrf-session");
+  }
+  if (retryCSRF !== "csrf-refresh") {
+    throw new Error("retry save CSRF=" + JSON.stringify(retryCSRF) + ", want csrf-refresh");
+  }
+  const refreshCalls = afterSaveCalls.filter(function (call) { return call.url === "/api/session/me"; });
+  if (refreshCalls.length !== 1) {
+    throw new Error("refresh calls after stale CSRF=" + refreshCalls.length + ", want 1");
+  }
+
+  const beforeLogoutCalls = fetchCalls.length;
+  dispatch("submit", {
+    target: logoutForm(),
+    preventDefault: function () {},
+    stopPropagation: function () {}
+  });
+  await tick();
+  await tick();
+  await tick();
+  await tick();
+
+  const afterLogoutCalls = fetchCalls.slice(beforeLogoutCalls);
+  const logoutFetches = afterLogoutCalls.filter(function (call) { return call.url === "/api/session/logout"; });
+  if (logoutFetches.length !== 2) {
+    throw new Error("logout calls=" + logoutFetches.length + ", want stale attempt plus retry");
+  }
+  const logoutFirstCSRF = logoutFetches[0].opts.headers["X-CSRF-Token"] || "";
+  const logoutRetryCSRF = logoutFetches[1].opts.headers["X-CSRF-Token"] || "";
+  if (logoutFirstCSRF !== "csrf-refresh") {
+    throw new Error("first logout CSRF=" + JSON.stringify(logoutFirstCSRF) + ", want csrf-refresh");
+  }
+  if (logoutRetryCSRF !== "csrf-logout") {
+    throw new Error("retry logout CSRF=" + JSON.stringify(logoutRetryCSRF) + ", want csrf-logout");
+  }
+  const logoutRefreshCalls = afterLogoutCalls.filter(function (call) { return call.url === "/api/session/me"; });
+  if (logoutRefreshCalls.length !== 1) {
+    throw new Error("logout refresh calls=" + logoutRefreshCalls.length + ", want 1");
+  }
+  if (window.location.href !== "/login") {
+    throw new Error("logout redirect href=" + JSON.stringify(window.location.href) + ", want /login");
+  }
+
   locationState.href = "https://echo.test/app";
   dispatch("htmx:responseError", { detail: { xhr: { status: 401 } } });
   if (window.location.href !== "/login") {
@@ -303,6 +426,9 @@ function tick() {
   await tick();
   if (window.location.href !== "/") {
     throw new Error("unsafe admin next href=" + JSON.stringify(window.location.href) + ", want /");
+  }
+  if (alerts.length !== 0) {
+    throw new Error("unexpected alerts: " + JSON.stringify(alerts));
   }
 })().catch(function (err) {
   console.error(err && err.stack ? err.stack : err);

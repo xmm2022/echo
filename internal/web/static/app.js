@@ -90,8 +90,18 @@
   });
 
   document.addEventListener("htmx:responseError", function (evt) {
-    if (evt.detail && evt.detail.xhr && evt.detail.xhr.status === 401) {
+    if (!evt.detail || !evt.detail.xhr) {
+      return;
+    }
+    if (evt.detail.xhr.status === 401) {
       redirectToLogin();
+      return;
+    }
+    if (
+      evt.detail.xhr.status === 403 &&
+      isCSRFInvalid(evt.detail.xhr.status, evt.detail.xhr.responseText || "")
+    ) {
+      refreshSession();
     }
   });
 
@@ -248,9 +258,13 @@
   }
 
   function submitLogout(target) {
+    return submitLogoutAttempt(target, false);
+  }
+
+  function submitLogoutAttempt(target, retried) {
     var headers = {};
     addCSRFHeader(headers, target.method, target.url);
-    fetch(target.url, {
+    return fetch(target.url, {
       method: target.method,
       credentials: "same-origin",
       headers: headers,
@@ -266,6 +280,14 @@
           return;
         }
         return resp.text().then(function (body) {
+          if (!retried && isCSRFInvalid(resp.status, body)) {
+            return refreshSession().then(function (data) {
+              if (data) {
+                return submitLogoutAttempt(target, true);
+              }
+              alert("Sign out failed (" + resp.status + "): " + body);
+            });
+          }
           alert("Sign out failed (" + resp.status + "): " + body);
         });
       })
@@ -319,9 +341,13 @@
   }
 
   function submitJSONForm(form, target, onOK) {
+    return submitJSONFormAttempt(form, target, onOK, false);
+  }
+
+  function submitJSONFormAttempt(form, target, onOK, retried) {
     var headers = { "Content-Type": "application/json" };
     addCSRFHeader(headers, target.method, target.url);
-    fetch(target.url, {
+    return fetch(target.url, {
       method: target.method,
       credentials: "same-origin",
       headers: headers,
@@ -337,12 +363,24 @@
           return;
         }
         return resp.text().then(function (body) {
+          if (!retried && isCSRFInvalid(resp.status, body)) {
+            return refreshSession().then(function (data) {
+              if (data) {
+                return submitJSONFormAttempt(form, target, onOK, true);
+              }
+              alert("Save failed (" + resp.status + "): " + body);
+            });
+          }
           alert("Save failed (" + resp.status + "): " + body);
         });
       })
       .catch(function (err) {
         alert("Save failed: " + err);
       });
+  }
+
+  function isCSRFInvalid(status, body) {
+    return status === 403 && (body || "").indexOf("csrf-token-invalid") !== -1;
   }
 
   // reloadFor refreshes the data after a successful mutation. It re-triggers the
