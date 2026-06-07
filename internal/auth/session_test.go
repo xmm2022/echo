@@ -35,6 +35,14 @@ func TestGenerateSessionTokenShapeAndVerification(t *testing.T) {
 	}
 }
 
+func TestParseSessionCookieRejectsMalformedParts(t *testing.T) {
+	for _, raw := range []string{".secret", "selector.", "selector.secret.extra"} {
+		if _, _, ok := ParseSessionCookie(raw); ok {
+			t.Fatalf("ParseSessionCookie accepted malformed cookie %q", raw)
+		}
+	}
+}
+
 func TestScopesForRole(t *testing.T) {
 	admin, ok := ScopesForRole("admin")
 	if !ok || len(admin) != 1 || admin[0] != "admin" {

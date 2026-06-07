@@ -9,6 +9,7 @@ require (
 	github.com/gotd/td v0.115.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/prometheus/client_model v0.6.1
+	golang.org/x/crypto v0.31.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.35.0
 )
@@ -39,7 +40,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect

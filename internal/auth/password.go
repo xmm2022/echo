@@ -54,6 +54,12 @@ type passwordParams struct {
 	threads   uint8
 }
 
+func (p passwordParams) isSpec() bool {
+	return p.memoryKiB == passwordMemoryKiB &&
+		p.time == passwordTime &&
+		p.threads == passwordThreads
+}
+
 func parsePasswordHash(encoded string) (passwordParams, []byte, []byte, bool) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 5 || parts[0] != "argon2id" || parts[1] != "v=19" {
@@ -61,7 +67,7 @@ func parsePasswordHash(encoded string) (passwordParams, []byte, []byte, bool) {
 	}
 
 	params, ok := parsePasswordParams(parts[2])
-	if !ok {
+	if !ok || !params.isSpec() {
 		return passwordParams{}, nil, nil, false
 	}
 
