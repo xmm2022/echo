@@ -63,9 +63,22 @@ type TokenStore interface {
 	TouchAPIToken(context.Context, queries.TouchAPITokenParams) error
 }
 
+type SessionStore interface {
+	GetWebSession(context.Context, queries.GetWebSessionParams) (queries.WebSession, error)
+	TouchWebSession(context.Context, queries.TouchWebSessionParams) error
+	GetUser(context.Context, queries.GetUserParams) (queries.User, error)
+}
+
+type SessionConfig struct {
+	CookieName    string
+	TouchInterval time.Duration
+}
+
 type Authenticator struct {
-	Store TokenStore
-	Now   func() time.Time
+	Store         TokenStore
+	SessionStore  SessionStore
+	SessionConfig SessionConfig
+	Now           func() time.Time
 }
 
 func GenerateToken() (string, error) {
@@ -93,11 +106,18 @@ func (a *Authenticator) now() time.Time {
 }
 
 func (a *Authenticator) Authenticate(r *http.Request) (UserContext, bool) {
-	if a == nil || a.Store == nil {
+	if a == nil {
 		return UserContext{}, false
 	}
 	raw := BearerToken(r.Header.Get("Authorization"))
-	if raw == "" {
+	if raw != "" {
+		return a.authenticateBearer(r, raw)
+	}
+	return a.authenticateSession(r)
+}
+
+func (a *Authenticator) authenticateBearer(r *http.Request, raw string) (UserContext, bool) {
+	if a.Store == nil {
 		return UserContext{}, false
 	}
 	token, err := a.Store.GetAPITokenByHash(r.Context(), queries.GetAPITokenByHashParams{TokenHash: HashToken(raw)})
@@ -128,6 +148,59 @@ func (a *Authenticator) Authenticate(r *http.Request) (UserContext, bool) {
 		Now:              now,
 		CredentialSource: CredentialBearer,
 	}, true
+}
+
+func (a *Authenticator) authenticateSession(r *http.Request) (UserContext, bool) {
+	if a.SessionStore == nil || a.SessionConfig.CookieName == "" {
+		return UserContext{}, false
+	}
+	cookie, err := r.Cookie(a.SessionConfig.CookieName)
+	if err != nil {
+		return UserContext{}, false
+	}
+	selector, secret, ok := ParseSessionCookie(cookie.Value)
+	if !ok {
+		return UserContext{}, false
+	}
+	session, err := a.SessionStore.GetWebSession(r.Context(), queries.GetWebSessionParams{Selector: selector})
+	if err != nil || session.RevokedAt.Valid {
+		return UserContext{}, false
+	}
+	now := a.now()
+	nowUnix := now.Unix()
+	if session.ExpiresAt <= nowUnix || !VerifySessionSecret(secret, session.SecretHash) {
+		return UserContext{}, false
+	}
+	user, err := a.SessionStore.GetUser(r.Context(), queries.GetUserParams{ID: session.UserID})
+	if err != nil || user.Status != "active" {
+		return UserContext{}, false
+	}
+	scopes, err := decodeScopes(session.Scopes)
+	if err != nil {
+		return UserContext{}, false
+	}
+	if shouldTouchSession(session, a.SessionConfig.TouchInterval, nowUnix) {
+		_ = a.SessionStore.TouchWebSession(r.Context(), queries.TouchWebSessionParams{
+			LastSeenAt: nowUnix,
+			Selector:   selector,
+		})
+	}
+	return UserContext{
+		UserID:           user.ID,
+		Role:             user.Role,
+		Scopes:           scopes,
+		Now:              now,
+		CredentialSource: CredentialSession,
+		SessionSelector:  selector,
+		CSRFHash:         session.CsrfHash,
+	}, true
+}
+
+func shouldTouchSession(session queries.WebSession, interval time.Duration, nowUnix int64) bool {
+	if interval <= 0 {
+		return true
+	}
+	return session.LastSeenAt+int64(interval/time.Second) <= nowUnix
 }
 
 func (u UserContext) HasScope(scope string) bool {

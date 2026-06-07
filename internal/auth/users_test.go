@@ -99,6 +99,32 @@ func (f *fakeTokenStore) TouchAPIToken(ctx context.Context, _ queries.TouchAPITo
 	return f.touchErr
 }
 
+type fakeSessionStore struct {
+	session        queries.WebSession
+	sessErr        error
+	user           queries.User
+	userErr        error
+	touchErr       error
+	sessionLookups int
+	userLookups    int
+	touched        bool
+}
+
+func (f *fakeSessionStore) GetWebSession(ctx context.Context, _ queries.GetWebSessionParams) (queries.WebSession, error) {
+	f.sessionLookups++
+	return f.session, f.sessErr
+}
+
+func (f *fakeSessionStore) TouchWebSession(ctx context.Context, _ queries.TouchWebSessionParams) error {
+	f.touched = true
+	return f.touchErr
+}
+
+func (f *fakeSessionStore) GetUser(ctx context.Context, _ queries.GetUserParams) (queries.User, error) {
+	f.userLookups++
+	return f.user, f.userErr
+}
+
 func TestAuthenticatorAuthenticateDenialMatrix(t *testing.T) {
 	now := time.Unix(1000, 0)
 	authReq := func(header string) *http.Request {
@@ -267,6 +293,270 @@ func TestAuthenticatorAuthenticateDenialMatrix(t *testing.T) {
 	}
 }
 
+func TestAuthenticatorAuthenticateSessionDenialMatrix(t *testing.T) {
+	now := time.Unix(2000, 0)
+	sessionReq := func(cookieValue string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/app", nil)
+		if cookieValue != "" {
+			req.AddCookie(&http.Cookie{Name: "echo_session", Value: cookieValue})
+		}
+		return req
+	}
+	_, selector, secret, err := GenerateSessionToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validCookie := selector + "." + secret
+	wrongSecretCookie := selector + "." + differentBase64URLString(secret)
+
+	validUser := queries.User{
+		ID:        "u1",
+		Username:  "user",
+		Role:      "user",
+		Status:    "active",
+		CreatedAt: 1,
+		UpdatedAt: 1,
+	}
+	validSession := queries.WebSession{
+		Selector:   selector,
+		UserID:     "u1",
+		SecretHash: HashToken(secret),
+		CsrfHash:   HashToken("csrf"),
+		Scopes:     `["discovery","read","playback"]`,
+		CreatedAt:  1000,
+		LastSeenAt: 1000,
+		ExpiresAt:  3000,
+	}
+
+	var nilAuth *Authenticator
+	if _, ok := nilAuth.Authenticate(sessionReq(validCookie)); ok {
+		t.Fatal("nil authenticator Authenticate ok = true, want false")
+	}
+	if _, ok := (&Authenticator{
+		SessionConfig: SessionConfig{CookieName: "echo_session"},
+		Now:           func() time.Time { return now },
+	}).Authenticate(sessionReq(validCookie)); ok {
+		t.Fatal("nil session store Authenticate ok = true, want false")
+	}
+	if _, ok := (&Authenticator{
+		SessionStore:  &fakeSessionStore{session: validSession, user: validUser},
+		SessionConfig: SessionConfig{},
+		Now:           func() time.Time { return now },
+	}).Authenticate(sessionReq(validCookie)); ok {
+		t.Fatal("empty session cookie name Authenticate ok = true, want false")
+	}
+
+	tests := []struct {
+		name               string
+		cookie             string
+		store              *fakeSessionStore
+		touchInterval      time.Duration
+		want               UserContext
+		wantOK             bool
+		wantTouched        bool
+		wantSessionLookups int
+		wantUserLookups    int
+	}{
+		{
+			name:  "missing cookie",
+			store: &fakeSessionStore{session: validSession, user: validUser},
+		},
+		{
+			name:   "malformed cookie",
+			cookie: ".secret",
+			store:  &fakeSessionStore{session: validSession, user: validUser},
+		},
+		{
+			name:               "lookup error",
+			cookie:             validCookie,
+			store:              &fakeSessionStore{sessErr: sql.ErrNoRows},
+			wantSessionLookups: 1,
+		},
+		{
+			name:               "wrong secret",
+			cookie:             wrongSecretCookie,
+			store:              &fakeSessionStore{session: validSession, user: validUser},
+			wantSessionLookups: 1,
+		},
+		{
+			name:   "expired session",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session: withWebSession(validSession, func(s *queries.WebSession) {
+					s.ExpiresAt = 2000
+				}),
+				user: validUser,
+			},
+			wantSessionLookups: 1,
+		},
+		{
+			name:   "revoked session",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session: withWebSession(validSession, func(s *queries.WebSession) {
+					s.RevokedAt = sql.NullInt64{Int64: 1500, Valid: true}
+				}),
+				user: validUser,
+			},
+			wantSessionLookups: 1,
+		},
+		{
+			name:   "disabled user",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session: validSession,
+				user: withUser(validUser, func(u *queries.User) {
+					u.Status = "disabled"
+				}),
+			},
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+		{
+			name:               "user lookup error",
+			cookie:             validCookie,
+			store:              &fakeSessionStore{session: validSession, userErr: sql.ErrNoRows},
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+		{
+			name:   "invalid scopes",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session: withWebSession(validSession, func(s *queries.WebSession) {
+					s.Scopes = `["bogus"]`
+				}),
+				user: validUser,
+			},
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+		{
+			name:          "success touches stale session",
+			cookie:        validCookie,
+			store:         &fakeSessionStore{session: validSession, user: validUser},
+			touchInterval: time.Minute,
+			want: UserContext{
+				UserID:           "u1",
+				Role:             "user",
+				Scopes:           []string{"discovery", "read", "playback"},
+				Now:              now,
+				CredentialSource: CredentialSession,
+				SessionSelector:  selector,
+				CSRFHash:         HashToken("csrf"),
+			},
+			wantOK:             true,
+			wantTouched:        true,
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+		{
+			name:   "fresh last seen skips touch",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session: withWebSession(validSession, func(s *queries.WebSession) {
+					s.LastSeenAt = 1990
+				}),
+				user: validUser,
+			},
+			touchInterval: time.Minute,
+			want: UserContext{
+				UserID:           "u1",
+				Role:             "user",
+				Scopes:           []string{"discovery", "read", "playback"},
+				Now:              now,
+				CredentialSource: CredentialSession,
+				SessionSelector:  selector,
+				CSRFHash:         HashToken("csrf"),
+			},
+			wantOK:             true,
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+		{
+			name:   "zero touch interval touches fresh session",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session: withWebSession(validSession, func(s *queries.WebSession) {
+					s.LastSeenAt = 1999
+				}),
+				user: validUser,
+			},
+			want: UserContext{
+				UserID:           "u1",
+				Role:             "user",
+				Scopes:           []string{"discovery", "read", "playback"},
+				Now:              now,
+				CredentialSource: CredentialSession,
+				SessionSelector:  selector,
+				CSRFHash:         HashToken("csrf"),
+			},
+			wantOK:             true,
+			wantTouched:        true,
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+		{
+			name:   "touch error ignored",
+			cookie: validCookie,
+			store: &fakeSessionStore{
+				session:  validSession,
+				user:     validUser,
+				touchErr: errors.New("boom"),
+			},
+			touchInterval: time.Minute,
+			want: UserContext{
+				UserID:           "u1",
+				Role:             "user",
+				Scopes:           []string{"discovery", "read", "playback"},
+				Now:              now,
+				CredentialSource: CredentialSession,
+				SessionSelector:  selector,
+				CSRFHash:         HashToken("csrf"),
+			},
+			wantOK:             true,
+			wantTouched:        true,
+			wantSessionLookups: 1,
+			wantUserLookups:    1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &Authenticator{
+				SessionStore: tt.store,
+				SessionConfig: SessionConfig{
+					CookieName:    "echo_session",
+					TouchInterval: tt.touchInterval,
+				},
+				Now: func() time.Time { return now },
+			}
+			got, ok := a.Authenticate(sessionReq(tt.cookie))
+			if ok != tt.wantOK {
+				t.Fatalf("Authenticate ok = %v, want %v", ok, tt.wantOK)
+			}
+			if got.UserID != tt.want.UserID ||
+				got.Role != tt.want.Role ||
+				!slices.Equal(got.Scopes, tt.want.Scopes) ||
+				!got.Now.Equal(tt.want.Now) ||
+				got.CredentialSource != tt.want.CredentialSource ||
+				got.SessionSelector != tt.want.SessionSelector ||
+				got.CSRFHash != tt.want.CSRFHash {
+				t.Fatalf("Authenticate user = %#v, want %#v", got, tt.want)
+			}
+			if tt.store.touched != tt.wantTouched {
+				t.Fatalf("TouchWebSession called = %v, want %v", tt.store.touched, tt.wantTouched)
+			}
+			if tt.store.sessionLookups != tt.wantSessionLookups {
+				t.Fatalf("GetWebSession calls = %v, want %v", tt.store.sessionLookups, tt.wantSessionLookups)
+			}
+			if tt.store.userLookups != tt.wantUserLookups {
+				t.Fatalf("GetUser calls = %v, want %v", tt.store.userLookups, tt.wantUserLookups)
+			}
+		})
+	}
+}
+
 func withToken(token queries.ApiToken, fn func(*queries.ApiToken)) queries.ApiToken {
 	fn(&token)
 	return token
@@ -275,4 +565,16 @@ func withToken(token queries.ApiToken, fn func(*queries.ApiToken)) queries.ApiTo
 func withUser(user queries.User, fn func(*queries.User)) queries.User {
 	fn(&user)
 	return user
+}
+
+func withWebSession(s queries.WebSession, fn func(*queries.WebSession)) queries.WebSession {
+	fn(&s)
+	return s
+}
+
+func differentBase64URLString(s string) string {
+	if s[0] == 'A' {
+		return "B" + s[1:]
+	}
+	return "A" + s[1:]
 }

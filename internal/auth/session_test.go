@@ -36,10 +36,30 @@ func TestGenerateSessionTokenShapeAndVerification(t *testing.T) {
 }
 
 func TestParseSessionCookieRejectsMalformedParts(t *testing.T) {
-	for _, raw := range []string{".secret", "selector.", "selector.secret.extra"} {
-		if _, _, ok := ParseSessionCookie(raw); ok {
-			t.Fatalf("ParseSessionCookie accepted malformed cookie %q", raw)
-		}
+	_, selector, secret, err := GenerateSessionToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty selector", raw: "." + secret},
+		{name: "empty secret", raw: selector + "."},
+		{name: "extra dot", raw: selector + "." + secret + ".extra"},
+		{name: "invalid selector base64url character", raw: selector[:len(selector)-1] + "+" + "." + secret},
+		{name: "invalid secret base64url character", raw: selector + "." + secret[:len(secret)-1] + "/"},
+		{name: "short selector", raw: selector[:len(selector)-1] + "." + secret},
+		{name: "long selector", raw: selector + "a." + secret},
+		{name: "short secret", raw: selector + "." + secret[:len(secret)-1]},
+		{name: "long secret", raw: selector + "." + secret + "a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, ok := ParseSessionCookie(tt.raw); ok {
+				t.Fatalf("ParseSessionCookie accepted malformed cookie %q", tt.raw)
+			}
+		})
 	}
 }
 
