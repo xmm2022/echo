@@ -17,6 +17,7 @@ import (
 
 func (d APIDeps) MountBootstrap(r chi.Router) {
 	r.Post("/api/bootstrap/admin-token", d.CreateBootstrapAdminToken)
+	r.Post("/api/bootstrap/admin-password", d.SetBootstrapAdminPassword)
 }
 
 type createBootstrapAdminTokenRequest struct {
