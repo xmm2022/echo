@@ -80,3 +80,13 @@ type sidecarEnvelopeError struct {
 func (e *sidecarEnvelopeError) Error() string {
 	return fmt.Sprintf("sidecar api error: code=%d message=%s", e.Code, e.Message)
 }
+
+// OpenListEnvelopeErrorDetails extracts the safe code/message pair from an
+// OpenList JSON envelope failure returned by this package.
+func OpenListEnvelopeErrorDetails(err error) (code int, message string, ok bool) {
+	var envelopeErr *sidecarEnvelopeError
+	if !errors.As(err, &envelopeErr) {
+		return 0, "", false
+	}
+	return envelopeErr.Code, envelopeErr.Message, true
+}

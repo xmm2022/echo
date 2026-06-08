@@ -5,6 +5,7 @@ package integration
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,10 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/xmm2022/echo/internal/config"
 	"github.com/xmm2022/echo/internal/pathsafe"
+	"github.com/xmm2022/echo/internal/sidecarclient"
 )
 
 // TestReal115ProducerIngestStream is the manual, secret-gated end-to-end test
@@ -53,6 +57,7 @@ func TestReal115ProducerIngestStream(t *testing.T) {
 	if sidecarURL == "" || storageMount == "" {
 		t.Skip("integration_real: set ECHO_TEST_SIDECAR_URL and ECHO_TEST_115_STORAGE_MOUNT to run")
 	}
+	preflightReal115Sidecar(t, sidecarURL, os.Getenv("ECHO_TEST_SIDECAR_TOKEN"), storageMount)
 
 	timeout := parseDurationEnv(t, "ECHO_TEST_115_TIMEOUT", 15*time.Minute)
 	casTree := os.Getenv("ECHO_TEST_115_CAS_TREE")
@@ -124,6 +129,69 @@ func TestReal115ProducerIngestStream(t *testing.T) {
 		t.Fatalf("stream returned 0 bytes, want the first chunk of the file")
 	}
 	t.Logf("real 115 chain OK: ingested %q, streamed %d bytes", entry.RelPath, len(body))
+}
+
+func TestReal115Preflight(t *testing.T) {
+	sidecarURL := os.Getenv("ECHO_TEST_SIDECAR_URL")
+	storageMount := os.Getenv("ECHO_TEST_115_STORAGE_MOUNT")
+	if sidecarURL == "" || storageMount == "" {
+		t.Skip("integration_real: set ECHO_TEST_SIDECAR_URL and ECHO_TEST_115_STORAGE_MOUNT to run")
+	}
+	preflightReal115Sidecar(t, sidecarURL, os.Getenv("ECHO_TEST_SIDECAR_TOKEN"), storageMount)
+}
+
+func preflightReal115Sidecar(t *testing.T, sidecarURL, sidecarToken, storageMount string) {
+	t.Helper()
+
+	const preflightTokenEnv = "ECHO_TEST_SIDECAR_PREFLIGHT_TOKEN"
+	t.Setenv(preflightTokenEnv, sidecarToken)
+
+	client := sidecarclient.New(sidecarclient.Config{
+		BaseURL:        sidecarURL,
+		AuthTokenEnv:   preflightTokenEnv,
+		MinVersion:     os.Getenv("ECHO_TEST_SIDECAR_MIN_VERSION"),
+		RequestTimeout: config.Duration{Duration: 15 * time.Second},
+		StreamTimeout:  config.Duration{Duration: 15 * time.Second},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := client.Ping(ctx); err != nil {
+		t.Fatalf("real 115 preflight: ping %s failed: %v; check ECHO_TEST_SIDECAR_URL", sidecarURL, err)
+	}
+	version, err := client.Version(ctx)
+	if err != nil {
+		t.Fatalf("real 115 preflight: version check on %s failed: %v; check ECHO_TEST_SIDECAR_URL and ECHO_TEST_SIDECAR_MIN_VERSION", sidecarURL, err)
+	}
+	storages, err := client.ListStorages(ctx)
+	if err != nil {
+		if code, message, ok := sidecarclient.OpenListEnvelopeErrorDetails(err); ok {
+			t.Fatalf("real 115 preflight: storage list on %s failed with OpenList code=%d message=%q; check ECHO_TEST_SIDECAR_TOKEN belongs to the running sidecar configured by ECHO_TEST_SIDECAR_URL", sidecarURL, code, message)
+		}
+		t.Fatalf("real 115 preflight: storage list on %s failed: %v; check ECHO_TEST_SIDECAR_URL and ECHO_TEST_SIDECAR_TOKEN", sidecarURL, err)
+	}
+	for _, storage := range storages {
+		if storage.MountPath == storageMount {
+			t.Logf("real 115 preflight OK: sidecar=%s version=%q storage_mount=%q storage_count=%d", sidecarURL, version, storageMount, len(storages))
+			return
+		}
+	}
+	t.Fatalf("real 115 preflight: ECHO_TEST_115_STORAGE_MOUNT=%q not found on sidecar %s (version %q); available storages: %s", storageMount, sidecarURL, version, real115StorageSummaries(storages))
+}
+
+func real115StorageSummaries(storages []sidecarclient.Storage) string {
+	if len(storages) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, min(len(storages), 10))
+	for i, storage := range storages {
+		if i == 10 {
+			parts = append(parts, fmt.Sprintf("... %d more", len(storages)-10))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("{id:%s driver:%s mount_path:%s status:%s}", storage.ID, storage.Provider, storage.MountPath, storage.Status))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func submitRealProducerIngest(t *testing.T, env *testEnv, libraryID int64, accountID string) int64 {

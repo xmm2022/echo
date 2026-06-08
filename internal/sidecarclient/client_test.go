@@ -112,6 +112,28 @@ func TestListStoragesRequiresOpenListEnvelope(t *testing.T) {
 	}
 }
 
+func TestOpenListEnvelopeErrorDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":401,"message":"token is invalidated","data":null}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := New(testConfig(server.URL, ""))
+	_, err := client.ListStorages(context.Background())
+	if err == nil {
+		t.Fatal("ListStorages error = nil, want OpenList envelope error")
+	}
+
+	code, message, ok := OpenListEnvelopeErrorDetails(err)
+	if !ok {
+		t.Fatalf("OpenListEnvelopeErrorDetails ok = false for %T %[1]v", err)
+	}
+	if code != http.StatusUnauthorized || message != "token is invalidated" {
+		t.Fatalf("details = (%d, %q), want (401, token is invalidated)", code, message)
+	}
+}
+
 func TestUnreachableAndHTTPErrorAreSeparated(t *testing.T) {
 	fake := fakesidecar.New(t, fakesidecar.Options{
 		Version:       "sidecar-abc123",
