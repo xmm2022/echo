@@ -22,6 +22,7 @@ Local verification recorded on 2026-06-08:
 - `make migrate`: `PASS`
 - `make build`: `PASS`
 - `go test -tags=integration_real ./integration -run TestReal115Preflight -count=1`: blocked by operator env drift. The configured `ECHO_TEST_SIDECAR_URL` points to `127.0.0.1:5247` with no listener; when overridden to the running sidecar on `127.0.0.1:5246`, OpenList returns `code=401,message="token is invalidated"` for the configured token.
+- `go test -tags=integration_real -run TestReal115 -timeout 30m -v ./integration/...`: `PASS` after starting the recorded hotfix sidecar on `127.0.0.1:5247` with `/home/nax/echo-sidecar-data`; preflight saw `/115`, ingest succeeded, and Echo streamed `4096` bytes.
 
 ### v0.4 media requests
 
