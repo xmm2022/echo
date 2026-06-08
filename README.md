@@ -2,7 +2,7 @@
 
 跨云盘资源池服务。把多家网盘（115、189pc、139 起步）的资源通过 `.echo` 占位文件统一管理：ingest 阶段在指定账号上秒传一份并落库，输出可被 Emby / OpenList / 媒体工具消费的 `.echo` 文件树；访问 `.echo` 时由 Echo 通过 sidecar 拿直链或代理流式回放，不再二次实例化。v0.1 中只有 115 支持"丢一个分享链接进来自动 ingest"（`115share2cas` 自动 exec）；139 走 manual import（用户自行跑 `cas139` 生成 `.cas` tree 后通过 `/api/ingest/manual` 导入）。
 
-> 状态：v0.5 browser auth foundation 主线已实现；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)，v0.4 设计见 [`docs/superpowers/specs/2026-06-04-echo-v0.4-design.md`](docs/superpowers/specs/2026-06-04-echo-v0.4-design.md)，v0.5 设计见 [`docs/superpowers/specs/2026-06-07-echo-v0.5-browser-auth-design.md`](docs/superpowers/specs/2026-06-07-echo-v0.5-browser-auth-design.md)。
+> 状态：v0.5 browser auth foundation 与 media request UX slice 主线已实现；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)，v0.4 设计见 [`docs/superpowers/specs/2026-06-04-echo-v0.4-design.md`](docs/superpowers/specs/2026-06-04-echo-v0.4-design.md)，v0.5 auth 设计见 [`docs/superpowers/specs/2026-06-07-echo-v0.5-browser-auth-design.md`](docs/superpowers/specs/2026-06-07-echo-v0.5-browser-auth-design.md)，v0.5 UX 设计见 [`docs/superpowers/specs/2026-06-08-echo-v0.5-media-request-ux-design.md`](docs/superpowers/specs/2026-06-08-echo-v0.5-media-request-ux-design.md)。
 
 ## 定位
 

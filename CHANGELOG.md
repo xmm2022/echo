@@ -9,6 +9,17 @@
 - Added bootstrap admin password setup while preserving DB-backed Bearer API tokens for automation.
 - Added a full-path fake browser auth integration gate (`TestBrowserAuthFakeFullPath`) covering browser login/session, CSRF success and missing-token rejection, and media request creation.
 - Removed browser localStorage token inputs from the admin and user shells.
+- Added a local CSS-backed `/app` media request UX slice with responsive panels, TMDB poster result cards, status badges, and mobile-safe table containers.
+- Added `TestMediaRequestUXStructure` coverage for `/app` CSS linkage, stable shell classes, search result card structure, and request/subscription table wrappers.
+
+Local verification recorded on 2026-06-08:
+
+- `go test ./internal/web -run 'TestAppShellRendersSessionPanelsAndNoTokenBox|TestAppFragmentsNeverRenderAdminDiscoveryControls|TestMediaRequestUXStructure' -count=1`: `PASS`
+- `go run github.com/a-h/templ/cmd/templ@v0.2.778 generate`: `PASS`
+- `go test ./internal/web -count=1`: `PASS`
+- `go test ./... -count=1`: `PASS`
+- `make migrate`: `PASS`
+- `make build`: `PASS`
 
 ### v0.4 media requests
 
