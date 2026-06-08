@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/xmm2022/echo/internal/auth"
@@ -29,8 +30,12 @@ func TestAuthBearer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			called := false
-			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
+				user := auth.FromContext(r.Context())
+				if user.CredentialSource != auth.CredentialBearer {
+					t.Fatalf("credential source = %q, want %q", user.CredentialSource, auth.CredentialBearer)
+				}
 				w.WriteHeader(http.StatusOK)
 			})
 			h := Auth(tt.token)(next)
@@ -101,5 +106,150 @@ func TestAuthFuncMiddleware(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("next handler not called")
+	}
+}
+
+func TestOptionalAuthAttachesUserOnlyWhenCheckSucceeds(t *testing.T) {
+	tests := []struct {
+		name       string
+		check      CheckFunc
+		wantUserID string
+	}{
+		{
+			name:       "nil check",
+			check:      nil,
+			wantUserID: "",
+		},
+		{
+			name: "failed check",
+			check: func(*http.Request) (auth.UserContext, bool) {
+				return auth.UserContext{}, false
+			},
+			wantUserID: "",
+		},
+		{
+			name: "successful check",
+			check: func(*http.Request) (auth.UserContext, bool) {
+				return auth.UserContext{UserID: "u1", CredentialSource: auth.CredentialSession}, true
+			},
+			wantUserID: "u1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				if got := auth.FromContext(r.Context()).UserID; got != tt.wantUserID {
+					t.Fatalf("context user = %q, want %q", got, tt.wantUserID)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			h := OptionalAuth(tt.check)(next)
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if !called {
+				t.Fatal("next handler not called")
+			}
+		})
+	}
+}
+
+func TestCSRFRequiresTokenForSessionMutationsOnly(t *testing.T) {
+	sessionUser := auth.UserContext{
+		UserID:           "u1",
+		CredentialSource: auth.CredentialSession,
+		CSRFHash:         auth.HashToken("csrf"),
+	}
+	bearerUser := auth.UserContext{
+		UserID:           "api",
+		CredentialSource: auth.CredentialBearer,
+	}
+
+	tests := []struct {
+		name       string
+		method     string
+		user       auth.UserContext
+		csrfHeader string
+		wantStatus int
+		wantCalled bool
+	}{
+		{
+			name:       "session GET skips CSRF and reaches next",
+			method:     http.MethodGet,
+			user:       sessionUser,
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		{
+			name:       "session POST missing token returns 403",
+			method:     http.MethodPost,
+			user:       sessionUser,
+			wantStatus: http.StatusForbidden,
+			wantCalled: false,
+		},
+		{
+			name:       "session POST wrong token returns 403",
+			method:     http.MethodPost,
+			user:       sessionUser,
+			csrfHeader: "wrong",
+			wantStatus: http.StatusForbidden,
+			wantCalled: false,
+		},
+		{
+			name:       "session POST correct X-CSRF-Token reaches next",
+			method:     http.MethodPost,
+			user:       sessionUser,
+			csrfHeader: "csrf",
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		{
+			name:       "Bearer POST with no CSRF reaches next",
+			method:     http.MethodPost,
+			user:       bearerUser,
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+			h := CSRF(next)
+
+			req := httptest.NewRequest(tt.method, "/api/resource", nil)
+			req = req.WithContext(auth.NewContext(req.Context(), tt.user))
+			if tt.csrfHeader != "" {
+				req.Header.Set("X-CSRF-Token", tt.csrfHeader)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if called != tt.wantCalled {
+				t.Fatalf("next called = %v, want %v", called, tt.wantCalled)
+			}
+			if tt.wantStatus == http.StatusForbidden {
+				if got := rec.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("Content-Type = %q, want application/json", got)
+				}
+				if got := strings.TrimSpace(rec.Body.String()); got != `{"error":"csrf-token-invalid"}` {
+					t.Fatalf("body = %q, want csrf-token-invalid JSON", got)
+				}
+			}
+		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/xmm2022/echo/internal/store/queries"
@@ -51,6 +52,60 @@ func TestMediaRequestMigrationCreatesV04Tables(t *testing.T) {
 			t.Fatalf("missing table %s: %v", table, err)
 		}
 	}
+}
+
+func TestWebSessionMigrationCreatesV05Tables(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	var name string
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT name FROM sqlite_master WHERE type='table' AND name='web_sessions'`).Scan(&name); err != nil {
+		t.Fatalf("missing web_sessions table: %v", err)
+	}
+
+	requiredColumns := []string{
+		"selector",
+		"user_id",
+		"secret_hash",
+		"csrf_hash",
+		"scopes",
+		"created_at",
+		"last_seen_at",
+		"expires_at",
+	}
+	columns := tableColumnNotNullFlags(t, st.DB, "web_sessions")
+	for _, column := range requiredColumns {
+		notNull, ok := columns[column]
+		if !ok {
+			t.Fatalf("web_sessions missing required column %s; got %#v", column, columns)
+		}
+		if notNull != 1 {
+			t.Fatalf("web_sessions column %s notnull=%d, want 1", column, notNull)
+		}
+	}
+
+	var fkCount int
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_foreign_key_list('web_sessions')
+WHERE "table" = 'users' AND "from" = 'user_id' AND on_delete = 'CASCADE'`).Scan(&fkCount); err != nil {
+		t.Fatal(err)
+	}
+	if fkCount != 1 {
+		t.Fatalf("web_sessions cascading user FK count=%d, want 1", fkCount)
+	}
+
+	var indexCount int
+	if err := st.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_index_list('web_sessions')
+WHERE name IN ('idx_web_sessions_user','idx_web_sessions_expiry')`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 2 {
+		t.Fatalf("web_sessions index count=%d, want 2", indexCount)
+	}
+	assertIndexColumns(t, st.DB, "idx_web_sessions_user", []string{"user_id", "revoked_at", "expires_at"})
+	assertIndexColumns(t, st.DB, "idx_web_sessions_expiry", []string{"expires_at", "revoked_at"})
 }
 
 func TestMediaRequestMigrationEnforcesV04Constraints(t *testing.T) {
@@ -194,6 +249,61 @@ func hasUniqueIndexOnColumn(t *testing.T, db *sql.DB, table, column string) bool
 		t.Fatalf("iterate indexes for %s: %v", table, err)
 	}
 	return false
+}
+
+func tableColumnNotNullFlags(t *testing.T, db *sql.DB, table string) map[string]int {
+	t.Helper()
+	rows, err := db.Query("SELECT name, \"notnull\" FROM pragma_table_info(?)", table)
+	if err != nil {
+		t.Fatalf("list columns for %s: %v", table, err)
+	}
+	defer rows.Close()
+
+	columns := map[string]int{}
+	for rows.Next() {
+		var (
+			name    string
+			notNull int
+		)
+		if err := rows.Scan(&name, &notNull); err != nil {
+			t.Fatalf("scan column for %s: %v", table, err)
+		}
+		columns[name] = notNull
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate columns for %s: %v", table, err)
+	}
+	return columns
+}
+
+func assertIndexColumns(t *testing.T, db *sql.DB, indexName string, want []string) {
+	t.Helper()
+	got := indexColumns(t, db, indexName)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("index %s columns=%v, want %v", indexName, got, want)
+	}
+}
+
+func indexColumns(t *testing.T, db *sql.DB, indexName string) []string {
+	t.Helper()
+	rows, err := db.Query("SELECT name FROM pragma_index_info(?) ORDER BY seqno", indexName)
+	if err != nil {
+		t.Fatalf("list columns for index %s: %v", indexName, err)
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan column for index %s: %v", indexName, err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate columns for index %s: %v", indexName, err)
+	}
+	return columns
 }
 
 func indexHasColumn(t *testing.T, db *sql.DB, indexName, column string) bool {

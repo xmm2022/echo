@@ -96,7 +96,7 @@ func TestMigrationUpDownClean(t *testing.T) {
 		"quota_usage", "playback_events", "accounts", "libraries", "blobs", "library_entries",
 		"blob_hashes", "file_copies", "hash_conflicts", "jobs", "producer_runs",
 		"emby_servers", "emby_user_links", "playback_sessions", "playback_error_tokens",
-		"emby_library_mappings", "emby_item_mappings",
+		"emby_library_mappings", "emby_item_mappings", "web_sessions",
 	} {
 		if tableExists(t, db, name) {
 			t.Fatalf("%s table still exists after migrate down", name)
@@ -763,6 +763,37 @@ func TestBeginImmediateTxSerializesConcurrentFileCopyUpserts(t *testing.T) {
 	}
 	if copy.LastSeen != 2 {
 		t.Fatalf("last_seen = %d, want second serialized upsert timestamp 2", copy.LastSeen)
+	}
+}
+
+func TestImmediateTxCommitFailureAllowsRollback(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	tx, _, err := st.BeginImmediateTx(ctx)
+	if err != nil {
+		t.Fatalf("begin immediate tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatalf("force transaction inactive: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err == nil {
+		t.Fatal("commit unexpectedly succeeded after transaction was already rolled back")
+	}
+	if err := tx.Rollback(ctx); errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("rollback after failed commit returned ErrTxDone; commit marked tx done too early")
+	}
+	if err := tx.Rollback(ctx); !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("second rollback err=%v, want ErrTxDone", err)
+	}
+
+	tx2, _, err := st.BeginImmediateTx(ctx)
+	if err != nil {
+		t.Fatalf("begin immediate tx after failed commit rollback: %v", err)
+	}
+	if err := tx2.Rollback(ctx); err != nil {
+		t.Fatalf("rollback second tx: %v", err)
 	}
 }
 

@@ -2,7 +2,7 @@
 
 跨云盘资源池服务。把多家网盘（115、189pc、139 起步）的资源通过 `.echo` 占位文件统一管理：ingest 阶段在指定账号上秒传一份并落库，输出可被 Emby / OpenList / 媒体工具消费的 `.echo` 文件树；访问 `.echo` 时由 Echo 通过 sidecar 拿直链或代理流式回放，不再二次实例化。v0.1 中只有 115 支持"丢一个分享链接进来自动 ingest"（`115share2cas` 自动 exec）；139 走 manual import（用户自行跑 `cas139` 生成 `.cas` tree 后通过 `/api/ingest/manual` 导入）。
 
-> 状态：v0.4 media request 主线已实现并通过本地 fake full-path gate；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)，v0.4 设计见 [`docs/superpowers/specs/2026-06-04-echo-v0.4-design.md`](docs/superpowers/specs/2026-06-04-echo-v0.4-design.md)。
+> 状态：v0.5 browser auth foundation 主线已实现；正式 tag / release 元数据仍待最终真实环境 gate 和 sidecar 版本钉住。基础设计文档见 [`docs/superpowers/specs/2026-05-28-echo-design.md`](docs/superpowers/specs/2026-05-28-echo-design.md)，v0.3 设计见 [`docs/superpowers/specs/2026-06-02-echo-v0.3-design.md`](docs/superpowers/specs/2026-06-02-echo-v0.3-design.md)，v0.4 设计见 [`docs/superpowers/specs/2026-06-04-echo-v0.4-design.md`](docs/superpowers/specs/2026-06-04-echo-v0.4-design.md)，v0.5 设计见 [`docs/superpowers/specs/2026-06-07-echo-v0.5-browser-auth-design.md`](docs/superpowers/specs/2026-06-07-echo-v0.5-browser-auth-design.md)。
 
 ## 定位
 
@@ -27,7 +27,18 @@ docker compose -f docker-compose.example.yml up
 - `GET /healthz` 永远 200（liveness）
 - `GET /readyz` 在 sidecar token 未配 / 版本不符时返回 503；配齐后返回 200（DB ping + sidecar Ping + 版本校验）
 - `GET /metrics` 暴露 Prometheus 指标（`echo_*` 业务指标 + Go/进程指标）
-- 用 `ECHO_BOOTSTRAP_ADMIN_TOKEN` 调 `/api/bootstrap/admin-token` 签发 admin API token；浏览器打开 `/` 后粘贴该 DB-backed admin token 即可访问管理后台
+- 首次部署先用 `ECHO_BOOTSTRAP_ADMIN_TOKEN` 给 admin 用户设置浏览器登录密码：
+
+  ```bash
+  curl -X POST http://localhost:8080/api/bootstrap/admin-password \
+    -H "Authorization: Bearer $ECHO_BOOTSTRAP_ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"password":"replace with a strong password"}'
+  ```
+
+- 浏览器用户在 `/login` 使用 Echo 用户名和密码登录；登录后通过服务端 web session 与 HttpOnly `echo_session` cookie 访问 `/` 和 `/app`。
+- CLI / 自动化仍支持 DB-backed Bearer API token，并且仍可用 `/api/bootstrap/admin-token` 签发 admin API token。
+- cookie-auth 浏览器写操作需要 CSRF token；打包的 Web UI 会自动从 session 接口读取并随请求提交。
 
 镜像里打包了 `115share2cas` 生产器（固定到 `docker/Dockerfile` 的 `SIDECAR_TOOLS_REF`）；`cas139`（Python）不打包，需在 139 客户端环境自行运行后走 manual import。反代示例见 [`nginx.example.conf`](nginx.example.conf)。
 
@@ -70,9 +81,11 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 
 ## HTTP API 与管理后台
 
-`echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。当前默认鉴权是 DB-backed Bearer API token：`auth.bootstrap_admin_token` 只用于 `/api/bootstrap/admin-token` 签发 / 找回 admin API token；日常 `/api/*`、`/ui/*` 和 `/app/*` 数据请求都走 API token。旧的 `auth.admin_token` 仅作为 v0.1 静态 token 兼容入口，不应作为长期管理凭据。`/healthz`、`/readyz`、`/metrics` 与数据无关的仪表盘外壳 `/`、`/app`、`/static/*` 公开。
+`echo serve` 暴露一组 JSON API（`/api/accounts`、`/api/libraries`、`/api/ingest/{manual,producer}`、`/api/jobs`、`/api/libraries/{id}/entries`、`/api/conflicts`，以及 `/api/restore/{file_id}`、`/api/stream/{file_id}`）。v0.5 把浏览器和自动化鉴权分开：浏览器入口 `/`、`/app` 与 `/login` 使用服务端 web session、HttpOnly `echo_session` cookie 和 `/api/session/*`；cookie-auth 的 `/api/*` 写操作必须带当前 CSRF token。打包的 templ + htmx Web UI 会自动读取 `/api/session/me` 的 redacted user projection 和 CSRF token 并随写请求提交。
 
-最小管理后台（templ + htmx）在 `/`，只读地看 Job 与 hash 冲突。前端依赖 **vendored** 的 htmx（`internal/web/static/htmx.min.js`，不走 CDN，版本与来源见 [`internal/web/static/README.md`](internal/web/static/README.md)）。浏览器里有两个本地 token 输入：admin token 只附加到除 `/api/me/*` 以外的 `/api/*` 与 `/ui/*` 管理请求；app token 只附加到 `/api/me/*` 与 `/app/*` 用户请求。
+DB-backed Bearer API token 继续用于 CLI / 自动化并兼容 `/api/*`；Bearer 请求不需要 CSRF。`auth.bootstrap_admin_token` 只用于 `/api/bootstrap/admin-password` 设置初始 admin 浏览器密码，以及 `/api/bootstrap/admin-token` 签发 / 找回 admin API token。旧的 `auth.admin_token` 仅作为 v0.1 静态 token 兼容入口，不应作为长期管理凭据。`/healthz`、`/readyz`、`/metrics`、`/static/*` 和登录/session 入口不需要 Bearer token。
+
+最小管理后台（templ + htmx）在 `/`，只读地看 Job 与 hash 冲突；用户 media request shell 在 `/app`。前端依赖 **vendored** 的 htmx（`internal/web/static/htmx.min.js`，不走 CDN，版本与来源见 [`internal/web/static/README.md`](internal/web/static/README.md)）。浏览器壳不再提供本地 token 输入，也不再依赖 localStorage 保存 API token；admin 与用户请求都走登录后的 cookie session，后台仍按角色和 scope 区分 admin-only `/ui/discovery/*`、`/api/discovery/*`，以及 discovery-scope 的 `/app/*`、`/api/me/discovery/*` 用户面。
 
 ### v0.2 Emby 反向代理（`/emby`）
 
@@ -81,7 +94,7 @@ Echo 自己**不生产** CAS（不抓分享、不算 hash），CAS payload 必�
 - Emby 客户端把服务器地址填成 `https://echo.example.com/emby`（本地测试用 `http://localhost:8080/emby`），其余请求透传到上游 Emby。
 - 命中库映射的 PlaybackInfo 源会被改写成 `/emby/stream/{token}` 或 `/emby/error/{token}`，上游 Emby 的真实 stream URL、签名 URL 与鉴权头一律不下发给客户端。
 - `/api/restore/{file_id}` 与 `/api/stream/{file_id}` 仍是 Echo 的管理 / v0.1 兼容 API，**不是** Emby PlaybackInfo 的改写目标，不要把它们填进 Emby。
-- `auth.bootstrap_admin_token` 只用于找回 / 签发 admin token；日常管理请求走 DB 里的 API token，而非这个 bootstrap 凭据。
+- `auth.bootstrap_admin_token` 只用于初始化 admin 浏览器密码（`/api/bootstrap/admin-password`）和找回 / 签发 DB-backed admin API token（`/api/bootstrap/admin-token`）；日常浏览器管理请求走登录后的 cookie session，CLI / 自动化管理请求走 DB 里的 Bearer API token，而非这个 bootstrap 凭据。
 - 上游 Emby API key 通过 `emby_proxy.upstream.api_key_ref` 引用，支持 `env:NAME`（如 `env:EMBY_API_KEY`）或 `ref:relative/path`（相对 `secrets_root` 的常规文件，禁止绝对路径 / `..` / 软链逃逸）。
 
 ### v0.3 Discovery 自动订阅
@@ -102,7 +115,7 @@ Discovery 不直接写 `library_entries` / `file_copies`，也不直接 import s
 v0.4 在 v0.3 admin-only discovery 之上增加用户侧媒体请求与订阅准入层：
 
 - `/app` 是用户 media request shell，普通用户可以搜索 TMDB、提交请求、查看自己的请求和订阅状态。
-- v0.4 MVP 继续使用 Bearer/API token；完整浏览器登录、cookie session 和 CSRF 设计留到后续版本。
+- v0.5 起浏览器用户通过 `/login`、cookie session 和 CSRF 保护访问该 shell；Bearer/API token 保留给 CLI 和自动化。
 - 用户 JSON API 挂在 `/api/me/discovery/*`，调用方必须持有 `discovery` scope。
 - 现有 `/api/discovery/*` 与 `/ui/discovery/*` discovery 管理控制面仍然是 admin-only；source、producer profile、rule profile、candidate、match、run 和 raw debug 不对普通用户开放。
 - 用户请求不会直接排 producer job。admin approve 或 policy auto-approve 才会创建/复用 canonical `discovery_subscriptions`，再由既有 v0.3 scheduler / match / dispatch 路径处理。

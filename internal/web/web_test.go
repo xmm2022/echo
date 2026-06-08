@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,21 +26,142 @@ func newWebStore(t *testing.T) *store.Store {
 	return st
 }
 
-func TestIndexServesPublicShell(t *testing.T) {
+func TestIndexServesSessionAwareAdminShell(t *testing.T) {
 	d := Deps{Store: newWebStore(t)}
 	rec := httptest.NewRecorder()
 	d.Index(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("unauthenticated status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "/login?next=/" {
+		t.Fatalf("unauthenticated Location = %q, want /login?next=/", got)
+	}
+
+	rec = httptest.NewRecorder()
+	d.Index(rec, webRequestWithUser(http.MethodGet, "/", adminSessionUser()))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+		t.Fatalf("admin status = %d, want 200", rec.Code)
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"Echo Admin", "/static/htmx.min.js", "/static/app.js", `id="admin-token"`, `hx-get="/ui/jobs"`, `hx-get="/ui/conflicts"`} {
+	for _, want := range []string{"Echo Admin", "/static/htmx.min.js", "/static/app.js", `hx-get="/ui/jobs"`, `hx-get="/ui/conflicts"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard missing %q", want)
+		}
+	}
+	for _, bad := range []string{`id="admin-token"`, "echo_admin_token", "paste ADMIN_TOKEN"} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("dashboard rendered token UI %q: %s", bad, body)
+		}
+	}
+}
+
+func TestBrowserShellsRedirectWhenUnauthenticated(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string
+		serve    func(Deps, http.ResponseWriter, *http.Request)
+		location string
+	}{
+		{name: "admin", path: "/", serve: Deps.Index, location: "/login?next=/"},
+		{name: "app", path: "/app", serve: Deps.App, location: "/login?next=/app"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			tc.serve(Deps{}, rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("%s status = %d, want 303", tc.path, rec.Code)
+			}
+			if got := rec.Header().Get("Location"); got != tc.location {
+				t.Fatalf("%s Location = %q, want %q", tc.path, got, tc.location)
+			}
+		})
+	}
+}
+
+func TestAdminShellDoesNotRenderTokenBox(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Deps{}.Index(rec, webRequestWithUser(http.MethodGet, "/", adminSessionUser()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, bad := range []string{`id="admin-token"`, "echo_admin_token", "paste ADMIN_TOKEN"} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("admin shell rendered token UI %q: %s", bad, body)
+		}
+	}
+}
+
+func TestLoginRendersFormWithSafeNext(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Deps{}.Login(rec, httptest.NewRequest(http.MethodGet, "/login?next=/app", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`id="login-form"`,
+		`method="post"`,
+		`action="/api/session/login"`,
+		`data-next="/app"`,
+		`id="login-username"`,
+		`name="username"`,
+		`autocomplete="username"`,
+		`id="login-password"`,
+		`name="password"`,
+		`autocomplete="current-password"`,
+		`required`,
+		`id="login-error"`,
+		`/static/app.js`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("login form missing %q in body=%s", want, body)
+		}
+	}
+}
+
+func TestLoginRedirectsAuthenticatedUsers(t *testing.T) {
+	cases := []struct {
+		name     string
+		user     auth.UserContext
+		location string
+	}{
+		{name: "admin", user: adminSessionUser(), location: "/"},
+		{name: "ordinary", user: auth.UserContext{UserID: "u1", Role: "user", Scopes: []string{"discovery"}, CredentialSource: auth.CredentialSession}, location: "/app"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			Deps{}.Login(rec, webRequestWithUser(http.MethodGet, "/login?next=/app", tc.user))
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want 303", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); got != tc.location {
+				t.Fatalf("Location = %q, want %q", got, tc.location)
+			}
+		})
+	}
+}
+
+func TestLoginDoesNotReflectUnsafeNext(t *testing.T) {
+	for _, path := range []string{"/login?next=//evil.example/app", "/login?next=/%5Cevil"} {
+		rec := httptest.NewRecorder()
+		Deps{}.Login(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, rec.Code)
+		}
+		body := rec.Body.String()
+		for _, bad := range []string{"//evil.example", "\\evil", `data-next="//evil.example/app"`, `data-next="/\evil"`} {
+			if strings.Contains(body, bad) {
+				t.Fatalf("%s reflected unsafe next %q: %s", path, bad, body)
+			}
 		}
 	}
 }
@@ -79,9 +201,10 @@ func TestUIConflictsRendersOpenOnly(t *testing.T) {
 	st := newWebStore(t)
 	a, _ := st.CreateBlob(ctx, queries.CreateBlobParams{Size: 1, OwnerID: "admin", CreatedAt: 1, UpdatedAt: 1})
 	b, _ := st.CreateBlob(ctx, queries.CreateBlobParams{Size: 2, OwnerID: "admin", CreatedAt: 1, UpdatedAt: 1})
-	if _, err := st.InsertHashConflict(ctx, queries.InsertHashConflictParams{
+	conflict, err := st.InsertHashConflict(ctx, queries.InsertHashConflictParams{
 		BlobIDA: a.ID, BlobIDB: b.ID, Reason: "hash_multi_blob", Detail: "{}", ObservedAt: 1, Status: "open",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	d := Deps{Store: st}
@@ -94,14 +217,23 @@ func TestUIConflictsRendersOpenOnly(t *testing.T) {
 	if !strings.Contains(body, "hash_multi_blob") {
 		t.Fatalf("conflicts fragment missing conflict: %s", body)
 	}
-	if !strings.Contains(body, "/api/conflicts/") || !strings.Contains(body, `hx-swap="delete"`) {
-		t.Fatalf("conflicts fragment missing dismiss button: %s", body)
+	dismissPath := "/api/conflicts/" + strconv.FormatInt(conflict.ID, 10) + "/dismiss"
+	for _, want := range []string{`<form`, `hx-post="` + dismissPath + `"`, `hx-swap="none"`, `<button type="submit">Dismiss</button>`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("conflicts fragment missing form-based dismiss control %q: %s", want, body)
+		}
+	}
+	if !strings.Contains(body, "/api/conflicts/") {
+		t.Fatalf("conflicts fragment missing dismiss route: %s", body)
+	}
+	if strings.Contains(body, `hx-swap="delete"`) {
+		t.Fatalf("conflicts fragment still uses direct htmx row delete: %s", body)
 	}
 }
 
 func TestIndexContainsV02ManagementPanels(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Deps{}.Index(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	Deps{}.Index(rec, webRequestWithUser(http.MethodGet, "/", adminSessionUser()))
 	body := rec.Body.String()
 	for _, want := range []string{
 		`hx-get="/ui/emby/servers"`,
@@ -121,13 +253,27 @@ func TestIndexContainsV02ManagementPanels(t *testing.T) {
 
 func TestIndexDescribesCurrentV03Scope(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Deps{}.Index(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	Deps{}.Index(rec, webRequestWithUser(http.MethodGet, "/", adminSessionUser()))
 	body := rec.Body.String()
 	if !strings.Contains(body, "v0.3 discovery") {
 		t.Fatalf("index missing current v0.3 scope in body=%s", body)
 	}
 	if strings.Contains(body, "v0.1") {
 		t.Fatalf("index still describes the dashboard as v0.1-only: %s", body)
+	}
+}
+
+func webRequestWithUser(method, target string, user auth.UserContext) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	return req.WithContext(auth.NewContext(req.Context(), user))
+}
+
+func adminSessionUser() auth.UserContext {
+	return auth.UserContext{
+		UserID:           "admin",
+		Role:             "admin",
+		Scopes:           []string{"admin"},
+		CredentialSource: auth.CredentialSession,
 	}
 }
 

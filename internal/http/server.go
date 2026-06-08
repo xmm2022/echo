@@ -45,6 +45,7 @@ type Deps struct {
 	Restore    *handlers.RestoreDeps
 	Stream     *handlers.StreamDeps
 	API        *handlers.APIDeps
+	Session    handlers.SessionHTTPConfig
 	Bootstrap  *handlers.APIDeps
 	Web        *web.Deps
 	// Emby mounts the Emby reverse-proxy routes (reserved /stream + /error token
@@ -93,12 +94,26 @@ func HandlerWithDeps(deps Deps) http.Handler {
 		r.Handle("/metrics", promhttp.Handler())
 	}
 
-	// Public, data-free dashboard shell + vendored assets (browser auth happens
-	// client-side: the admin pastes the token, app.js attaches it to /ui + /api).
+	// Public, data-free browser shells + vendored assets. Browser-auth handlers can
+	// observe an optional session context when present, but anonymous users still
+	// reach the shell routes.
 	if deps.Web != nil {
-		r.Get("/", deps.Web.Index)
-		r.Get("/app", deps.Web.App)
-		r.Handle("/static/*", web.Static())
+		r.Group(func(r chi.Router) {
+			r.Use(authmw.OptionalAuth(deps.AuthCheck))
+			r.Get("/login", deps.Web.Login)
+			r.Get("/", deps.Web.Index)
+			r.Get("/app", deps.Web.App)
+			r.Handle("/static/*", web.Static())
+		})
+	}
+
+	if deps.API != nil {
+		r.Post("/api/session/login", deps.API.LoginSession(deps.Session))
+		r.Group(func(r chi.Router) {
+			r.Use(authmw.OptionalAuth(deps.AuthCheck))
+			r.Get("/api/session/me", deps.API.GetSessionMe)
+			r.With(authmw.CSRF).Post("/api/session/logout", deps.API.LogoutSession(deps.Session))
+		})
 	}
 
 	if deps.Bootstrap != nil {
@@ -132,6 +147,7 @@ func HandlerWithDeps(deps Deps) http.Handler {
 		// Control-plane JSON + dashboard fragments: bounded by a request timeout.
 		r.Group(func(r chi.Router) {
 			r.Use(chimw.Timeout(controlPlaneTimeout))
+			r.Use(authmw.CSRF)
 			if deps.API != nil {
 				deps.API.Mount(r)
 			}

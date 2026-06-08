@@ -35,9 +35,11 @@ var appForbiddenFragments = []string{
 	"default_args_json",
 }
 
-func TestAppShellRendersTokenBoxAndNoAdminDiscoveryFragments(t *testing.T) {
+func TestAppShellRendersSessionPanelsAndNoTokenBox(t *testing.T) {
+	user := appUser("discovery")
+	user.CredentialSource = auth.CredentialSession
 	rec := httptest.NewRecorder()
-	Deps{}.App(rec, httptest.NewRequest(http.MethodGet, "/app", nil))
+	Deps{}.App(rec, webRequestWithUser(http.MethodGet, "/app", user))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -45,7 +47,6 @@ func TestAppShellRendersTokenBoxAndNoAdminDiscoveryFragments(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Echo App",
-		`id="app-token"`,
 		`hx-get="/app/discover"`,
 		`hx-get="/app/requests"`,
 		`hx-get="/app/account"`,
@@ -54,6 +55,11 @@ func TestAppShellRendersTokenBoxAndNoAdminDiscoveryFragments(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("app shell missing %q in body=%s", want, body)
+		}
+	}
+	for _, bad := range []string{`id="app-token"`, "echo_app_token", "echo_admin_token"} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("app shell rendered token UI %q: %s", bad, body)
 		}
 	}
 	assertNoAppForbiddenFragments(t, body)
@@ -104,45 +110,32 @@ func TestAppFragmentsNeverRenderAdminDiscoveryControls(t *testing.T) {
 	}
 }
 
-func TestAppJSTokenRoutingKeepsAdminAndUserTokensSeparate(t *testing.T) {
+func TestAppJSSessionAuthGlueStatic(t *testing.T) {
 	raw, err := os.ReadFile("static/app.js")
 	if err != nil {
 		t.Fatalf("read app.js: %v", err)
 	}
 	js := string(raw)
 	for _, want := range []string{
-		`var ADMIN_KEY = "echo_admin_token";`,
-		`var APP_KEY = "echo_app_token";`,
-		`function tokenForPath(path)`,
+		`var csrfToken = "";`,
+		`function refreshSession()`,
+		`"/api/session/me"`,
+		`"X-CSRF-Token"`,
+		`window.location.href = "/login"`,
 		`htmx.config.allowScriptTags = false`,
-		`path.indexOf("/api/me/") === 0`,
-		`path.indexOf("/static/") === 0`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing %q", want)
 		}
 	}
-	if !strings.Contains(js, `path.indexOf("/api/me/") === 0 || path.indexOf("/app/") === 0`) ||
-		!strings.Contains(js, `return (localStorage.getItem(APP_KEY) || "").trim();`) {
-		t.Fatalf("app.js does not route /api/me/ and /app/ requests only to APP_KEY")
-	}
-	if !strings.Contains(js, `path.indexOf("/ui/") === 0 || path.indexOf("/api/") === 0`) ||
-		!strings.Contains(js, `return (localStorage.getItem(ADMIN_KEY) || "").trim();`) {
-		t.Fatalf("app.js does not route /ui/ and admin /api/ requests only to ADMIN_KEY")
-	}
-	for _, bad := range []string{
-		`localStorage.getItem(APP_KEY) || localStorage.getItem(ADMIN_KEY)`,
-		`localStorage.getItem(ADMIN_KEY) || localStorage.getItem(APP_KEY)`,
-		`localStorage.getItem(APP_KEY) || token`,
-		`localStorage.getItem(ADMIN_KEY) || token`,
-	} {
+	for _, bad := range []string{"localStorage.getItem", "echo_admin_token", "echo_app_token", "Authorization"} {
 		if strings.Contains(js, bad) {
-			t.Fatalf("app.js allows token fallback through %q", bad)
+			t.Fatalf("app.js still contains bearer-token glue %q", bad)
 		}
 	}
 }
 
-func TestAppJSTokenRoutingRuntime(t *testing.T) {
+func TestAppJSSessionAuthGlueRuntime(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
 	}
@@ -150,68 +143,297 @@ func TestAppJSTokenRoutingRuntime(t *testing.T) {
 const fs = require("fs");
 const vm = require("vm");
 const listeners = {};
+const elements = {};
 const document = {
   addEventListener: function (name, handler) {
     (listeners[name] || (listeners[name] = [])).push(handler);
   },
-  getElementById: function () { return null; }
+  getElementById: function (id) {
+    return elements[id] || null;
+  },
+  querySelectorAll: function () { return []; }
 };
-const store = {
-  echo_app_token: " app-token ",
-  echo_admin_token: " admin-token "
-};
-const localStorage = {
-  getItem: function (key) { return store[key] || ""; },
-  setItem: function (key, value) { store[key] = value; }
-};
+const locationState = { origin: "https://echo.test", href: "https://echo.test/login" };
+const alerts = [];
+const reloadEvents = [];
 const window = {
-  location: { origin: "https://echo.test" },
-  htmx: { config: { allowScriptTags: true }, trigger: function () {} }
+  location: locationState,
+  htmx: {
+    config: { allowScriptTags: true },
+    trigger: function (target, name) { reloadEvents.push({ target: target, name: name }); }
+  }
 };
+const fetchCalls = [];
+let sessionMeCalls = 0;
+let managementCalls = 0;
+let logoutCalls = 0;
+function response(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status: status,
+    json: function () { return Promise.resolve(body); },
+    text: function () { return Promise.resolve(JSON.stringify(body)); }
+  };
+}
 const context = {
   URL: URL,
-  alert: function (msg) { throw new Error(msg); },
+  alert: function (msg) { alerts.push(msg); },
   console: console,
   document: document,
-  fetch: function () { return Promise.resolve({ ok: true }); },
-  localStorage: localStorage,
-  location: { reload: function () {} },
+  fetch: function (url, opts) {
+    opts = opts || {};
+    fetchCalls.push({ url: url, opts: opts });
+    if (url === "/api/session/me") {
+      sessionMeCalls++;
+      const csrfTokens = ["csrf-session", "csrf-refresh", "csrf-logout"];
+      return Promise.resolve(response(200, {
+        authenticated: true,
+        csrf_token: csrfTokens[Math.min(sessionMeCalls - 1, csrfTokens.length - 1)],
+        user: { id: "u1", role: "user", scopes: ["discovery"] }
+      }));
+    }
+    if (url === "/api/emby/servers") {
+      managementCalls++;
+      if (managementCalls === 1) {
+        return Promise.resolve(response(403, { error: "csrf-token-invalid" }));
+      }
+      return Promise.resolve(response(204, {}));
+    }
+    if (url === "/api/session/logout") {
+      logoutCalls++;
+      if (logoutCalls === 1) {
+        return Promise.resolve(response(403, { error: "csrf-token-invalid" }));
+      }
+      return Promise.resolve(response(204, {}));
+    }
+    if (url === "/api/session/login") {
+      const body = JSON.parse(opts.body || "{}");
+      const admin = body.username === "admin";
+      return Promise.resolve(response(200, {
+        authenticated: true,
+        csrf_token: "csrf-login",
+        user: { id: admin ? "admin" : "u1", role: admin ? "admin" : "user", scopes: admin ? ["admin"] : ["discovery"] }
+      }));
+    }
+    return Promise.resolve(response(204, {}));
+  },
+  location: locationState,
   window: window
 };
 context.globalThis = context;
-vm.runInNewContext(fs.readFileSync("static/app.js", "utf8"), context, { filename: "app.js" });
 
-function authFor(path) {
-  const evt = { detail: { path: path, headers: {} } };
-  (listeners["htmx:configRequest"] || []).forEach(function (handler) { handler(evt); });
-  return evt.detail.headers.Authorization || "";
+function input(name, value, type) {
+  return {
+    getAttribute: function (attr) {
+      if (attr === "name") return name;
+      if (attr === "type") return type || "text";
+      return "";
+    },
+    value: value,
+    checked: false
+  };
 }
 
-const got = {
-  appAPI: authFor("/api/me/discovery/catalog"),
-  appFragment: authFor("/app/discover"),
-  adminAPI: authFor("/api/discovery/subscriptions"),
-  adminUI: authFor("/ui/jobs"),
-  staticAsset: authFor("/static/app.js"),
-  external: authFor("https://evil.test/api/me/discovery/catalog")
-};
-const want = {
-  appAPI: "Bearer app-token",
-  appFragment: "Bearer app-token",
-  adminAPI: "Bearer admin-token",
-  adminUI: "Bearer admin-token",
-  staticAsset: "",
-  external: ""
-};
-for (const key of Object.keys(want)) {
-  if (got[key] !== want[key]) {
-    throw new Error(key + " auth=" + JSON.stringify(got[key]) + ", want " + JSON.stringify(want[key]));
+function loginForm(next, username) {
+  return {
+    tagName: "FORM",
+    id: "login-form",
+    getAttribute: function (name) {
+      if (name === "id") return "login-form";
+      if (name === "data-next") return next;
+      return "";
+    },
+    querySelectorAll: function () {
+      return [input("username", username, "text"), input("password", "pw", "password")];
+    },
+    closest: function () { return null; }
+  };
+}
+
+function managementForm() {
+  return {
+    tagName: "FORM",
+    id: "management-form",
+    getAttribute: function (name) {
+      if (name === "id") return "management-form";
+      if (name === "hx-post") return "/api/emby/servers";
+      return "";
+    },
+    querySelectorAll: function () {
+      return [input("name", "Main", "text")];
+    },
+    closest: function (selector) {
+      if (selector !== "section") return null;
+      return {
+        querySelector: function (query) {
+          if (query === "[data-reload]") return { id: "management-panel" };
+          return null;
+        }
+      };
+    }
+  };
+}
+
+function logoutForm() {
+  return {
+    tagName: "FORM",
+    id: "logout-form",
+    getAttribute: function (name) {
+      if (name === "id") return "logout-form";
+      if (name === "hx-post") return "/api/session/logout";
+      return "";
+    },
+    querySelectorAll: function () { return []; },
+    closest: function () { return null; }
+  };
+}
+
+function dispatch(name, evt) {
+  (listeners[name] || []).forEach(function (handler) { handler(evt); });
+}
+
+function csrfFor(path, method) {
+  const evt = { detail: { path: path, verb: method, headers: {} } };
+  dispatch("htmx:configRequest", evt);
+  return evt.detail.headers["X-CSRF-Token"] || "";
+}
+
+function tick() {
+  return new Promise(function (resolve) { setImmediate(resolve); });
+}
+
+(async function () {
+  vm.runInNewContext(fs.readFileSync("static/app.js", "utf8"), context, { filename: "app.js" });
+  dispatch("DOMContentLoaded", {});
+  await tick();
+  await tick();
+
+  if (window.htmx.config.allowScriptTags !== false) {
+    throw new Error("htmx allowScriptTags was not disabled");
   }
-}
-(listeners["DOMContentLoaded"] || []).forEach(function (handler) { handler(); });
-if (window.htmx.config.allowScriptTags !== false) {
-  throw new Error("htmx allowScriptTags was not disabled");
-}
+  const meCall = fetchCalls.find(function (call) { return call.url === "/api/session/me"; });
+  if (!meCall || meCall.opts.credentials !== "same-origin") {
+    throw new Error("/api/session/me did not use same-origin credentials");
+  }
+
+  const checks = {
+    postAPI: csrfFor("/api/me/discovery/requests", "POST"),
+    getAPI: csrfFor("/api/me/discovery/catalog", "GET"),
+    staticAsset: csrfFor("/static/app.js", "GET"),
+    external: csrfFor("https://evil.test/api/me/discovery/requests", "POST")
+  };
+  if (checks.postAPI !== "csrf-session") {
+    throw new Error("POST CSRF=" + JSON.stringify(checks.postAPI) + ", want csrf-session");
+  }
+  for (const key of ["getAPI", "staticAsset", "external"]) {
+    if (checks[key] !== "") {
+      throw new Error(key + " CSRF=" + JSON.stringify(checks[key]) + ", want empty");
+    }
+  }
+
+  const beforeSaveCalls = fetchCalls.length;
+  dispatch("submit", {
+    target: managementForm(),
+    preventDefault: function () {},
+    stopPropagation: function () {}
+  });
+  await tick();
+  await tick();
+  await tick();
+  await tick();
+
+  const afterSaveCalls = fetchCalls.slice(beforeSaveCalls);
+  const saveCalls = afterSaveCalls.filter(function (call) { return call.url === "/api/emby/servers"; });
+  if (saveCalls.length !== 2) {
+    throw new Error("management save calls=" + saveCalls.length + ", want stale attempt plus retry");
+  }
+  const firstCSRF = saveCalls[0].opts.headers["X-CSRF-Token"] || "";
+  const retryCSRF = saveCalls[1].opts.headers["X-CSRF-Token"] || "";
+  if (firstCSRF !== "csrf-session") {
+    throw new Error("first save CSRF=" + JSON.stringify(firstCSRF) + ", want csrf-session");
+  }
+  if (retryCSRF !== "csrf-refresh") {
+    throw new Error("retry save CSRF=" + JSON.stringify(retryCSRF) + ", want csrf-refresh");
+  }
+  const refreshCalls = afterSaveCalls.filter(function (call) { return call.url === "/api/session/me"; });
+  if (refreshCalls.length !== 1) {
+    throw new Error("refresh calls after stale CSRF=" + refreshCalls.length + ", want 1");
+  }
+
+  const beforeLogoutCalls = fetchCalls.length;
+  dispatch("submit", {
+    target: logoutForm(),
+    preventDefault: function () {},
+    stopPropagation: function () {}
+  });
+  await tick();
+  await tick();
+  await tick();
+  await tick();
+
+  const afterLogoutCalls = fetchCalls.slice(beforeLogoutCalls);
+  const logoutFetches = afterLogoutCalls.filter(function (call) { return call.url === "/api/session/logout"; });
+  if (logoutFetches.length !== 2) {
+    throw new Error("logout calls=" + logoutFetches.length + ", want stale attempt plus retry");
+  }
+  const logoutFirstCSRF = logoutFetches[0].opts.headers["X-CSRF-Token"] || "";
+  const logoutRetryCSRF = logoutFetches[1].opts.headers["X-CSRF-Token"] || "";
+  if (logoutFirstCSRF !== "csrf-refresh") {
+    throw new Error("first logout CSRF=" + JSON.stringify(logoutFirstCSRF) + ", want csrf-refresh");
+  }
+  if (logoutRetryCSRF !== "csrf-logout") {
+    throw new Error("retry logout CSRF=" + JSON.stringify(logoutRetryCSRF) + ", want csrf-logout");
+  }
+  const logoutRefreshCalls = afterLogoutCalls.filter(function (call) { return call.url === "/api/session/me"; });
+  if (logoutRefreshCalls.length !== 1) {
+    throw new Error("logout refresh calls=" + logoutRefreshCalls.length + ", want 1");
+  }
+  if (window.location.href !== "/login") {
+    throw new Error("logout redirect href=" + JSON.stringify(window.location.href) + ", want /login");
+  }
+
+  locationState.href = "https://echo.test/app";
+  dispatch("htmx:responseError", { detail: { xhr: { status: 401 } } });
+  if (window.location.href !== "/login") {
+    throw new Error("401 redirect href=" + JSON.stringify(window.location.href));
+  }
+
+  const beforeLoginCalls = fetchCalls.length;
+  dispatch("submit", {
+    target: loginForm("/app", "u1"),
+    preventDefault: function () {},
+    stopPropagation: function () {}
+  });
+  await tick();
+  await tick();
+  const loginCall = fetchCalls.slice(beforeLoginCalls).find(function (call) { return call.url === "/api/session/login"; });
+  if (!loginCall) {
+    throw new Error("login form did not call /api/session/login");
+  }
+  if (loginCall.opts.credentials !== "same-origin") {
+    throw new Error("login credentials=" + JSON.stringify(loginCall.opts.credentials) + ", want same-origin");
+  }
+  if (window.location.href !== "/app") {
+    throw new Error("safe next redirect href=" + JSON.stringify(window.location.href) + ", want /app");
+  }
+
+  dispatch("submit", {
+    target: loginForm("//evil.test", "admin"),
+    preventDefault: function () {},
+    stopPropagation: function () {}
+  });
+  await tick();
+  await tick();
+  if (window.location.href !== "/") {
+    throw new Error("unsafe admin next href=" + JSON.stringify(window.location.href) + ", want /");
+  }
+  if (alerts.length !== 0) {
+    throw new Error("unexpected alerts: " + JSON.stringify(alerts));
+  }
+})().catch(function (err) {
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+});
 `
 	cmd := exec.Command("node", "-e", script)
 	cmd.Dir = "."
@@ -388,7 +610,7 @@ func TestAdminIndexDoesNotEmbedUserRequestData(t *testing.T) {
 	createAppMediaRequest(t, fixture.service, fixture.user.UserID, fixture.target.ID, "701", "movie")
 
 	rec := httptest.NewRecorder()
-	Deps{Store: fixture.store, Media: fixture.service}.Index(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	Deps{Store: fixture.store, Media: fixture.service}.Index(rec, webRequestWithUser(http.MethodGet, "/", adminSessionUser()))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin index status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}

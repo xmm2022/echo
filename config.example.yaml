@@ -2,19 +2,24 @@ server:
   bind: ":8080"
   read_timeout: 30s
   write_timeout: 60s
+  trust_proxy_headers: false
 
 database:
   path: /data/echo.db
 
 auth:
-  # bootstrap_admin_token: operator credential used ONLY to mint admin API
-  # tokens (including recovery after all admin tokens are lost/revoked). It does
-  # NOT authenticate ordinary /api or /ui requests. Required for `serve`.
+  # bootstrap_admin_token: operator credential used for initial admin browser
+  # password setup and admin API token minting/recovery. It does NOT
+  # authenticate ordinary /api or /ui requests. Required for `serve`.
   bootstrap_admin_token: "${ECHO_BOOTSTRAP_ADMIN_TOKEN}"
   # admin_token: deprecated v0.1 static credential, accepted for backward
   # compatibility only — not a long-term management credential. Manage access
   # via DB-backed API tokens minted through the bootstrap endpoint.
   # admin_token: "${ECHO_ADMIN_TOKEN}"
+  session_cookie_name: echo_session
+  session_ttl: 168h
+  session_touch_interval: 5m
+  secure_cookies: auto
 
 sidecar:
   default:

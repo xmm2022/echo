@@ -139,6 +139,40 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 	return items, nil
 }
 
+const touchUserLogin = `-- name: TouchUserLogin :exec
+UPDATE users
+SET last_login_at = ?, updated_at = ?
+WHERE id = ?
+`
+
+type TouchUserLoginParams struct {
+	LastLoginAt sql.NullInt64 `json:"last_login_at"`
+	UpdatedAt   int64         `json:"updated_at"`
+	ID          string        `json:"id"`
+}
+
+func (q *Queries) TouchUserLogin(ctx context.Context, arg TouchUserLoginParams) error {
+	_, err := q.db.ExecContext(ctx, touchUserLogin, arg.LastLoginAt, arg.UpdatedAt, arg.ID)
+	return err
+}
+
+const updateUserPasswordHash = `-- name: UpdateUserPasswordHash :exec
+UPDATE users
+SET password_hash = ?, updated_at = ?
+WHERE id = ?
+`
+
+type UpdateUserPasswordHashParams struct {
+	PasswordHash sql.NullString `json:"password_hash"`
+	UpdatedAt    int64          `json:"updated_at"`
+	ID           string         `json:"id"`
+}
+
+func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) error {
+	_, err := q.db.ExecContext(ctx, updateUserPasswordHash, arg.PasswordHash, arg.UpdatedAt, arg.ID)
+	return err
+}
+
 const updateUserStatus = `-- name: UpdateUserStatus :exec
 UPDATE users
 SET status = ?, updated_at = ?
