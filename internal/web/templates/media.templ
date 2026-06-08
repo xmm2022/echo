@@ -70,25 +70,26 @@ templ AppShell() {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>Echo App</title>
 			<script src="/static/htmx.min.js"></script>
+			<link rel="stylesheet" href="/static/app.css"/>
 			<script src="/static/app.js"></script>
 		</head>
 		<body>
-			<header>
+			<header class="echo-topbar">
 				<h1>Echo App</h1>
 				<form hx-post="/api/session/logout" hx-swap="none"><button type="submit">Sign out</button></form>
 			</header>
-			<main>
-				<section aria-labelledby="media-discover-heading">
+			<main class="echo-app-shell">
+				<section class="echo-panel echo-panel--search" aria-labelledby="media-discover-heading">
 					<h2 id="media-discover-heading">Discover</h2>
-					<div id="media-discover-panel" data-reload="true" hx-get="/app/discover" hx-trigger="load, reload" hx-target="this">Loading...</div>
+					<div id="media-discover-panel" class="echo-loading" data-reload="true" hx-get="/app/discover" hx-trigger="load, reload" hx-target="this">Loading...</div>
 				</section>
-				<section aria-labelledby="media-requests-heading">
+				<section class="echo-panel echo-panel--requests" aria-labelledby="media-requests-heading">
 					<h2 id="media-requests-heading">Requests</h2>
-					<div id="media-requests-panel" data-reload="true" hx-get="/app/requests" hx-trigger="load, reload" hx-target="this">Loading...</div>
+					<div id="media-requests-panel" class="echo-loading" data-reload="true" hx-get="/app/requests" hx-trigger="load, reload" hx-target="this">Loading...</div>
 				</section>
-				<section aria-labelledby="media-account-heading">
+				<section class="echo-panel echo-panel--subscriptions" aria-labelledby="media-account-heading">
 					<h2 id="media-account-heading">Subscriptions</h2>
-					<div id="media-account-panel" data-reload="true" hx-get="/app/account" hx-trigger="load, reload" hx-target="this">Loading...</div>
+					<div id="media-account-panel" class="echo-loading" data-reload="true" hx-get="/app/account" hx-trigger="load, reload" hx-target="this">Loading...</div>
 				</section>
 			</main>
 		</body>
@@ -96,101 +97,84 @@ templ AppShell() {
 }
 
 templ MediaSearchPanel() {
-	<form hx-get="/app/discover" hx-target="#media-discover-panel" hx-swap="innerHTML">
-		<label for="media-query">Search</label>
-		<input id="media-query" name="q" type="search" maxlength="120" required/>
-		<label for="media-type">Type</label>
-		<select id="media-type" name="type">
-			<option value="movie">Movie</option>
-			<option value="tv">TV</option>
-		</select>
-		<label for="media-language">Language</label>
-		<input id="media-language" name="language" value="zh-CN" maxlength="32"/>
+	<form class="media-search-form" hx-get="/app/discover" hx-target="#media-discover-panel" hx-swap="innerHTML">
+		<div class="media-field">
+			<label for="media-query">Search</label>
+			<input id="media-query" name="q" type="search" maxlength="120" required/>
+		</div>
+		<div class="media-field">
+			<label for="media-type">Type</label>
+			<select id="media-type" name="type">
+				<option value="movie">Movie</option>
+				<option value="tv">TV</option>
+			</select>
+		</div>
+		<div class="media-field">
+			<label for="media-language">Language</label>
+			<input id="media-language" name="language" value="zh-CN" maxlength="32"/>
+		</div>
 		<button type="submit">Search</button>
 	</form>
 }
 
 templ MediaSearchResults(rows []media.TMDBSummaryDTO, targets []media.TargetDTO) {
-	<section aria-labelledby="media-results-heading">
+	<section class="media-results" aria-labelledby="media-results-heading">
 		<h3 id="media-results-heading">Search results</h3>
 		if len(rows) == 0 {
-			<p>No search results.</p>
+			<p class="echo-empty">No search results.</p>
 		} else {
-			for _, row := range rows {
-				<article>
-					if mediaPosterURL(row.PosterPath) != "" {
-						<img src={ mediaPosterURL(row.PosterPath) } width="64" height="96" alt={ "Poster for " + row.Title } loading="lazy"/>
-					}
-					<h4>{ row.Title }</h4>
-					<p>{ row.MediaType } { mediaYear(row.ReleaseYear) }</p>
-					if row.Overview != "" {
-						<p>{ row.Overview }</p>
-					}
-					if len(mediaTargetsFor(row.MediaType, targets)) > 0 {
-						<form hx-post="/api/me/discovery/requests" hx-swap="none">
-							<input type="hidden" name="tmdb_id" value={ row.TMDBID }/>
-							<input type="hidden" name="media_type" value={ row.MediaType }/>
-							<input type="hidden" name="tmdb_language" value="zh-CN"/>
-							<label for={ "media-target-" + row.MediaType + "-" + row.TMDBID }>Target</label>
-							<select id={ "media-target-" + row.MediaType + "-" + row.TMDBID } name="target_id" data-type="number">
-								for _, target := range mediaTargetsFor(row.MediaType, targets) {
-									<option value={ strconv.FormatInt(target.ID, 10) } selected?={ target.ID == mediaDefaultTargetID(mediaTargetsFor(row.MediaType, targets)) }>{ mediaTargetOptionLabel(target) }</option>
-								}
-							</select>
-							<label for={ "media-note-" + row.MediaType + "-" + row.TMDBID }>Note</label>
-							<input id={ "media-note-" + row.MediaType + "-" + row.TMDBID } name="user_note" maxlength="1000"/>
-							<button type="submit">Request</button>
-						</form>
-					} else {
-						<p>No available target for this type.</p>
-					}
-				</article>
-			}
+			<div class="media-results-grid">
+				for _, row := range rows {
+					<article class="media-result-card">
+						if mediaPosterURL(row.PosterPath) != "" {
+							<img class="media-result-poster" src={ mediaPosterURL(row.PosterPath) } width="76" height="114" alt={ "Poster for " + row.Title } loading="lazy"/>
+						} else {
+							<div class="media-result-poster media-result-poster--empty" aria-hidden="true"></div>
+						}
+						<div class="media-result-body">
+							<h4>{ row.Title }</h4>
+							<p class="media-result-meta">{ row.MediaType } { mediaYear(row.ReleaseYear) }</p>
+							if row.Overview != "" {
+								<p class="media-result-overview">{ row.Overview }</p>
+							}
+							if len(mediaTargetsFor(row.MediaType, targets)) > 0 {
+								<form class="media-request-form" hx-post="/api/me/discovery/requests" hx-swap="none">
+									<input type="hidden" name="tmdb_id" value={ row.TMDBID }/>
+									<input type="hidden" name="media_type" value={ row.MediaType }/>
+									<input type="hidden" name="tmdb_language" value="zh-CN"/>
+									<div class="media-field">
+										<label for={ "media-target-" + row.MediaType + "-" + row.TMDBID }>Target</label>
+										<select id={ "media-target-" + row.MediaType + "-" + row.TMDBID } name="target_id" data-type="number">
+											for _, target := range mediaTargetsFor(row.MediaType, targets) {
+												<option value={ strconv.FormatInt(target.ID, 10) } selected?={ target.ID == mediaDefaultTargetID(mediaTargetsFor(row.MediaType, targets)) }>{ mediaTargetOptionLabel(target) }</option>
+											}
+										</select>
+									</div>
+									<div class="media-field">
+										<label for={ "media-note-" + row.MediaType + "-" + row.TMDBID }>Note</label>
+										<input id={ "media-note-" + row.MediaType + "-" + row.TMDBID } name="user_note" maxlength="1000"/>
+									</div>
+									<button type="submit">Request</button>
+								</form>
+							} else {
+								<p class="echo-empty">No available target for this type.</p>
+							}
+						</div>
+					</article>
+				}
+			</div>
 		}
 	</section>
 }
 
 templ MediaRequestsTable(rows []media.RequestDTO) {
 	if len(rows) == 0 {
-		<p>No requests.</p>
+		<p class="echo-empty">No requests.</p>
 	} else {
-		<table>
-			<thead>
-				<tr><th>ID</th><th>Title</th><th>Type</th><th>Target</th><th>Status</th><th>Reason</th><th>Created</th><th></th></tr>
-			</thead>
-			<tbody>
-				for _, row := range rows {
-					<tr>
-						<td>{ strconv.FormatInt(row.ID, 10) }</td>
-						<td>{ row.Title }</td>
-						<td>{ row.MediaType }</td>
-						<td>{ row.TargetLabel }</td>
-						<td>{ row.Status }</td>
-						<td>{ row.SafeReason }</td>
-						<td>{ mediaInt64(row.CreatedAt) }</td>
-						<td>
-							if row.Status == "pending_review" {
-								<form hx-post={ "/api/me/discovery/requests/" + strconv.FormatInt(row.ID, 10) + "/cancel" } hx-swap="none">
-									<button type="submit">Cancel</button>
-								</form>
-							}
-						</td>
-					</tr>
-				}
-			</tbody>
-		</table>
-	}
-}
-
-templ MediaSubscriptionsTable(rows []media.SubscriptionDTO) {
-	<section aria-labelledby="media-subscriptions-heading">
-		<h3 id="media-subscriptions-heading">Subscription status</h3>
-		if len(rows) == 0 {
-			<p>No subscriptions.</p>
-		} else {
+		<div class="echo-table-scroll">
 			<table>
 				<thead>
-					<tr><th>ID</th><th>Title</th><th>Type</th><th>Target</th><th>User</th><th>Pipeline</th><th>Latest</th><th>Updated</th><th></th></tr>
+					<tr><th>ID</th><th>Title</th><th>Type</th><th>Target</th><th>Status</th><th>Reason</th><th>Created</th><th></th></tr>
 				</thead>
 				<tbody>
 					for _, row := range rows {
@@ -199,18 +183,13 @@ templ MediaSubscriptionsTable(rows []media.SubscriptionDTO) {
 							<td>{ row.Title }</td>
 							<td>{ row.MediaType }</td>
 							<td>{ row.TargetLabel }</td>
-							<td>{ row.UserStatus }</td>
-							<td>{ row.PipelineStatus }</td>
-							<td>{ row.LatestState }</td>
-							<td>{ mediaInt64(row.UpdatedAt) }</td>
+							<td><span class={ "media-status media-status--" + row.Status }>{ row.Status }</span></td>
+							<td>{ row.SafeReason }</td>
+							<td>{ mediaInt64(row.CreatedAt) }</td>
 							<td>
-								if row.UserStatus == "active" {
-									<form hx-post={ "/api/me/discovery/subscriptions/" + strconv.FormatInt(row.ID, 10) + "/pause" } hx-swap="none">
-										<button type="submit">Pause</button>
-									</form>
-								} else if row.UserStatus == "paused" {
-									<form hx-post={ "/api/me/discovery/subscriptions/" + strconv.FormatInt(row.ID, 10) + "/resume" } hx-swap="none">
-										<button type="submit">Resume</button>
+								if row.Status == "pending_review" {
+									<form hx-post={ "/api/me/discovery/requests/" + strconv.FormatInt(row.ID, 10) + "/cancel" } hx-swap="none">
+										<button type="submit">Cancel</button>
 									</form>
 								}
 							</td>
@@ -218,6 +197,48 @@ templ MediaSubscriptionsTable(rows []media.SubscriptionDTO) {
 					}
 				</tbody>
 			</table>
+		</div>
+	}
+}
+
+templ MediaSubscriptionsTable(rows []media.SubscriptionDTO) {
+	<section aria-labelledby="media-subscriptions-heading">
+		<h3 id="media-subscriptions-heading">Subscription status</h3>
+		if len(rows) == 0 {
+			<p class="echo-empty">No subscriptions.</p>
+		} else {
+			<div class="echo-table-scroll">
+				<table>
+					<thead>
+						<tr><th>ID</th><th>Title</th><th>Type</th><th>Target</th><th>User</th><th>Pipeline</th><th>Latest</th><th>Updated</th><th></th></tr>
+					</thead>
+					<tbody>
+						for _, row := range rows {
+							<tr>
+								<td>{ strconv.FormatInt(row.ID, 10) }</td>
+								<td>{ row.Title }</td>
+								<td>{ row.MediaType }</td>
+								<td>{ row.TargetLabel }</td>
+								<td><span class={ "media-status media-status--" + row.UserStatus }>{ row.UserStatus }</span></td>
+								<td><span class={ "media-status media-status--" + row.PipelineStatus }>{ row.PipelineStatus }</span></td>
+								<td><span class={ "media-status media-status--" + row.LatestState }>{ row.LatestState }</span></td>
+								<td>{ mediaInt64(row.UpdatedAt) }</td>
+								<td>
+									if row.UserStatus == "active" {
+										<form hx-post={ "/api/me/discovery/subscriptions/" + strconv.FormatInt(row.ID, 10) + "/pause" } hx-swap="none">
+											<button type="submit">Pause</button>
+										</form>
+									} else if row.UserStatus == "paused" {
+										<form hx-post={ "/api/me/discovery/subscriptions/" + strconv.FormatInt(row.ID, 10) + "/resume" } hx-swap="none">
+											<button type="submit">Resume</button>
+										</form>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</section>
 }
@@ -226,24 +247,26 @@ templ MediaCatalog(targets []media.TargetDTO) {
 	<section aria-labelledby="media-catalog-heading">
 		<h3 id="media-catalog-heading">Account status</h3>
 		if len(targets) == 0 {
-			<p>No targets available.</p>
+			<p class="echo-empty">No targets available.</p>
 		} else {
-			<table>
-				<thead>
-					<tr><th>Target</th><th>Type</th><th>Default</th><th>Requests</th><th>Search</th></tr>
-				</thead>
-				<tbody>
-					for _, target := range targets {
-						<tr>
-							<td>{ target.Label }</td>
-							<td>{ target.MediaType }</td>
-							<td>{ strconv.FormatBool(target.Default) }</td>
-							<td>{ target.RequestMode }</td>
-							<td>{ strconv.FormatBool(target.CanSearch) }</td>
-						</tr>
-					}
-				</tbody>
-			</table>
+			<div class="echo-table-scroll">
+				<table>
+					<thead>
+						<tr><th>Target</th><th>Type</th><th>Default</th><th>Requests</th><th>Search</th></tr>
+					</thead>
+					<tbody>
+						for _, target := range targets {
+							<tr>
+								<td>{ target.Label }</td>
+								<td>{ target.MediaType }</td>
+								<td>{ strconv.FormatBool(target.Default) }</td>
+								<td>{ target.RequestMode }</td>
+								<td>{ strconv.FormatBool(target.CanSearch) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</section>
 }

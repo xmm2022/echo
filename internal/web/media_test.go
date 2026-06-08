@@ -47,6 +47,12 @@ func TestAppShellRendersSessionPanelsAndNoTokenBox(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Echo App",
+		`/static/app.css`,
+		`class="echo-topbar"`,
+		`class="echo-app-shell"`,
+		`class="echo-panel echo-panel--search"`,
+		`class="echo-panel echo-panel--requests"`,
+		`class="echo-panel echo-panel--subscriptions"`,
 		`hx-get="/app/discover"`,
 		`hx-get="/app/requests"`,
 		`hx-get="/app/account"`,
@@ -107,6 +113,79 @@ func TestAppFragmentsNeverRenderAdminDiscoveryControls(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ui/jobs", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("MountAppUI registered admin /ui route: status=%d body=%s, want 404", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMediaRequestUXStructure(t *testing.T) {
+	fixture := newAppMediaFixture(t, "auto_approve")
+	structured := tmdb.Media{
+		TMDBID:      "701",
+		MediaType:   "movie",
+		Title:       "Structured Movie",
+		ReleaseYear: 2026,
+		PosterPath:  "/poster.jpg",
+		RawJSON:     `{}`,
+	}
+	fixture.fake.movies["701"] = structured
+	fixture.fake.searches["movie:structured"] = []tmdb.Media{structured}
+	createAppMediaRequest(t, fixture.service, fixture.user.UserID, fixture.target.ID, "701", "movie")
+
+	cases := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{
+			name: "discover shell",
+			path: "/app/discover",
+			want: []string{
+				`class="media-search-form"`,
+				`class="media-field"`,
+			},
+		},
+		{
+			name: "discover results",
+			path: "/app/discover?q=structured&type=movie&language=zh-CN",
+			want: []string{
+				`class="media-results-grid"`,
+				`class="media-result-card"`,
+				`class="media-result-poster"`,
+				`class="media-request-form"`,
+			},
+		},
+		{
+			name: "requests table",
+			path: "/app/requests",
+			want: []string{
+				`class="echo-table-scroll"`,
+				`class="media-status media-status--approved"`,
+			},
+		},
+		{
+			name: "account tables",
+			path: "/app/account",
+			want: []string{
+				`class="echo-table-scroll"`,
+				`class="media-status`,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := serveAppFragmentAs(t, Deps{Media: fixture.service}, fixture.user, tc.path)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s status=%d body=%s, want 200", tc.path, rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s missing %q in body=%s", tc.path, want, body)
+				}
+			}
+			assertAppSecurityHeaders(t, rec)
+			assertNoAppForbiddenFragments(t, body)
+		})
 	}
 }
 
