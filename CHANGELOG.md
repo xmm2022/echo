@@ -11,6 +11,7 @@
 - Removed browser localStorage token inputs from the admin and user shells.
 - Added a local CSS-backed `/app` media request UX slice with responsive panels, TMDB poster result cards, status badges, and mobile-safe table containers.
 - Added `TestMediaRequestUXStructure` coverage for `/app` CSS linkage, stable shell classes, search result card structure, and request/subscription table wrappers.
+- Added an `integration_real` real 115 sidecar preflight that validates sidecar URL reachability, version reads, admin storage-list authorization, and configured storage mount before the long ingest/restore/stream gate starts.
 
 Local verification recorded on 2026-06-08:
 
@@ -20,6 +21,7 @@ Local verification recorded on 2026-06-08:
 - `go test ./... -count=1`: `PASS`
 - `make migrate`: `PASS`
 - `make build`: `PASS`
+- `go test -tags=integration_real ./integration -run TestReal115Preflight -count=1`: blocked by operator env drift. The configured `ECHO_TEST_SIDECAR_URL` points to `127.0.0.1:5247` with no listener; when overridden to the running sidecar on `127.0.0.1:5246`, OpenList returns `code=401,message="token is invalidated"` for the configured token.
 
 ### v0.4 media requests
 
